@@ -1,18 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Button, Input, Select, InputNumber, Alert } from 'antd';
-import { Zap, Save, RefreshCw } from 'lucide-react';
+import { Button, Input, Select, Alert } from 'antd';
+import { Zap, KeyRound, SlidersHorizontal, Save, RefreshCw } from 'lucide-react';
 import { llmApi } from '../api';
-import type { ModelMeta } from '../types';
+import type { EntryView, LlmPurpose, ModelMeta, ProviderView } from '../types';
 
 /**
- * 模型管理(spec §3 / §11.4「授权」页)。
+ * 模型管理:三层(服务商凭证 → 模型条目 → 用途分配)。
+ * spec 2026-09-17-model-config-redesign —— 每层一张卡,配置只下沉不回落。
  *
- * 流程就是 §3 画的那条:选服务商 → 列该服务商的模型(本地 Ollama 实时拉)→
- * 选模型 → 自动填 contextWindow / maxOutput(可编辑)→ 标 ⚠️ 若未确认 →
- * 测试连接 → 保存。
- *
- * 前端标签页叫「授权」(`/auth`)而不是 spec 写的 `/settings` —— M3 已经建好了
- * 这个页面,模型管理挂在它下面,不新开一个 tab。
+ * 旧的 `purpose='main'|'tag'` 两卡设计(DEFAULT 逐项回落)已废弃:用途之间现在平级,
+ * `tag` 没配就是"未配置",不再偷偷沿用主模型 —— 那正是"以为在烧本地 4b,实际每批
+ * 都在打贵的主模型"的来源。
  */
 const PROVIDERS = [
   { value: 'ollama', label: '本地 Ollama', hint: '隐私 / 离线主力,默认 qwen2.5:14b' },
@@ -22,168 +20,302 @@ const PROVIDERS = [
   { value: 'custom', label: '自定义', hint: '任何 OpenAI 兼容端点' },
 ];
 
-/**
- * 模型配置卡片(§3)。`purpose='tag'` 渲染成「打标模型」——**底层与主模型共享**:
- * key / 接口地址留空就是"沿用主模型",后端读的时候逐项回落(见 llm/config.ts)。
- * 同一个组件跑两遍,别复制成第二个文件 —— 那才是两套迟早分叉的表单。
- */
-export default function ModelManager({ purpose = 'main' }: { purpose?: 'main' | 'tag' }) {
-  const isTag = purpose === 'tag';
-  const [provider, setProvider] = useState('ollama');
-  const [model, setModel] = useState('');
-  const [baseUrl, setBaseUrl] = useState('');
-  const [apiKey, setApiKey] = useState('');
-  const [contextWindow, setContextWindow] = useState<number | null>(null);
-  const [maxOutput, setMaxOutput] = useState<number | null>(null);
+export default function ModelManager() {
+  const [providers, setProviders] = useState<ProviderView[]>([]);
+  const [entries, setEntries] = useState<EntryView[]>([]);
+  const [assignments, setAssignments] = useState<Record<LlmPurpose, string | null> | null>(null);
 
-  const [models, setModels] = useState<ModelMeta[]>([]);
-  const [hasSavedKey, setHasSavedKey] = useState(false);
-  const [busy, setBusy] = useState<'' | 'models' | 'test' | 'save'>('');
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
-  /** 拉不到厂商模型列表时的软提示 —— 不是失败(已经退回内置表了),所以不走红条 */
-  const [modelsNote, setModelsNote] = useState('');
-
-  // 载入已存配置
-  useEffect(() => {
-    llmApi
-      .get(purpose)
-      .then((s) => {
-        // **只看 ownConfigured**:`configured` 是回落主模型之后的结果,
-        // tag 卡没配过时它也是 true —— 拿它回填会把主模型的值冒充成"打标模型已配好"
-        // (实测:baseUrl 被填成主模型的地址 → 改选 ollama 后本地模型列表直接空掉)。
-        // 没配过就留空,让下面那几个「留空 = 沿用主模型」的占位符真正生效。
-        //
-        // `?? configured`:这个字段是跟前端一起加的,而服务端没有 watch —— 浏览器先刷新、
-        // 服务端还没重启时会读到 undefined。退回旧行为,免得把"没配过"和"服务端没重启"
-        // 混成同一个结果(那会让这张卡配好了也永远填不上)。
-        const own = s.ownConfigured ?? s.configured;
-        if (!s.configured || !own) return;
-        setProvider(s.provider ?? 'ollama');
-        setModel(s.model ?? '');
-        setBaseUrl(s.baseUrl ?? '');
-        setContextWindow(s.contextWindow ?? null);
-        setMaxOutput(s.maxOutput ?? null);
-        setHasSavedKey(!!s.hasApiKey);
-      })
-      .catch(() => {});
+  const reload = useCallback(async () => {
+    const [p, e, a] = await Promise.all([
+      llmApi.providers(),
+      llmApi.entries(),
+      llmApi.assignments(),
+    ]);
+    setProviders(p);
+    setEntries(e);
+    setAssignments(a);
   }, []);
 
-  const loadModels = useCallback(async (p: string) => {
-    setError('');
-    setModelsNote('');
-    setBusy('models');
-    try {
-      if (p === 'ollama') {
-        // 本地实时拉 —— 用户装了什么只有 Ollama 自己知道(spec §3)。
-        // 在这一层就把形状统一成 ModelMeta,后面的代码不用认识两种模型对象
-        const res = await fetch(
-          `/api/settings/ollama-models?baseUrl=${encodeURIComponent(baseUrl)}`,
-        );
-        const body = (await res.json()) as {
-          models?: { name: string; contextWindow: number; maxOutput: number; detail?: string }[];
-          reason?: string;
-        };
-        if (!res.ok) throw new Error(body.reason ?? '拉取本地模型失败');
-        setModels(
-          (body.models ?? []).map((m) => ({
-            provider: 'ollama',
-            model: m.name,
-            contextWindow: m.contextWindow,
-            maxOutput: m.maxOutput,
-            // 本地模型的值是 Ollama 自己报的,不是我们猜的
-            verified: true,
-            ...(m.detail ? { note: m.detail } : {}),
-          })),
-        );
-      } else {
-        // **名字实时从厂商拉**(它才知道自己现在服务哪些模型),数字由服务端查注册表。
-        // 拉不到(还没填 key / 网络不通 / 端点不实现 /models)就退回内置那张表,
-        // 并说一句为什么 —— 别让下拉直接空掉,那样用户连"该干什么"都看不出来。
-        try {
-          setModels(await llmApi.listRemoteModels({ provider: p, baseUrl, apiKey }));
-        } catch (e) {
-          setModels(await llmApi.listModels(p));
-          setModelsNote(
-            `拉不到厂商的模型列表:${(e as Error).message}。先显示内置的那几个 —— ` +
-              `填上 API Key 再点「刷新」,或在下面直接打模型名。`,
-          );
-        }
+  useEffect(() => {
+    reload().catch(() => {});
+  }, [reload]);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, width: '100%' }}>
+      <ProviderCard providers={providers} onDone={reload} />
+      <EntryCard providers={providers} entries={entries} onDone={reload} />
+      <AssignCard entries={entries} assignments={assignments} onDone={reload} />
+    </div>
+  );
+}
+
+/**
+ * 拉某个服务商的模型名。
+ *
+ * ollama 走本地实时接口 —— 用户装了什么只有 Ollama 自己知道(spec §3)。在这一层就把
+ * 形状统一成 ModelMeta,后面的代码不用认识两种模型对象;其余走厂商 `/models`:
+ * **名字实时从厂商拉**(它才知道自己现在服务哪些模型),数字由服务端查注册表。
+ *
+ * 厂商拉不到(还没填 key / 网络不通 / 端点不实现 /models)就退回内置那张表,并把
+ * "为什么"用 `note` 带回去 —— 别让下拉直接空掉,那样用户连"该干什么"都看不出来。
+ * ollama 拉不到是**硬失败**(throw),调用方自己接。
+ *
+ * apiKey 只在调用时读,不进任何依赖 —— 旧版实测:放进依赖会让用户每敲一个字符就发
+ * 一次拉列表的请求。
+ */
+async function fetchModels(
+  provider: string,
+  baseUrl: string,
+  apiKey: string,
+): Promise<{ models: ModelMeta[]; note: string }> {
+  if (provider === 'ollama') {
+    const res = await fetch(
+      `/api/settings/ollama-models?baseUrl=${encodeURIComponent(baseUrl)}`,
+    );
+    const body = (await res.json()) as {
+      models?: { name: string; contextWindow: number; maxOutput: number; detail?: string }[];
+      reason?: string;
+    };
+    if (!res.ok) throw new Error(body.reason ?? '拉取本地模型失败');
+    return {
+      models: (body.models ?? []).map((m) => ({
+        provider: 'ollama',
+        model: m.name,
+        contextWindow: m.contextWindow,
+        maxOutput: m.maxOutput,
+        // 本地模型的值是 Ollama 自己报的,不是我们猜的
+        verified: true,
+        ...(m.detail ? { note: m.detail } : {}),
+      })),
+      note: '',
+    };
+  }
+
+  try {
+    return { models: await llmApi.listRemoteModels({ provider, baseUrl, apiKey }), note: '' };
+  } catch (e) {
+    return {
+      models: await llmApi.listModels(provider),
+      note:
+        `拉不到厂商的模型列表:${(e as Error).message}。先显示内置的那几个 —— ` +
+        `填上 API Key 再点「刷新」,或在下面直接打模型名。`,
+    };
+  }
+}
+
+/** 卡片外壳 + 标题行(旧 Zap 标题的样式,图标按卡片换) */
+function Card({
+  icon,
+  title,
+  hint,
+  children,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  hint: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="hud-panel" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        {icon}
+        <span className="hud-label" style={{ color: 'var(--accent)' }}>
+          {title}
+          <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)', marginLeft: 8 }}>
+            {hint}
+          </span>
+        </span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * 模型名下拉 + 刷新。**tags 模式是为了能自由输入模型名。** 厂商拉不到时(还没填 key)
+ * 下拉可能只有内置那几个,「自定义」端点更是一个都没有 —— 而"想用的模型不在表里"是
+ * 最正常不过的事。maxCount=1 让它在语义上仍然是单选,value/onChange 在这里做
+ * 数组↔字符串的转换,别处看到的还是 `model: string`。
+ */
+function ModelPicker({
+  id,
+  models,
+  value,
+  onChange,
+  busy,
+  onRefresh,
+}: {
+  id: string;
+  models: ModelMeta[];
+  value: string;
+  onChange: (v: string) => void;
+  busy: boolean;
+  onRefresh: () => void;
+}) {
+  return (
+    <>
+      <Select
+        id={id}
+        mode="tags"
+        maxCount={1}
+        value={value ? [value] : []}
+        onChange={(v: string[]) => onChange(v[0] ?? '')}
+        placeholder={busy ? '拉取中…' : '选一个,或直接打模型名'}
+        optionFilterProp="label"
+        style={{ width: 320 }}
+        options={models.map((m) => ({
+          value: m.model,
+          label: m.note ? `${m.model} · ${m.note}` : m.model,
+        }))}
+      />
+      <Button
+        size="small"
+        icon={<RefreshCw size={13} />}
+        loading={busy}
+        onClick={onRefresh}
+        style={{ marginLeft: 8 }}
+      >
+        刷新
+      </Button>
+    </>
+  );
+}
+
+/**
+ * 退回内置表的软提示。**不能是灰字。** 退回内置表和"厂商就这几个模型"在界面上长得
+ * 太像了 —— 用户会以为列表是拉出来的,于是问"为什么还是那两个老的"(真实反馈)。
+ * 用和旁边 ⚠️ 待确认同一套 warn 色,让"这是兜底的,不是厂商说的"一眼可见。
+ */
+function ModelsNote({ note }: { note: string }) {
+  if (!note) return null;
+  return (
+    <div style={{ fontSize: 'var(--fs-12)', color: 'var(--warn)', lineHeight: 1.6 }}>
+      ⚠️ {note}
+    </div>
+  );
+}
+
+// ── 卡 1:服务商凭证 ─────────────────────────────────────
+
+function ProviderCard({
+  providers,
+  onDone,
+}: {
+  providers: ProviderView[];
+  onDone: () => Promise<void>;
+}) {
+  const [provider, setProvider] = useState('ollama');
+  const [baseUrl, setBaseUrl] = useState('');
+  /** 用户动过 baseUrl 没有。没动过又不是新建 → **不带**这个字段,免得把已存端点冲空 */
+  const [baseUrlTouched, setBaseUrlTouched] = useState(false);
+  const [apiKey, setApiKey] = useState('');
+  const [editingId, setEditingId] = useState<string | null>(null);
+
+  const [models, setModels] = useState<ModelMeta[]>([]);
+  /** 测试连接要个模型名 —— 不落库,只喂给 test-llm */
+  const [model, setModel] = useState('');
+  const [modelsNote, setModelsNote] = useState('');
+  const [busy, setBusy] = useState<'' | 'models' | 'save' | 'test'>('');
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+
+  const loadModels = useCallback(
+    async (p: string) => {
+      setError('');
+      setModelsNote('');
+      setBusy('models');
+      try {
+        const r = await fetchModels(p, baseUrl, apiKey);
+        setModels(r.models);
+        setModelsNote(r.note);
+      } catch (e) {
+        setModels([]);
+        setError((e as Error).message);
+      } finally {
+        setBusy('');
       }
-    } catch (e) {
-      setModels([]);
-      setError((e as Error).message);
-    } finally {
-      setBusy('');
-    }
-    // 故意**不**把 apiKey 放进依赖:它在下面那个 useEffect 的依赖链上,放进去会让
-    // 用户每敲一个字符就发一次拉列表的请求。点「刷新」时用的是当次渲染的闭包,不漏。
-  }, [baseUrl]);
+    },
+    // 同 fetchModels:apiKey 故意不在这里,靠调用时的闭包取值
+    [baseUrl],
+  );
 
   useEffect(() => {
     void loadModels(provider);
   }, [provider, loadModels]);
 
   /**
-   * 换服务商 = 换端点 + 换模型名空间,所以上一家的这几项**必须清掉**。
+   * 换服务商 = 换端点 + 换模型名空间,所以上一家的这两项**必须清掉**。
    *
    * 不清 baseUrl 的后果是实测出来的:本地 Ollama 的模型发现会把它当根地址用,
    * 于是留着 deepseek 的地址就去问 deepseek 要 /api/tags(401)→ 前端 catch 里
    * `setModels([])` → **下拉直接空掉**,而报错还说"确认 Ollama 正在运行" ——
    * 明明它在跑,极其误导。
    *
-   * 那两个数字同理且更危险:一个是 1M 窗口的模型留下的 1024000,拿去跑本地 4b
-   * 会让 batchSize 算出远超上下文的批次(§3:批到超上下文)。
+   * (旧的另一个坑 —— 换服务商留着上一家 1024000 的上下文数字 —— 随三层重构消失:
+   * 数字现在由服务端按条目算,前端不存。)
    */
   const changeProvider = (p: string) => {
     if (p === provider) return;
     setProvider(p);
     setBaseUrl('');
+    setBaseUrlTouched(true);
     setModel('');
-    setContextWindow(null);
-    setMaxOutput(null);
   };
 
-  /** 选模型 → 自动填上下文数字(用户仍可改) */
-  const pickModel = (name: string) => {
-    setModel(name);
-    const meta = models.find((m) => m.model === name);
-    if (meta) {
-      setContextWindow(meta.contextWindow);
-      setMaxOutput(meta.maxOutput);
-    }
+  const startEdit = (p: ProviderView) => {
+    setError('');
+    setNotice('');
+    setEditingId(p.id);
+    setProvider(p.provider);
+    setBaseUrl(p.baseUrl);
+    setBaseUrlTouched(false);
+    setApiKey('');
+    setModel('');
   };
 
-  // 表里查得到就看它自己的 verified;查不到(手打的名字,或从厂商拉来但注册表没收录)
-  // **就是未确认** —— 那两个数字是兜底的 32768/4096,必须让用户核对:
-  // 数字填错等于 batchSize 算错,要么批到超上下文,要么跑一整天(§3)。
-  const chosen = models.find((m) => m.model === model);
-  const unverified = chosen ? chosen.verified === false : !!model;
+  const cancelEdit = () => {
+    setEditingId(null);
+    setApiKey('');
+    setBaseUrl('');
+    setBaseUrlTouched(false);
+    setModel('');
+  };
 
   const save = async () => {
     setError('');
     setNotice('');
     setBusy('save');
     try {
-      await llmApi.save(
-        {
-          provider,
-          model,
-          baseUrl,
-          // 留空 = 不改动已存的 key(用户不用每次重打)
-          ...(apiKey ? { apiKey } : {}),
-          ...(contextWindow !== null ? { contextWindow } : {}),
-          ...(maxOutput !== null ? { maxOutput } : {}),
-        },
-        purpose,
-      );
-      setNotice('已保存。之后所有 AI 调用都用这个模型。');
+      await llmApi.saveProvider({
+        ...(editingId ? { id: editingId } : {}),
+        provider,
+        // baseUrl:只有用户改过、或新建才带。不带 = 服务端保留已存的那个
+        ...(!editingId || baseUrlTouched ? { baseUrl } : {}),
+        // 留空 = 不改动已存的 key(用户不用每次重打)
+        ...(apiKey ? { apiKey } : {}),
+      });
+      setNotice(editingId ? '凭证已更新。' : '凭证已保存。');
       setApiKey('');
-      setHasSavedKey(true);
+      setEditingId(null);
+      setBaseUrlTouched(false);
+      await onDone();
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy('');
+    }
+  };
+
+  const remove = async (id: string) => {
+    setError('');
+    setNotice('');
+    try {
+      await llmApi.deleteProvider(id);
+      if (editingId === id) cancelEdit();
+      await onDone();
+    } catch (e) {
+      // 400 的 reason 原样展示 —— "这条凭证还有模型条目在用"正是要让用户看到的
+      setError((e as Error).message);
     }
   };
 
@@ -202,24 +334,64 @@ export default function ModelManager({ purpose = 'main' }: { purpose?: 'main' | 
   };
 
   const providerHint = PROVIDERS.find((p) => p.value === provider)?.hint;
+  const editingHasKey = !!(editingId && providers.find((p) => p.id === editingId)?.hasApiKey);
 
   return (
-    <div className="hud-panel" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <Zap size={16} style={{ color: 'var(--accent)' }} />
-        <span className="hud-label" style={{ color: 'var(--accent)' }}>
-          {isTag ? '打标模型' : '模型管理'}
-          <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)', marginLeft: 8 }}>
-            {isTag
-              ? '专门给「给条目打标签」用 —— 本地小模型就够。key / 接口地址留空 = 沿用主模型'
-              : '聊天 / 归类 / 规则建议共用这一个。单独功能想用别的模型,配下面那张卡'}
+    <Card
+      icon={<KeyRound size={16} style={{ color: 'var(--accent)' }} />}
+      title="服务商凭证"
+      hint="一个厂商一条。API Key 只发往该厂商、只存本机(DPAPI 加密)"
+    >
+      <div style={{ display: 'flex', flexDirection: 'column' }}>
+        {providers.length === 0 && (
+          <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
+            还没有凭证 —— 在下面建一条。
           </span>
-        </span>
+        )}
+        {providers.map((p) => (
+          <div
+            key={p.id}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              padding: '6px 0',
+              borderBottom: '1px solid var(--rule)',
+            }}
+          >
+            <span style={{ fontSize: 'var(--fs-13)' }}>{p.provider}</span>
+            <span
+              style={{
+                fontSize: 'var(--fs-12)',
+                color: 'var(--text-dim)',
+                fontFamily: 'var(--font-mono)',
+              }}
+            >
+              {p.baseUrl || '默认地址'}
+            </span>
+            <span
+              style={{
+                fontSize: 'var(--fs-12)',
+                color: p.hasApiKey ? 'var(--ok)' : 'var(--text-dim)',
+              }}
+            >
+              {p.hasApiKey ? '已存 key' : '无 key'}
+            </span>
+            <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+              <Button size="small" onClick={() => startEdit(p)}>
+                编辑
+              </Button>
+              <Button size="small" danger onClick={() => void remove(p.id)}>
+                删除
+              </Button>
+            </span>
+          </div>
+        ))}
       </div>
 
       <Field label="服务商">
         <Select
-          id={`llm-${purpose}-服务商`}
+          id="llm-服务商"
           value={provider}
           onChange={changeProvider}
           options={PROVIDERS.map((p) => ({ value: p.value, label: p.label }))}
@@ -230,78 +402,32 @@ export default function ModelManager({ purpose = 'main' }: { purpose?: 'main' | 
         </span>
       </Field>
 
-      <Field label="模型">
-        <Select
-          id={`llm-${purpose}-模型`}
-          // **tags 模式是为了能自由输入模型名。** 厂商拉不到时(还没填 key)下拉可能只有
-          // 内置那几个,「自定义」端点更是一个都没有 —— 而"想用的模型不在表里"是最正常
-          // 不过的事。maxCount=1 让它在语义上仍然是单选,value/onChange 在这里做
-          // 数组↔字符串的转换,别处看到的还是 `model: string`。
-          mode="tags"
-          maxCount={1}
-          value={model ? [model] : []}
-          onChange={(v: string[]) => pickModel(v[0] ?? '')}
-          placeholder={busy === 'models' ? '拉取中…' : '选一个,或直接打模型名'}
-          optionFilterProp="label"
-          style={{ width: 320 }}
-          options={models.map((m) => ({
-            value: m.model,
-            label: m.note ? `${m.model} · ${m.note}` : m.model,
-          }))}
-        />
-        <Button
-          size="small"
-          icon={<RefreshCw size={13} />}
-          loading={busy === 'models'}
-          onClick={() => void loadModels(provider)}
-          style={{ marginLeft: 8 }}
-        >
-          刷新
-        </Button>
-        {unverified && (
-          <span style={{ marginLeft: 10, fontSize: 'var(--fs-12)', color: 'var(--warn)' }}>
-            ⚠️ 这个模型的上下文是估算值,请核对
-          </span>
-        )}
-      </Field>
-
-      {modelsNote && (
-        // **不能是灰字。** 退回内置表和"厂商就这几个模型"在界面上长得太像了 ——
-        // 用户会以为列表是拉出来的,于是问"为什么还是那两个老的"(真实反馈)。
-        // 用和旁边 ⚠️ 待确认同一套 warn 色,让"这是兜底的,不是厂商说的"一眼可见。
-        <div style={{ fontSize: 'var(--fs-12)', color: 'var(--warn)', marginBottom: 12, lineHeight: 1.6 }}>
-          ⚠️ {modelsNote}
-        </div>
-      )}
-
       <Field label="接口地址">
         <Input
-          id={`llm-${purpose}-接口地址`}
+          id="llm-接口地址"
           name="llm-base-url"
           // 不是凭证,明确告诉浏览器别填
           autoComplete="off"
           value={baseUrl}
-          onChange={(e) => setBaseUrl(e.target.value)}
-          placeholder={
-            isTag ? '留空 = 沿用主模型的接口地址'
-            : provider === 'ollama' ? 'http://127.0.0.1:11434/v1(留空用默认)'
-            : '留空用默认地址'
-          }
+          onChange={(e) => {
+            setBaseUrl(e.target.value);
+            setBaseUrlTouched(true);
+          }}
+          placeholder="留空用默认地址(custom 端点必填)"
           style={{ width: 420, fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-12)' }}
         />
       </Field>
 
       <Field label="API Key">
         <Input.Password
-          id={`llm-${purpose}-API-Key`}
-          name={`llm-${purpose}-api-key`}
+          id="llm-API-Key"
+          name="llm-api-key"
           // new-password 让密码管理器别把它和上面的文本框配成"用户名+密码"
           autoComplete="new-password"
           value={apiKey}
           onChange={(e) => setApiKey(e.target.value)}
           placeholder={
-            hasSavedKey ? '已保存,留空表示不改动'
-            : isTag ? '留空 = 沿用主模型的 Key'
+            editingHasKey ? '已保存,留空表示不改动'
             : provider === 'ollama' ? '本地模型不需要'
             : '粘贴 API Key'
           }
@@ -309,41 +435,290 @@ export default function ModelManager({ purpose = 'main' }: { purpose?: 'main' | 
         />
       </Field>
 
-      <Field label="上下文 / 输出">
-        <InputNumber
-          id={`llm-${purpose}-上下文-输出`}
-          value={contextWindow}
-          onChange={setContextWindow}
-          min={1}
-          placeholder="contextWindow"
-          style={{ width: 150 }}
+      <Field label="测试模型">
+        <ModelPicker
+          id="llm-测试模型"
+          models={models}
+          value={model}
+          onChange={setModel}
+          busy={busy === 'models'}
+          onRefresh={() => void loadModels(provider)}
         />
-        <span style={{ margin: '0 8px', color: 'var(--text-dim)' }}>/</span>
-        <InputNumber
-          aria-label="最大输出"
-          value={maxOutput}
-          onChange={setMaxOutput}
-          min={1}
-          placeholder="maxOutput"
-          style={{ width: 150 }}
-        />
-        <span style={{ marginLeft: 10, fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
-          选完模型会自动填,可以改。这两个数决定每批塞多少条
-        </span>
       </Field>
 
+      <ModelsNote note={modelsNote} />
+
       <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-        <Button type="primary" icon={<Save size={14} />} loading={busy === 'save'} disabled={!model} onClick={save}>
-          保存
+        <Button
+          type="primary"
+          icon={<Save size={14} />}
+          loading={busy === 'save'}
+          disabled={!provider}
+          onClick={save}
+        >
+          {editingId ? '保存修改' : '新建凭证'}
         </Button>
         <Button loading={busy === 'test'} disabled={!model} onClick={test}>
           测试连接
         </Button>
+        {editingId && <Button onClick={cancelEdit}>取消编辑</Button>}
       </div>
 
-      {notice && <Alert type="success" showIcon message={notice} closable onClose={() => setNotice('')} />}
+      {notice && (
+        <Alert type="success" showIcon message={notice} closable onClose={() => setNotice('')} />
+      )}
       {error && <Alert type="error" showIcon message={error} closable onClose={() => setError('')} />}
-    </div>
+    </Card>
+  );
+}
+
+// ── 卡 2:模型条目 ───────────────────────────────────────
+
+function EntryCard({
+  providers,
+  entries,
+  onDone,
+}: {
+  providers: ProviderView[];
+  entries: EntryView[];
+  onDone: () => Promise<void>;
+}) {
+  const [providerId, setProviderId] = useState('');
+  const [model, setModel] = useState('');
+  const [models, setModels] = useState<ModelMeta[]>([]);
+  const [modelsNote, setModelsNote] = useState('');
+  const [busy, setBusy] = useState<'' | 'models' | 'add'>('');
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+
+  const selected = providers.find((p) => p.id === providerId);
+
+  const loadModels = useCallback(async () => {
+    if (!selected) {
+      setModels([]);
+      setModelsNote('');
+      return;
+    }
+    setError('');
+    setModelsNote('');
+    setBusy('models');
+    try {
+      // apiKey 传空 = 用这条凭证已存的 key(表单里从来拿不到明文)
+      const r = await fetchModels(selected.provider, selected.baseUrl, '');
+      setModels(r.models);
+      setModelsNote(r.note);
+    } catch (e) {
+      setModels([]);
+      setError((e as Error).message);
+    } finally {
+      setBusy('');
+    }
+  }, [selected]);
+
+  useEffect(() => {
+    void loadModels();
+  }, [loadModels]);
+
+  const add = async () => {
+    setError('');
+    setNotice('');
+    setBusy('add');
+    try {
+      await llmApi.addEntry({ providerId, model });
+      setNotice('条目已添加。首条会自动指给四个用途,可在下面那张卡改。');
+      setModel('');
+      await onDone();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const remove = async (id: string) => {
+    setError('');
+    setNotice('');
+    try {
+      await llmApi.deleteEntry(id);
+      await onDone();
+    } catch (e) {
+      // 400 原样:"这个条目正被用途引用(...)—— 先在「用途分配」里改指别的条目"
+      setError((e as Error).message);
+    }
+  };
+
+  // 表里查得到就看它自己的 verified;查不到(手打的名字,或从厂商拉来但注册表没收录)
+  // **就是未确认** —— 服务端给的那两个数字是兜底值,必须让用户核对:
+  // 数字填错等于 batchSize 算错,要么批到超上下文,要么跑一整天(§3)。
+  const chosen = models.find((m) => m.model === model);
+  const unverified = chosen ? chosen.verified === false : !!model;
+
+  return (
+    <Card
+      icon={<Zap size={16} style={{ color: 'var(--accent)' }} />}
+      title="模型条目"
+      hint="一个模型一条。上下文 / 最大输出由服务端按注册表算,前端不填"
+    >
+      <Field label="凭据">
+        <Select
+          id="llm-凭据"
+          value={providerId || undefined}
+          onChange={setProviderId}
+          options={providers.map((p) => ({ value: p.id, label: p.provider }))}
+          placeholder={providers.length ? '选一条凭证' : '先在上面建一条凭证'}
+          disabled={providers.length === 0}
+          style={{ width: 260 }}
+        />
+      </Field>
+
+      <Field label="模型">
+        <ModelPicker
+          id="llm-模型"
+          models={models}
+          value={model}
+          onChange={setModel}
+          busy={busy === 'models'}
+          onRefresh={() => void loadModels()}
+        />
+        {unverified && (
+          <span style={{ marginLeft: 10, fontSize: 'var(--fs-12)', color: 'var(--warn)' }}>
+            ⚠️ 这个模型的上下文是估算值,请核对
+          </span>
+        )}
+      </Field>
+
+      <ModelsNote note={modelsNote} />
+
+      <div>
+        <Button
+          type="primary"
+          disabled={!providerId || !model}
+          loading={busy === 'add'}
+          onClick={add}
+        >
+          添加条目
+        </Button>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column' }}>
+        {entries.length === 0 && (
+          <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
+            还没有模型条目。
+          </span>
+        )}
+        {entries.map((e) => (
+          <div
+            key={e.id}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              padding: '6px 0',
+              borderBottom: '1px solid var(--rule)',
+            }}
+          >
+            {!e.verified && <span style={{ color: 'var(--warn)' }}>⚠️</span>}
+            <span style={{ fontSize: 'var(--fs-13)' }}>
+              {e.provider} · {e.model}
+            </span>
+            <span className="num" style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
+              {Math.round(e.contextWindow / 1000)}K / {Math.round(e.maxOutput / 1000)}K
+            </span>
+            {!e.verified && e.note && (
+              <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>{e.note}</span>
+            )}
+            <Button
+              size="small"
+              danger
+              style={{ marginLeft: 'auto' }}
+              onClick={() => void remove(e.id)}
+            >
+              删除
+            </Button>
+          </div>
+        ))}
+      </div>
+
+      {notice && (
+        <Alert type="success" showIcon message={notice} closable onClose={() => setNotice('')} />
+      )}
+      {error && <Alert type="error" showIcon message={error} closable onClose={() => setError('')} />}
+    </Card>
+  );
+}
+
+// ── 卡 3:用途分配 ───────────────────────────────────────
+
+const PURPOSE_LABELS: Record<LlmPurpose, string> = {
+  chat: '聊天',
+  classify: '归类',
+  rules: '规则建议',
+  tag: '打标',
+};
+
+function AssignCard({
+  entries,
+  assignments,
+  onDone,
+}: {
+  entries: EntryView[];
+  assignments: Record<LlmPurpose, string | null> | null;
+  onDone: () => Promise<void>;
+}) {
+  const [error, setError] = useState('');
+
+  if (assignments === null) {
+    return (
+      <Card
+        icon={<SlidersHorizontal size={16} style={{ color: 'var(--accent)' }} />}
+        title="用途分配"
+        hint="四个用途平级,各自指一个条目;没配 = 未配置,不回落"
+      >
+        <p className="hud-label">加载中…</p>
+      </Card>
+    );
+  }
+
+  const options = [
+    { value: '', label: '未配置' },
+    ...entries.map((e) => ({ value: e.id, label: `${e.provider} · ${e.model}` })),
+  ];
+
+  const change = async (purpose: LlmPurpose, v: string) => {
+    setError('');
+    try {
+      await llmApi.setAssignments({ [purpose]: v || null });
+      await onDone();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  return (
+    <Card
+      icon={<SlidersHorizontal size={16} style={{ color: 'var(--accent)' }} />}
+      title="用途分配"
+      hint="四个用途平级,各自指一个条目;没配 = 未配置,不回落"
+    >
+      {(Object.keys(PURPOSE_LABELS) as LlmPurpose[]).map((p) => (
+        <Field key={p} label={PURPOSE_LABELS[p]}>
+          <Select
+            id={`llm-${PURPOSE_LABELS[p]}`}
+            value={assignments[p] ?? ''}
+            onChange={(v) => void change(p, v)}
+            options={options}
+            disabled={entries.length === 0}
+            style={{ width: 320 }}
+          />
+        </Field>
+      ))}
+      {entries.length === 0 && (
+        <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
+          先在上面加一个模型条目。
+        </span>
+      )}
+      {error && <Alert type="error" showIcon message={error} closable onClose={() => setError('')} />}
+    </Card>
   );
 }
 

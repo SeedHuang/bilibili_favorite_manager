@@ -117,20 +117,30 @@ export interface ModelMeta {
   note?: string;
 }
 
-export interface LlmSettingsView {
-  /** 回落主模型**之后**的结果:tag 没配、主模型配了 → 也是 true */
-  configured: boolean;
-  /** 这张卡**自己**配过没有(不看回落)—— 回填表单只看它。老服务端可能没有它 */
-  ownConfigured?: boolean;
-  provider?: string;
-  baseUrl?: string;
-  model?: string;
+export interface ProviderView {
+  id: string;
+  provider: string;
+  baseUrl: string;
   /** 后端**只**回这个,永远不回传 apiKey 本身 */
-  hasApiKey?: boolean;
-  contextWindow?: number;
-  maxOutput?: number;
-  verified?: boolean;
+  hasApiKey: boolean;
+}
+
+export interface EntryView {
+  id: string;
+  providerId: string;
+  provider: string;
+  model: string;
+  /** 服务端查注册表/ollama meta 拼好的数字 —— 前端不存不算 */
+  contextWindow: number;
+  maxOutput: number;
+  verified: boolean;
   note?: string;
+}
+
+export type LlmPurpose = 'chat' | 'classify' | 'rules' | 'tag';
+
+export interface AssignmentsView {
+  assignments: Record<LlmPurpose, string | null>;
 }
 
 export interface Pass1Response {
@@ -281,9 +291,8 @@ export interface TagRunStatus {
   tagged: number;
   total: number;
   /**
-   * `source` 是**实际生效**的来源:打标模型配了是 'tag',否则回落主模型是 'main'。
-   * 不告诉用户的话,他以为在烧本地 4b,实际每批都在打贵的主模型。
-   * 两个模型都没配是 null。
+   * `source` 是**实际生效**的来源:用途平级后 tag 没配就是 null;'main' 仅为兼容保留。
+   * 不告诉用户的话,他以为在烧本地 4b,实际每批都在打贵的那个。
    */
   model: { provider: string; model: string; source: 'tag' | 'main' } | null;
 }

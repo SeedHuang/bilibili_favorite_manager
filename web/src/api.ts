@@ -1,16 +1,19 @@
 import type {
+  AssignmentsView,
   AuditReport,
   AuditSummary,
   DryRun,
+  EntryView,
   FailedBatch,
   FolderSpec,
   Item,
-  LlmSettingsView,
+  LlmPurpose,
   ModelMeta,
   OperationEntry,
   Pass1Response,
   Pass2Response,
   ProgressPayload,
+  ProviderView,
   RuleCondition,
   RuleSuggestion,
   RuleView,
@@ -238,42 +241,44 @@ export async function classifyStream(
 // ── 模型管理(spec §3)──────────────────────────────────
 
 export const llmApi = {
+  /** 内置注册表(厂商列表拉不到时的兜底,语义同旧) */
   listModels: (provider?: string) =>
     api<{ models: ModelMeta[] }>(
       `/api/settings/models${provider ? `?provider=${provider}` : ''}`,
     ).then((r) => r.models),
 
   /**
-   * 从厂商的 `/models` 拉真实模型名 —— 手抄一张表必然又旧又错(官方文档的示例里就有
-   * 我们表里没有的 `deepseek-flash`)。**数字仍由服务端查注册表**:那个接口只回
-   * `{id, object, owned_by}`,没有 token 上限,而数字填错就等于 batchSize 算错。
-   *
-   * `apiKey` 留空 = 用已存的那个。设置页从来拿不到明文 key(接口只回 hasApiKey),
-   * 所以首次配的时候只能靠用户在表单里填的这个。
+   * 从厂商的 `/models` 拉真实模型名。apiKey 留空 = 用已存的那个(凭证表单里
+   * 从来拿不到明文 key,首次配只能靠用户现填的这个)。
    */
   listRemoteModels: (input: { provider: string; baseUrl?: string; apiKey?: string }) =>
     json<{ models: ModelMeta[] }>('POST', '/api/settings/remote-models', input).then(
       (r) => r.models,
     ),
 
-  /**
-   * 按用途读模型配置(main=主模型 / tag=打标模型,§3)。
-   * tag 没配的项在后端逐项回落到主模型 —— 前端只管展示读到的最终值。
-   */
-  get: (purpose: 'main' | 'tag' = 'main') =>
-    api<LlmSettingsView>(`/api/settings/llm?purpose=${purpose}`),
+  providers: () =>
+    api<{ providers: ProviderView[] }>('/api/settings/providers').then((r) => r.providers),
 
-  save: (
-    input: {
-      provider: string;
-      model: string;
-      baseUrl?: string;
-      apiKey?: string;
-      contextWindow?: number;
-      maxOutput?: number;
-    },
-    purpose: 'main' | 'tag' = 'main',
-  ) => json<{ ok: true }>('PUT', `/api/settings/llm?purpose=${purpose}`, input),
+  saveProvider: (input: { id?: string; provider: string; baseUrl?: string; apiKey?: string }) =>
+    json<{ ok: true; id: string }>('PUT', '/api/settings/providers', input),
+
+  deleteProvider: (id: string) =>
+    json<{ ok: true }>('DELETE', `/api/settings/providers/${id}`),
+
+  entries: () =>
+    api<{ entries: EntryView[] }>('/api/settings/entries').then((r) => r.entries),
+
+  addEntry: (input: { providerId: string; model: string }) =>
+    json<{ ok: true; id: string }>('POST', '/api/settings/entries', input),
+
+  deleteEntry: (id: string) =>
+    json<{ ok: true }>('DELETE', `/api/settings/entries/${id}`),
+
+  assignments: () =>
+    api<AssignmentsView>('/api/settings/assignments').then((r) => r.assignments),
+
+  setAssignments: (input: Partial<Record<LlmPurpose, string | null>>) =>
+    json<{ ok: true }>('PUT', '/api/settings/assignments', input),
 
   test: (input: { provider: string; model: string; baseUrl?: string; apiKey?: string }) =>
     json<{ ok: true; reply: string }>('POST', '/api/settings/test-llm', input),

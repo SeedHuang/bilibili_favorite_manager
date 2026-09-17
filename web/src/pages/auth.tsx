@@ -99,9 +99,8 @@ export default function AuthPage() {
       </div>
 
       {/* 模型管理跟授权同一页 —— 都是"这台机器怎么跟外面说话"的配置。
-          打标是第二张卡片:不同的功能可以用不同的模型(§3),底层 key/地址与主模型共享 */}
+          模型管理:凭证 / 条目 / 用途分配三层(2026-09-17 重构) */}
       <ModelManager />
-      <ModelManager purpose="tag" />
       </div>
     );
   }
@@ -162,11 +161,8 @@ export default function AuthPage() {
       )}
     </div>
 
-    {/* 没授权也能配模型 —— 两件事互不依赖。
-        **两张卡都要有**:打标模型跟授权状态同样无关。之前这里只渲染了主模型那张,
-        没授权的人就永远看不到「打标模型」——它被做进了授权后的分支,而不是这一页 */}
+    {/* 没授权也能配模型 —— 两件事互不依赖 */}
     <ModelManager />
-    <ModelManager purpose="tag" />
     </div>
   );
 }
