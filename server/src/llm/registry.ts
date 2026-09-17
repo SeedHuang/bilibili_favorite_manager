@@ -35,7 +35,7 @@ const FALLBACK: Omit<ModelMeta, 'provider' | 'model'> = {
   contextWindow: 32_768,
   maxOutput: 4_096,
   verified: false,
-  note: '未收录 —— 用的保守默认值,请在模型管理页改成实际值',
+  note: '未收录 —— 用的保守默认值,批次会偏小但不影响正确性',
 };
 
 /**

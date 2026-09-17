@@ -20,6 +20,13 @@ import { assertUsableBaseUrl } from './provider.js';
 
 export type LlmPurpose = 'chat' | 'classify' | 'rules' | 'tag';
 export const PURPOSES: readonly LlmPurpose[] = ['chat', 'classify', 'rules', 'tag'];
+/** 面向用户展示的用途名 —— 报错里别漏内部 key */
+const PURPOSE_LABELS: Record<LlmPurpose, string> = {
+  chat: '聊天',
+  classify: '归类',
+  rules: '规则建议',
+  tag: '打标',
+};
 
 const PROVIDERS_KEY = 'llm.providers';
 const MODELS_KEY = 'llm.models';
@@ -138,7 +145,9 @@ export function addEntry(db: Database.Database, input: { providerId: string; mod
 export function deleteEntry(db: Database.Database, id: string): void {
   const holders = PURPOSES.filter((p) => getAssignments(db)[p] === id);
   if (holders.length > 0) {
-    throw new Error(`这个条目正被用途引用(${holders.join(' / ')})—— 先在「用途分配」里改指别的条目`);
+    throw new Error(
+      `这个条目正被用途引用(${holders.map((p) => PURPOSE_LABELS[p]).join(' / ')})—— 先在「用途分配」里改指别的条目`,
+    );
   }
   writeJson(db, MODELS_KEY, listEntries(db).filter((e) => e.id !== id));
 }

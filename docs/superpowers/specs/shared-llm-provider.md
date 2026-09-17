@@ -118,6 +118,8 @@ const batchSize = Math.floor((contextWindow - reservedForSystem) / estTokensPerI
 **超限兜底**:不管模型多大,只要 `batchSize * estTokens > maxOutput` 就**自动分多批**。
 这样任何模型都能跑,只是批次数不同。
 
+> ⚠️ 本节已被 2026-09-17-model-config-redesign.md 取代:数字不再手填,配置拆为凭证/条目/用途三层。
+
 ### UI:模型管理页(settings 内)
 
 ```

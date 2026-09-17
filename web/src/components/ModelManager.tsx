@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button, Input, Select, Alert } from 'antd';
 import { Zap, KeyRound, SlidersHorizontal, Save, RefreshCw } from 'lucide-react';
 import { llmApi } from '../api';
@@ -209,6 +209,10 @@ function ProviderCard({
   /** 用户动过 baseUrl 没有。没动过又不是新建 → **不带**这个字段,免得把已存端点冲空 */
   const [baseUrlTouched, setBaseUrlTouched] = useState(false);
   const [apiKey, setApiKey] = useState('');
+  /** 镜像最新的 apiKey —— loadModels 的 useCallback 依赖里不放 apiKey(否则每敲一个字符就重拉),
+   *  但闭包读的是旧值,导致「填上 Key 再点刷新」永远带空 Key。读 ref 即拿最新值。 */
+  const apiKeyRef = useRef('');
+  apiKeyRef.current = apiKey;
   const [editingId, setEditingId] = useState<string | null>(null);
 
   const [models, setModels] = useState<ModelMeta[]>([]);
@@ -225,7 +229,7 @@ function ProviderCard({
       setModelsNote('');
       setBusy('models');
       try {
-        const r = await fetchModels(p, baseUrl, apiKey);
+        const r = await fetchModels(p, baseUrl, apiKeyRef.current);
         setModels(r.models);
         setModelsNote(r.note);
       } catch (e) {
@@ -235,7 +239,8 @@ function ProviderCard({
         setBusy('');
       }
     },
-    // 同 fetchModels:apiKey 故意不在这里,靠调用时的闭包取值
+    // 同 fetchModels:apiKey 故意不在这里 —— 靠 apiKeyRef.current 取最新值,所以这份缓存不会
+    // 因为用户改 Key 而重建(避免每敲一个字符就重拉)
     [baseUrl],
   );
 
@@ -395,6 +400,8 @@ function ProviderCard({
           value={provider}
           onChange={changeProvider}
           options={PROVIDERS.map((p) => ({ value: p.value, label: p.label }))}
+          // 编辑已存凭证时锁死 —— 换服务商类型会静默把条目改指到新类型上
+          disabled={!!editingId}
           style={{ width: 260 }}
         />
         <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)', marginLeft: 10 }}>
