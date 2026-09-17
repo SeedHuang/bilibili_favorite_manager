@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.db
+*.db-journal
+.env
+.DS_Store
+data/
+# SDD 流程的临时工作区(ledger / brief / report)—— 不是产物,别进版本库
+.superpowers/

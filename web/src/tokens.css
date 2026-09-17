@@ -1,0 +1,144 @@
+/* ============================================================
+   设计令牌 —— 移植自 CP2077 UI Kit(Community),B 档
+   https://www.figma.com/design/4m3pOlCOGUKEadjXbVOT4u/
+   调色板取自该 Kit 的 Color Styles 变量,语义由本项目重新映射。
+   ============================================================ */
+
+:root {
+  /* —— 取自 CP2077 Color Styles —— */
+  --bg:        #0e0e17;  /* Neutrals/Black —— 页面底 */
+  --text:      #d6d0d0;  /* Neutrals/grey  —— 主文字(暖灰,非纯白) */
+  --accent:    #5ef6ff;  /* Primary/Cyan   —— 交互主色 */
+  --ai:        #f0b537;  /* Secondary/Yellow —— AI 的提案 */
+  --danger:    #f75049;  /* Primary/Red    —— 独占:不可撤销操作 */
+  --ok:        #1ded83;  /* Secondary/Green */
+  --warn:      #FB932E;  /* Secondary/Orange */
+  --info:      #2570d4;  /* Secondary/Blue */
+  --special:   #9d2bf5;  /* Secondary/Purple */
+
+  /* —— 由底色派生的层次(CP2077 只给了单黑,层次由我们补) —— */
+  --surface:   #16161f;  /* 面板 */
+  --surface-2: #1d1d28;  /* 抬升:悬停 / 选中 */
+  --surface-3: #262633;  /* 再抬升:浮层 */
+  --text-dim:  #7a7a8a;  /* 次要文字 */
+  --rule:      #2a2a38;  /* 发丝分隔线 */
+
+  /* —— 切角与发光:CP2077 的形状语言 —— */
+  --chamfer: 10px;                                  /* 切角大小 */
+  --glow-accent: 0 0 14px rgba(94, 246, 255, 0.35); /* 青色微光 */
+  --glow-danger: 0 0 14px rgba(247, 80, 73, 0.35);
+
+  /* —— 字体:中文用系统栈,科技感来自数字与标签的等宽体 —— */
+  --font-cjk:  "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "SF Mono", ui-monospace, Menlo, monospace;
+
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-15: 15px;
+  --fs-18: 18px;
+  --fs-24: 24px;
+  --fs-32: 32px;
+
+  /* 保留旧名以免遗漏引用的组件直接失效(逐步淘汰) */
+  --paper: var(--bg);
+  --ink: var(--text);
+  --ink-soft: var(--text-dim);
+  --radius-card: 2px;
+  --radius-panel: 2px;
+
+  font-family: var(--font-cjk);
+  color: var(--text);
+  background: var(--bg);
+  color-scheme: dark;
+}
+
+/* 应用外壳的根:html/body/#root 全部锁死一屏,滚动只发生在内部面板。
+   这从根上杜绝「页面级幽灵滚动条」。 */
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+/* 数字一律等宽对齐 —— HUD 的基本素养 */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* —— 通用切角:裁掉右上、左下两角,CP2077 的招牌形状 —— */
+.hud-cut {
+  clip-path: polygon(
+    var(--chamfer) 0, 100% 0,
+    100% calc(100% - var(--chamfer)), calc(100% - var(--chamfer)) 100%,
+    0 100%, 0 var(--chamfer)
+  );
+}
+
+/* —— HUD 面板:细线描边 + 四角括号 —— */
+.hud-panel {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+}
+.hud-panel::before,
+.hud-panel::after {
+  content: '';
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-color: var(--accent);
+  border-style: solid;
+  pointer-events: none;
+  opacity: 0.55;
+}
+/* 角括号贴在面板内侧(不是 -1px 外侧)—— 外侧溢出 1px 会让
+   带 overflow-y:auto 的祖先多出一条横向滚动条 */
+.hud-panel::before {
+  top: 0; left: 0;
+  border-width: 1px 0 0 1px;
+}
+.hud-panel::after {
+  bottom: 0; right: 0;
+  border-width: 0 1px 1px 0;
+}
+
+/* —— HUD 小标签:等宽 + 字距 —— */
+.hud-label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+
+/* —— 页头扫描线(只用于装饰,绝不覆盖内容区)—— */
+.hud-scanlines {
+  position: relative;
+  overflow: hidden;
+}
+.hud-scanlines::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(94, 246, 255, 0.05) 0px,
+    rgba(94, 246, 255, 0.05) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+/* —— 全局尊重"减少动效" —— */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

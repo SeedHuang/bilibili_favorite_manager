@@ -1,0 +1,210 @@
+import type { FolderRule, RuleCondition, RuleField } from '../db/repo/rules.js';
+
+/**
+ * 规则匹配 —— **纯函数,无 IO**。
+ *
+ * 它是归类的第一段:规则命中的条目 0 token、毫秒级归位,而且是**确定性的**
+ * (改一条规则、重跑、结果可预测),AI 只处理规则没覆盖的语义边界。
+ *
+ * 命中即成员:一条条目可以同时命中多个夹子,那就都归(R4)。
+ * B站 本来就支持一条视频在多个夹子里,所以"命中多个"不是冲突,是事实。
+ */
+
+export interface RuleItem {
+  id: string;
+  title: string;
+  intro?: string | null;
+  upperName?: string | null;
+}
+
+export interface RuleHitToken {
+  field: RuleField;
+  token: string;
+}
+
+export interface RuleHit {
+  folderId: number;
+  /** 命中的条件,可能多条(同一个夹子的多个条件都命中时) */
+  tokens: RuleHitToken[];
+}
+
+const FIELD_LABEL: Record<RuleField, string> = { title: '标题', intro: '简介', upper: 'UP 名' };
+
+/** 一条条目命中哪些夹子的规则。**可多个** —— 命中即成员 */
+export function matchItem(item: RuleItem, rules: readonly FolderRule[]): RuleHit[] {
+  const text: Record<RuleField, string> = {
+    title: (item.title ?? '').toLowerCase(),
+    intro: (item.intro ?? '').toLowerCase(),
+    upper: (item.upperName ?? '').toLowerCase(),
+  };
+
+  const hits: RuleHit[] = [];
+
+  for (const rule of rules) {
+    const tokens: RuleHitToken[] = [];
+    for (const cond of rule.conditions) {
+      const hay = text[cond.field];
+      if (!hay) continue;
+      for (const kw of cond.any) {
+        // 空关键词会匹配一切 —— 半写的规则不该捞走任何东西
+        if (!kw) continue;
+        if (hay.includes(kw.toLowerCase())) tokens.push({ field: cond.field, token: kw });
+      }
+    }
+    // 同一个夹子的多个条件都命中 → 只出一条,但 tokens 都带上
+    if (tokens.length > 0) hits.push({ folderId: rule.folderId, tokens });
+  }
+
+  return hits;
+}
+
+/**
+ * 批量版本。**没命中的条目根本不进 Map** —— 调用方据此算"剩下多少要给 AI"(§9C.3 ②)
+ * 和"规则覆盖了多少条"(§9C.4 试跑)。
+ */
+export function matchAll(
+  items: readonly RuleItem[],
+  rules: readonly FolderRule[],
+): Map<string, RuleHit[]> {
+  const out = new Map<string, RuleHit[]>();
+  for (const item of items) {
+    const hits = matchItem(item, rules);
+    if (hits.length > 0) out.set(item.id, hits);
+  }
+  return out;
+}
+
+/**
+ * 把一组条件渲染成给模型看的一句话(空条件 → 空串,调用方据此不写那一行)
+ *
+ * **关键词还是空的 = 这条条件还没写完** —— 界面上「新增规则」建出来的就是
+ * `[{ field: 'title', any: [] }]` 这个形状,而用户打字的过程中也是它。半句话
+ * (`标题含 `)喂给模型比不喂更糟:那正是 §9C.0 里"模型拿到残缺信息于是瞎猜"的老毛病。
+ * 这里用的判空条件和 `matchItem` 里那句 `if (!kw) continue` **完全一致** ——
+ * 两处对"半写的规则"必须给出同一个答案。
+ */
+export function renderConditions(conditions: readonly RuleCondition[]): string {
+  const written = (c: RuleCondition): string[] => c.any.filter((k) => k);
+  return conditions
+    .filter((c) => written(c).length > 0)
+    .map((c) => `${FIELD_LABEL[c.field]}含 ${written(c).join('/')}`)
+    .join(';或 ');
+}
+
+// ── 建议的自证(spec §9C.5 R7)─────────────────────────────
+
+/** 模型原始输出 —— 全是 unknown,因为它是不可信输入 */
+export interface RawSuggestion {
+  folderTempId?: unknown;
+  field?: unknown;
+  any?: unknown;
+  because?: unknown;
+  evidenceItemIds?: unknown;
+}
+
+/** 过了自证的建议。形状与 spec §9C.5 的返回形状一一对应,少一层翻译 */
+export interface ValidSuggestion {
+  folderId: number;
+  field: RuleField;
+  any: string[];
+  because: string;
+  evidenceItemIds: string[];
+}
+
+export interface SuggestionCtx {
+  validFolderIds: ReadonlySet<number>;
+  /** 全库条目 —— 自证时要拿它当场跑匹配 */
+  itemsById: ReadonlyMap<string, RuleItem>;
+}
+
+const VALID_FIELDS: readonly RuleField[] = ['title', 'intro', 'upper'];
+/** 一条规则最多这么多词 —— 防模型塞一堆噪音把规则变垃圾 */
+const MAX_KEYWORDS = 20;
+
+/**
+ * 验证一条 AI 建议。**过不了任一关就丢**。
+ *
+ * 最后那一关是关键:**它说"这些词管用"就必须真的管用** —— 拿它给的证据条目
+ * 当场跑一遍匹配,打不中就是它编的。不给"部分正确"留宽容:一个词打不中,
+ * 说明它没真在读数据,那另外几个词也不可信。
+ */
+export function validateSuggestion(
+  raw: RawSuggestion,
+  ctx: SuggestionCtx,
+): ValidSuggestion | null {
+  if (!raw || typeof raw !== 'object') return null;
+
+  // 模型常把数字 id 吐成字符串,两边都认
+  const rawId = raw.folderTempId;
+  const folderId = typeof rawId === 'number' ? rawId : Number(rawId);
+  if (!Number.isInteger(folderId) || !ctx.validFolderIds.has(folderId)) return null;
+
+  if (typeof raw.field !== 'string' || !VALID_FIELDS.includes(raw.field as RuleField)) return null;
+
+  // 模型经常把 any 写成字符串而不是数组(`"any":"Python"`)—— 那是**序列化**写错了,
+  // 不是它想表达的东西错了。包成单元素数组是**无损**的:不切词、不猜,那串字面就是
+  // 它要的关键词,自证照样要过。真机上 qwen2.5:14b 就是这么写的,54 条建议全被丢掉。
+  //
+  // **绝不切词**:把 "前端 技术" 拆成两个词会让 "技术" 捞走一大片不相干的条目 ——
+  // 宁可选不中(自证会丢掉它),也不要悄悄改变匹配语义。
+  const rawAny = typeof raw.any === 'string' ? [raw.any] : raw.any;
+  if (!Array.isArray(rawAny)) return null;
+  const any = rawAny
+    .filter((k): k is string => typeof k === 'string')
+    .map((k) => k.trim())
+    .filter((k) => k !== '')
+    .slice(0, MAX_KEYWORDS);
+  if (any.length === 0) return null;
+
+  if (!Array.isArray(raw.evidenceItemIds) || raw.evidenceItemIds.length === 0) return null;
+  const evidenceItemIds = raw.evidenceItemIds.filter((x): x is string => typeof x === 'string');
+  if (evidenceItemIds.length === 0) return null;
+
+  // ★ 自证:每个证据条目都必须被这组词命中
+  const probe: FolderRule[] = [
+    { folderId, conditions: [{ field: raw.field as RuleField, any }], origin: 'ai', updatedAt: 0 },
+  ];
+  for (const id of evidenceItemIds) {
+    const item = ctx.itemsById.get(id);
+    if (!item) return null; // 它引用了一条不存在的条目
+    if (matchItem(item, probe).length === 0) return null; // 词打不中它自己给的证据 —— 那就是编的
+  }
+
+  return {
+    folderId,
+    field: raw.field as RuleField,
+    any,
+    because: typeof raw.because === 'string' ? raw.because : '',
+    evidenceItemIds,
+  };
+}
+
+export function validateSuggestions(raw: unknown, ctx: SuggestionCtx): ValidSuggestion[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((r) => validateSuggestion(r as RawSuggestion, ctx))
+    .filter((v): v is ValidSuggestion => v !== null);
+}
+
+/**
+ * 按 `夹子 + 字段 + 排序后的词表` 去重,并把各批的 `evidenceItemIds` 并起来。
+ *
+ * 不同批看到的是同一类条目时,合成一条**更强的**建议 —— 证据更多,
+ * 你更容易判断该不该采纳(spec §9C.5 c)。
+ */
+export function mergeSuggestions(list: readonly ValidSuggestion[]): ValidSuggestion[] {
+  const out = new Map<string, ValidSuggestion>();
+
+  for (const s of list) {
+    const key = `${s.folderId}|${s.field}|${[...s.any].sort().join(',')}`;
+    const prev = out.get(key);
+    if (!prev) {
+      out.set(key, { ...s, evidenceItemIds: [...new Set(s.evidenceItemIds)] });
+      continue;
+    }
+    // 保留先看到的那条(它的 because 也是先看到的),只把证据并进来
+    prev.evidenceItemIds = [...new Set([...prev.evidenceItemIds, ...s.evidenceItemIds])];
+  }
+
+  return [...out.values()];
+}

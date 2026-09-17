@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    // 与 umi 生成的 src/.umi/tsconfig.json 对齐:@umijs/max 在构建期被别名到 umi
+    "baseUrl": ".",
+    "paths": {
+      "@umijs/max": ["../node_modules/umi"],
+      "@/*": ["./src/*"],
+      "@@/*": ["./src/.umi/*"]
+    }
+  },
+  // src/.umi* 是 umi 构建期生成物(gitignore),不参与类型检查
+  "include": ["src/**/*.ts", "src/**/*.tsx", ".umirc.ts"],
+  "exclude": ["node_modules", "dist", "src/.umi", "src/.umi-production"]
+}
