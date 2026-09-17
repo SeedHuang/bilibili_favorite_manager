@@ -195,7 +195,7 @@ export function registerRuleRoutes(app: FastifyInstance, deps: RuleDeps): void {
    * 为它加一张表不值得。
    */
   app.post('/api/rules/suggest', async (req, reply) => {
-    const llm = readLlmSettings(db);
+    const llm = readLlmSettings(db, 'rules');
     if (!llm) {
       // 和 curator/routes.ts 的 requireLlm 同一句话 —— 用户看到的是同一个原因
       return reply.code(400).send({
@@ -225,7 +225,7 @@ export function registerRuleRoutes(app: FastifyInstance, deps: RuleDeps): void {
   /** 试跑:规则能覆盖多少条、剩下多少要给 AI、按当前模型算几批 */
   app.post('/api/rules/dry-run', async () => {
     const { matchedCount, total } = rulesWithHits();
-    const llm = readLlmSettings(db);
+    const llm = readLlmSettings(db, 'rules');
     const remaining = total - matchedCount;
 
     return {

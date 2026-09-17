@@ -11,7 +11,7 @@ import { Logger } from '../logger/index.js';
 import { createServer } from '../http/index.js';
 import { upsertFolder, listFolders } from '../db/repo/folders.js';
 import { upsertItem, linkFolderItem } from '../db/repo/items.js';
-import { saveLlmSettings } from '../llm/config.js';
+import { seedLlm } from '../llm/config.js';
 import { getMessages } from '../db/repo/sessions.js';
 import { getLatestDraft } from '../db/repo/sessions.js';
 import type { BiliClient } from '../bilibili/client.js';
@@ -62,7 +62,7 @@ function makeApp() {
   const db = openDb(':memory:');
   const log = new Logger(db, { silent: true });
   seedLibrary(db);
-  saveLlmSettings(db, { provider: 'ollama', model: 'qwen2.5:14b', baseUrl: '', apiKey: '' });
+  seedLlm(db);
   const app = createServer({ db, log, client: stubClient });
   return { app, db };
 }
@@ -254,15 +254,9 @@ describe('M4 端到端', () => {
     const { app, db } = makeApp();
     const sid = (await post(app, '/api/curator/sessions', {})).json().id;
 
-    // 先把模型上下文压小,让压缩真的会发生
-    saveLlmSettings(db, {
-      provider: 'ollama',
-      model: 'qwen2.5:14b',
-      baseUrl: '',
-      apiKey: '',
-      contextWindow: 6_000,
-      maxOutput: 1_000,
-    });
+    // 先把模型上下文压小,让压缩真的会发生(ollama 条目读的是运行时真实数字)
+    db.prepare(`INSERT INTO settings (key,value) VALUES ('llm.ollama.meta',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
+      .run(JSON.stringify({ 'qwen2.5:14b': { contextWindow: 6_000, maxOutput: 1_000 } }));
 
     // 体系 = 工作副本(m4b 之后聊天读的就是它)
     await post(app, '/api/workbench/folders', { name: 'AI/编程' });

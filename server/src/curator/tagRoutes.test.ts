@@ -3,7 +3,7 @@ import { openDb } from '../db/index.js';
 import { Logger } from '../logger/index.js';
 import { createServer } from '../http/index.js';
 import { upsertItem } from '../db/repo/items.js';
-import { saveLlmSettings } from '../llm/config.js';
+import { seedLlm, setAssignment } from '../llm/config.js';
 import type { BiliClient } from '../bilibili/client.js';
 
 // LLM 全 mock —— 路由测试绝不打真实 API(和 routes.test.ts 同一套:importOriginal
@@ -19,7 +19,7 @@ const stubClient = { withCredentials: () => ({ get: async () => null }) } as unk
 function makeApp() {
   const db = openDb(':memory:');
   const log = new Logger(db, { silent: true });
-  saveLlmSettings(db, { provider: 'ollama', model: 'qwen3-4b', baseUrl: '', apiKey: '' });
+  seedLlm(db, { model: 'qwen3-4b' });
   const app = createServer({ db, log, client: stubClient });
   return { app, db };
 }
@@ -34,16 +34,17 @@ const sse = (body: string) =>
 beforeEach(() => vi.clearAllMocks());
 
 describe('标注路由', () => {
-  it('status:报已标/总数 + 当前用的是哪个模型(回落时 source=main)', async () => {
+  it('status:报已标/总数;打标用途没配 → model 为 null(不再回落主模型)', async () => {
     const { app, db } = makeApp();
     upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
+    // 用途平级后没有"回落主模型"了:tag 没配就是没配,界面照实说
+    setAssignment(db, 'tag', null);
 
     const res = await app.inject({ url: '/api/tags/status' });
     const body = res.json();
     expect(body.tagged).toBe(0);
     expect(body.total).toBe(1);
-    // 打标模型没配 → 回落主模型,并且要告诉用户"你在用主模型"
-    expect(body.model).toEqual({ provider: 'ollama', model: 'qwen3-4b', source: 'main' });
+    expect(body.model).toBeNull();
     await app.close();
   });
 

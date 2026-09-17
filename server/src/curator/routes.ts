@@ -1,5 +1,5 @@
 /**
- * /api/curator/* 与 /api/settings/llm 的路由(spec §9.0 流程 + §3 模型管理)。
+ * /api/curator/* 与 /api/settings/*(模型管理)的路由(spec §9.0 流程 + §3 模型管理)。
  *
  * 沿用 M3 的 registerXxxRoutes(app, deps) 模式:路由只做 HTTP 层,
  * 编排在 curator/ 里,存储走 db/repo/。
@@ -29,7 +29,12 @@ import { getItem, type ItemRow } from '../db/repo/items.js';
 // 条目出口形状与 /api/folders/:id/items 共用同一份 —— 前端用同一套渲染,
 // 分两份写迟早会分叉
 import { shapeItem } from '../http/routes/items.js';
-import { readLlmSettings, saveLlmSettings, isPurposeConfigured, type LlmPurpose } from '../llm/config.js';
+import {
+  readLlmSettings, type LlmPurpose, PURPOSES,
+  listProviders, saveProvider, deleteProvider,
+  listEntries, addEntry, deleteEntry,
+  getAssignments, setAssignment, ollamaMeta,
+} from '../llm/config.js';
 import { logOperation, listOperations } from '../db/repo/operations.js';
 import { listModels, getModelMeta, type ModelMeta } from '../llm/registry.js';
 import { listOllamaModels, ollamaRoot } from '../llm/ollama.js';
@@ -51,7 +56,7 @@ import { buildWorkbenchView } from '../db/repo/workbenchView.js';
 import {
   getWorkState, listWorkFolders, workItemIds, workItemIdsPaged,
 } from '../db/repo/workbench.js';
-import { getState, stateKey } from '../db/repo/state.js';
+import { getState, setSetting, stateKey } from '../db/repo/state.js';
 import {
   renameFolder, createFolder, deleteFolder, mergeFolders,
   moveItems, addItems, removeItems, resetWorkbench, assignItems,
@@ -93,9 +98,12 @@ function existingFolders(db: Database.Database): FolderLite[] {
 export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): void {
   const { db, log } = deps;
 
-  /** 取当前模型配置;没配过就回 400 并给一句人话 */
-  const requireLlm = (reply: { code: (n: number) => { send: (b: unknown) => unknown } }) => {
-    const llm = readLlmSettings(db);
+  /** 取当前模型配置;没配过就回 400 并给一句人话。purpose:这段路由属于哪个用途 */
+  const requireLlm = (
+    reply: { code: (n: number) => { send: (b: unknown) => unknown } },
+    purpose: LlmPurpose = 'chat',
+  ) => {
+    const llm = readLlmSettings(db, purpose);
     if (!llm) {
       reply.code(400).send({ ok: false, reason: '还没配模型 —— 先去「授权」页的模型管理里选一个' });
       return null;
@@ -239,7 +247,7 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
     const id = Number((req.params as { id: string }).id);
     if (!getSession(db, id)) return reply.code(404).send({ ok: false, reason: '会话不存在' });
 
-    const llm = requireLlm(reply);
+    const llm = requireLlm(reply, 'classify');
     if (!llm) return;
 
     const { constraint } = (req.body ?? {}) as { constraint?: string };
@@ -303,7 +311,7 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
     const id = Number((req.params as { id: string }).id);
     if (!getSession(db, id)) return reply.code(404).send({ ok: false, reason: '会话不存在' });
 
-    const llm = requireLlm(reply);
+    const llm = requireLlm(reply, 'classify');
     if (!llm) return;
 
     // 体系就是**工作副本本身** —— m4b 取消了会话级的草稿(W3),
@@ -896,6 +904,10 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
     const baseUrl = (req.query as { baseUrl?: string }).baseUrl ?? '';
     try {
       const models = await listOllamaModels(baseUrl, deps.ollamaFetchImpl ?? fetch);
+      // 真实数字落地:readLlmSettings 对 ollama 条目优先读这里(spec §2:ollama 现有逻辑不变)
+      const prev = ollamaMeta(db);
+      for (const m of models) prev[m.name] = { contextWindow: m.contextWindow, maxOutput: m.maxOutput };
+      setSetting(db, 'llm.ollama.meta', JSON.stringify(prev));
       return { models };
     } catch (e) {
       // **把实际试的地址写进 reason**:上一版只说"确认 Ollama 正在运行",而真实原因
@@ -927,7 +939,7 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
     const body = (req.body ?? {}) as { provider?: string; baseUrl?: string; apiKey?: string };
     if (!body.provider) return reply.code(400).send({ ok: false, reason: '先选服务商' });
 
-    const saved = readLlmSettings(db);
+    const saved = readLlmSettings(db, 'chat');
     const apiKey = body.apiKey?.trim() || saved?.config.apiKey || '';
     try {
       const models = await listRemoteModels({
@@ -944,44 +956,90 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
     }
   });
 
-  /** 用途参数:main(主模型)/ tag(打标模型)。tag 没配的项在后端逐项回落到主模型 */
-  const purposeOf = (req: { query?: unknown }): LlmPurpose => {
-    const p = (req.query as { purpose?: string } | undefined)?.purpose;
-    return p === 'tag' ? 'tag' : 'main';
-  };
+  // ── 模型管理:三层(凭证 / 条目 / 用途分配)──────────────
+  // spec 2026-09-17-model-config-redesign。GET /api/settings/models(内置注册表)
+  // 原样保留 —— 前端"厂商列表拉不到时退回内置表"靠它。
 
-  app.get('/api/settings/llm', async (req) => {
-    const purpose = purposeOf(req);
-    const llm = readLlmSettings(db, purpose);
-    if (!llm) return { configured: false, ownConfigured: false, purpose };
-    // **绝不回传 apiKey** —— 只回"有没有配",UI 不该拿得到明文
+  app.get('/api/settings/providers', async () => {
+    // **绝不回传 apiKey** —— 只回"有没有配"(沿用旧 /api/settings/llm 的规矩)
     return {
-      configured: true,
-      /**
-       * 上面那个 `configured` 是**回落之后**的结果(tag 没配、主模型配了 → true),
-       * 用它回填会让打标卡显示主模型的值,像"已经配好了"。
-       * 这个字段才是"这张卡自己配过没有",UI 回填只看它。
-       */
-      ownConfigured: isPurposeConfigured(db, purpose),
-      purpose,
-      provider: llm.config.provider,
-      baseUrl: llm.config.baseUrl,
-      model: llm.config.model,
-      hasApiKey: llm.config.apiKey !== '',
-      contextWindow: llm.ctx.contextWindow,
-      maxOutput: llm.ctx.maxOutput,
-      verified: llm.ctx.verified,
-      note: llm.ctx.note,
+      providers: listProviders(db).map(({ id, provider, baseUrl, apiKeyEnc }) => ({
+        id, provider, baseUrl, hasApiKey: apiKeyEnc !== '',
+      })),
     };
   });
 
-  app.put('/api/settings/llm', async (req, reply) => {
-    const purpose = purposeOf(req);
-    const body = (req.body ?? {}) as Parameters<typeof saveLlmSettings>[1];
+  app.put('/api/settings/providers', async (req, reply) => {
+    const body = (req.body ?? {}) as { id?: string; provider: string; baseUrl?: string; apiKey?: string };
     try {
-      saveLlmSettings(db, body, purpose);
-      const label = purpose === 'tag' ? '打标模型' : '模型';
-      log.event({ level: 'info', category: 'llm', message: `${label}配置已更新:${body.provider}/${body.model}` });
+      const p = saveProvider(db, body);
+      log.event({ level: 'info', category: 'llm', message: `服务商凭证已保存:${p.provider}` });
+      return { ok: true, id: p.id };
+    } catch (e) {
+      return reply.code(400).send({ ok: false, reason: (e as Error).message });
+    }
+  });
+
+  app.delete('/api/settings/providers/:id', async (req, reply) => {
+    try {
+      deleteProvider(db, (req.params as { id: string }).id);
+      return { ok: true };
+    } catch (e) {
+      return reply.code(400).send({ ok: false, reason: (e as Error).message });
+    }
+  });
+
+  app.get('/api/settings/entries', async () => {
+    const providers = listProviders(db);
+    const meta = ollamaMeta(db);
+    return {
+      entries: listEntries(db).map((e) => {
+        const provider = providers.find((p) => p.id === e.providerId);
+        // 数字服务端拼好 —— 前端不算,也不存(spec §2:条目不存数字)
+        const ctx = provider
+          ? (provider.provider === 'ollama' && meta[e.model]
+            ? { ...getModelMeta(provider.provider, e.model), ...meta[e.model], verified: true }
+            : getModelMeta(provider.provider, e.model))
+          : getModelMeta('custom', e.model); // 凭证已删的脏数据:兜底显示
+        return {
+          id: e.id, providerId: e.providerId,
+          provider: provider?.provider ?? '?',
+          model: e.model,
+          contextWindow: ctx.contextWindow, maxOutput: ctx.maxOutput,
+          verified: ctx.verified, ...(ctx.note ? { note: ctx.note } : {}),
+        };
+      }),
+    };
+  });
+
+  app.post('/api/settings/entries', async (req, reply) => {
+    const body = (req.body ?? {}) as { providerId?: string; model?: string };
+    try {
+      const e = addEntry(db, { providerId: body.providerId ?? '', model: body.model ?? '' });
+      log.event({ level: 'info', category: 'llm', message: `模型条目已添加:${e.model}` });
+      return { ok: true, id: e.id };
+    } catch (e) {
+      return reply.code(400).send({ ok: false, reason: (e as Error).message });
+    }
+  });
+
+  app.delete('/api/settings/entries/:id', async (req, reply) => {
+    try {
+      deleteEntry(db, (req.params as { id: string }).id);
+      return { ok: true };
+    } catch (e) {
+      return reply.code(400).send({ ok: false, reason: (e as Error).message });
+    }
+  });
+
+  app.get('/api/settings/assignments', async () => ({ assignments: getAssignments(db) }));
+
+  app.put('/api/settings/assignments', async (req, reply) => {
+    const body = (req.body ?? {}) as Partial<Record<LlmPurpose, string | null>>;
+    try {
+      for (const purpose of PURPOSES) {
+        if (body[purpose] !== undefined) setAssignment(db, purpose, body[purpose]!);
+      }
       return { ok: true };
     } catch (e) {
       return reply.code(400).send({ ok: false, reason: (e as Error).message });
@@ -1006,7 +1064,7 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
     }
 
     // apiKey 留空表示"用已存的"
-    const saved = readLlmSettings(db);
+    const saved = readLlmSettings(db, 'chat');
     const apiKey = body.apiKey?.trim() || saved?.config.apiKey || '';
 
     const meta: ModelMeta = getModelMeta(body.provider, body.model);
@@ -1041,7 +1099,7 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
   app.get('/api/curator/sessions/:id/context', async (req, reply) => {
     const id = Number((req.params as { id: string }).id);
     if (!getSession(db, id)) return reply.code(404).send({ ok: false, reason: '会话不存在' });
-    const llm = readLlmSettings(db);
+    const llm = readLlmSettings(db, 'chat');
     if (!llm) return reply.code(400).send({ ok: false, reason: '还没配模型' });
 
     const { messages, hasStructure } = buildContext(db, id, llm.ctx);

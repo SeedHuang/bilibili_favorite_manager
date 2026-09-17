@@ -5,7 +5,7 @@ import { Logger } from '../logger/index.js';
 import { createServer } from '../http/index.js';
 import { upsertFolder } from '../db/repo/folders.js';
 import { upsertItem, linkFolderItem } from '../db/repo/items.js';
-import { saveLlmSettings } from '../llm/config.js';
+import { seedLlm } from '../llm/config.js';
 import type { BiliClient } from '../bilibili/client.js';
 
 // LLM 全 mock —— 路由测试绝不打真实 API
@@ -22,7 +22,7 @@ const stubClient = {
 function makeApp() {
   const db = openDb(':memory:');
   const log = new Logger(db, { silent: true });
-  saveLlmSettings(db, { provider: 'ollama', model: 'qwen2.5:14b', baseUrl: '', apiKey: '' });
+  seedLlm(db);
   upsertFolder(db, { id: 7, title: '深度学习', mediaCount: 2 });
   upsertItem(db, { id: 'BV1', type: 2, title: 'Python 教程' });
   upsertItem(db, { id: 'BV2', type: 2, title: 'Rust 入门' });

@@ -6,7 +6,7 @@
 import type { FastifyInstance } from 'fastify';
 import type Database from 'better-sqlite3';
 import type { Logger } from '../logger/index.js';
-import { readLlmSettings, isPurposeConfigured } from '../llm/config.js';
+import { readLlmSettings } from '../llm/config.js';
 import { listUntaggedItemIds, tagStats } from '../db/repo/tagging.js';
 import type { ItemRow } from '../db/repo/items.js';
 import { runTagging } from './tagger.js';
@@ -21,19 +21,11 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
   const allItems = () => db.prepare(`SELECT * FROM items`).all() as ItemRow[];
 
   app.get('/api/tags/status', async () => {
-    // 判据在 config.ts 里(与设置页回填共用同一个,免得两边对"配过没有"的口径分叉)。
-    // **不能**用 `readLlmSettings(db,'tag') !== null`:那里逐项回落主模型,主模型配了就
-    // 永远非 null,于是永远谎报 source='tag' —— 用户连打标模型都没配过,
-    // 界面却说"你在用打标模型"(§9E 的模型提示就白做了)。
-    const tag = isPurposeConfigured(db, 'tag') ? readLlmSettings(db, 'tag') : null;
-    // **告诉用户当前会用哪个模型**:打标模型配了用它(source=tag),否则回落主模型 ——
-    // 不然用户以为在烧本地 4b,实际每批都在打贵的主模型
-    const eff = tag ?? readLlmSettings(db);
+    const tag = readLlmSettings(db, 'tag');
+    // 用途平级后没有"回落"了:tag 没配就是没配,界面照实说
     return {
       ...tagStats(db),
-      model: eff
-        ? { provider: eff.config.provider, model: eff.config.model, source: tag ? ('tag' as const) : ('main' as const) }
-        : null,
+      model: tag ? { provider: tag.config.provider, model: tag.config.model, source: 'tag' as const } : null,
     };
   });
 

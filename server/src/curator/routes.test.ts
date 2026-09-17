@@ -6,7 +6,7 @@ import { createServer } from '../http/index.js';
 import { upsertFolder } from '../db/repo/folders.js';
 import { upsertItem, linkFolderItem } from '../db/repo/items.js';
 import { getLatestDraft, getMessages, getSession } from '../db/repo/sessions.js';
-import { saveLlmSettings } from '../llm/config.js';
+import { seedLlm, saveProvider, listProviders, listEntries } from '../llm/config.js';
 import { saveClassification, getClassification } from '../db/repo/classifications.js';
 import { setItemTagging } from '../db/repo/tagging.js';
 import { saveRule } from '../db/repo/rules.js';
@@ -35,7 +35,7 @@ function makeApp(opts: { llm?: boolean; seed?: boolean } = {}) {
   const db = openDb(':memory:');
   const log = new Logger(db, { silent: true });
   if (opts.llm !== false) {
-    saveLlmSettings(db, { provider: 'ollama', model: 'qwen2.5:14b', baseUrl: '', apiKey: '' });
+    seedLlm(db); // 1 凭证 + 1 条目(ollama/qwen2.5:14b)+ 四用途全指它
   }
   if (opts.seed !== false) {
     upsertFolder(db, { id: 7, title: '深度学习', mediaCount: 1 });
@@ -984,80 +984,88 @@ describe('模型管理', () => {
     await app.close();
   });
 
-  it('读配置时**绝不回传 apiKey**', async () => {
-    const { app, db } = makeApp();
-    saveLlmSettings(db, { provider: 'deepseek', model: 'deepseek-chat', apiKey: 'sk-secret-xyz' });
-
-    const res = await app.inject({ method: 'GET', url: '/api/settings/llm' });
-    const body = res.json();
-    expect(body.hasApiKey).toBe(true);
-    expect(JSON.stringify(body)).not.toContain('sk-secret-xyz');
-    expect(body).not.toHaveProperty('apiKey');
-    await app.close();
-  });
-
-  it('没配过时 configured:false', async () => {
-    const { app } = makeApp({ llm: false });
-    expect((await app.inject({ method: 'GET', url: '/api/settings/llm' })).json().configured).toBe(false);
-    await app.close();
-  });
-
-  // ★ 打标卡"自己配过没有"必须能从响应里看出来:tag 的 configured 是**回落主模型之后**
-  //   的结果,拿它回填表单就会把主模型的值(provider/baseUrl/model)冒充成打标模型已配
-  //   —— 实测的坑:baseUrl 被填成主模型的地址,用户改选 ollama 后本地模型列表直接空掉。
-  it('purpose=tag 没配过:configured 是 true(回落),但 ownConfigured 必须是 false', async () => {
-    const { app } = makeApp(); // makeApp 预置了主模型 ollama/qwen2.5:14b
-    const body = (await app.inject({ method: 'GET', url: '/api/settings/llm?purpose=tag' })).json();
-
-    expect(body.configured).toBe(true); // 回落:确实有模型能用
-    expect(body.provider).toBe('ollama'); // 而这个值是**主模型的** —— 所以才不能拿去回填
-    expect(body.ownConfigured).toBe(false); // 那张卡自己没配过 → UI 要留空
-    await app.close();
-  });
-
-  it('purpose=tag 自己配过 → ownConfigured:true,值取 tag 自己的', async () => {
-    const { app, db } = makeApp();
-    saveLlmSettings(db, { provider: 'ollama', model: 'qwen3-4b-instruct-2507:latest' }, 'tag');
-
-    const body = (await app.inject({ method: 'GET', url: '/api/settings/llm?purpose=tag' })).json();
-    expect(body.ownConfigured).toBe(true);
-    expect(body.model).toBe('qwen3-4b-instruct-2507:latest');
-    await app.close();
-  });
-
-  it('保存配置成功', async () => {
-    const { app, db } = makeApp({ llm: false });
-    const res = await app.inject({
-      method: 'PUT',
-      url: '/api/settings/llm',
-      payload: { provider: 'ollama', model: 'qwen2.5:14b', baseUrl: '', apiKey: '', contextWindow: 32768, maxOutput: 8192 },
+  describe('模型配置(三层)', () => {
+    it('providers 列表不回传明文 key', async () => {
+      const { app, db } = makeApp();
+      saveProvider(db, { provider: 'deepseek', apiKey: 'sk-secret-xyz' });
+      const body = (await app.inject({ method: 'GET', url: '/api/settings/providers' })).json();
+      expect(body.providers).toHaveLength(2); // seedLlm 的 + 这个
+      expect(JSON.stringify(body)).not.toContain('sk-secret-xyz');
+      const ds = body.providers.find((p: { provider: string }) => p.provider === 'deepseek');
+      expect(ds.hasApiKey).toBe(true);
+      await app.close();
     });
-    expect(res.statusCode).toBe(200);
-    expect((await app.inject({ method: 'GET', url: '/api/settings/llm' })).json().configured).toBe(true);
-    expect(db.prepare(`SELECT COUNT(*) AS n FROM settings`).get()).toBeDefined();
-    await app.close();
-  });
 
-  it('contextWindow / maxOutput 为 0 时拒绝保存(§3:0 提交会让分类器算不出批次)', async () => {
-    const { app } = makeApp({ llm: false });
-    const res = await app.inject({
-      method: 'PUT',
-      url: '/api/settings/llm',
-      payload: { provider: 'ollama', model: 'x', contextWindow: 0 },
+    it('PUT providers 更新时 apiKey 不带 = 保留已存', async () => {
+      const { app, db } = makeApp();
+      const p = listProviders(db)[0]!;
+      saveProvider(db, { id: p.id, provider: 'ollama', apiKey: 'sk-keep-123456' });
+      const res = await app.inject({
+        method: 'PUT', url: '/api/settings/providers',
+        payload: { id: p.id, provider: 'ollama', baseUrl: 'http://x/v1' }, // 无 apiKey
+      });
+      expect(res.statusCode).toBe(200);
+      const body = (await app.inject({ method: 'GET', url: '/api/settings/providers' })).json();
+      expect(body.providers[0]!.hasApiKey).toBe(true);
+      await app.close();
     });
-    expect(res.statusCode).toBe(400);
-    await app.close();
-  });
 
-  it('最大输出大于上下文时拒绝', async () => {
-    const { app } = makeApp({ llm: false });
-    const res = await app.inject({
-      method: 'PUT',
-      url: '/api/settings/llm',
-      payload: { provider: 'ollama', model: 'x', contextWindow: 8000, maxOutput: 99000 },
+    it('DELETE 被条目引用的凭证 → 400', async () => {
+      const { app, db } = makeApp();
+      const p = listProviders(db)[0]!;
+      const res = await app.inject({ method: 'DELETE', url: `/api/settings/providers/${p.id}` });
+      expect(res.statusCode).toBe(400);
+      await app.close();
     });
-    expect(res.statusCode).toBe(400);
-    await app.close();
+
+    it('entries 带注册表解析的数字;新增自动全分配', async () => {
+      const { app, db } = makeApp({ llm: false });
+      const p = await app.inject({ method: 'PUT', url: '/api/settings/providers', payload: { provider: 'deepseek' } });
+      const pid = p.json().id;
+      const e = await app.inject({ method: 'POST', url: '/api/settings/entries', payload: { providerId: pid, model: 'deepseek-chat' } });
+      expect(e.statusCode).toBe(200);
+      const list = (await app.inject({ method: 'GET', url: '/api/settings/entries' })).json();
+      expect(list.entries[0]).toMatchObject({ model: 'deepseek-chat', contextWindow: 128_000, maxOutput: 8_192, verified: true });
+      const a = (await app.inject({ method: 'GET', url: '/api/settings/assignments' })).json();
+      expect(a.assignments).toEqual({
+        chat: list.entries[0].id, classify: list.entries[0].id, rules: list.entries[0].id, tag: list.entries[0].id,
+      });
+      await app.close();
+    });
+
+    it('DELETE 被用途引用的条目 → 400', async () => {
+      const { app, db } = makeApp();
+      const e = listEntries(db)[0]!;
+      const res = await app.inject({ method: 'DELETE', url: `/api/settings/entries/${e.id}` });
+      expect(res.statusCode).toBe(400);
+      await app.close();
+    });
+
+    it('PUT assignments 改单个用途;指向不存在的条目 → 400', async () => {
+      const { app, db } = makeApp();
+      const e2 = await app.inject({
+        method: 'POST', url: '/api/settings/entries',
+        payload: { providerId: listProviders(db)[0]!.id, model: 'qwen2.5:14b' },
+      }); // 第二条不触发自动分配(用途已被 seed 占住)
+      const res = await app.inject({ method: 'PUT', url: '/api/settings/assignments', payload: { tag: e2.json().id } });
+      expect(res.statusCode).toBe(200);
+      const a = (await app.inject({ method: 'GET', url: '/api/settings/assignments' })).json();
+      expect(a.assignments.tag).toBe(e2.json().id);
+      expect(a.assignments.chat).not.toBe(e2.json().id);
+      const bad = await app.inject({ method: 'PUT', url: '/api/settings/assignments', payload: { chat: 'm_nope' } });
+      expect(bad.statusCode).toBe(400);
+      await app.close();
+    });
+
+    it('用途没分配 → curator 接口 400 提示去配置', async () => {
+      const { app } = makeApp();
+      await app.inject({ method: 'PUT', url: '/api/settings/assignments', payload: { chat: null } });
+      const sid = (await app.inject({ method: 'POST', url: '/api/curator/sessions', payload: {} })).json().id as number;
+      const r = await app.inject({ method: 'POST', url: `/api/curator/sessions/${sid}/messages`, payload: { content: 'hi' } });
+      expect(r.statusCode).toBe(400);
+      expect(r.json().reason).toContain('模型');
+      await app.close();
+    });
   });
 
   it('测试连接成功', async () => {
