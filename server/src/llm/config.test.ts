@@ -1,171 +1,135 @@
 import { describe, it, expect } from 'vitest';
 import { openDb } from '../db/index.js';
-import { readLlmSettings, saveLlmSettings, isPurposeConfigured, LLM_KEYS } from './config.js';
+import {
+  listProviders, saveProvider, deleteProvider,
+  listEntries, addEntry, deleteEntry,
+  getAssignments, setAssignment,
+  readLlmSettings, seedLlm, PURPOSES,
+} from './config.js';
 
-const fresh = () => {
-  const db = openDb(':memory:');
-  saveLlmSettings(db, { provider: 'ollama', model: 'qwen2.5:14b', baseUrl: '', apiKey: '' });
-  return db;
-};
+const fresh = () => openDb(':memory:');
 
-const set = (db: ReturnType<typeof openDb>, key: string, v: string) =>
+const setRaw = (db: ReturnType<typeof openDb>, key: string, v: string) =>
   db.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run(key, v);
 
-describe('LLM 配置读写', () => {
-  it('配过能读回来,apiKey 加解密一通', () => {
+describe('凭证层', () => {
+  it('保存→列出,apiKey 加密落库', () => {
     const db = fresh();
-    saveLlmSettings(db, { provider: 'deepseek', model: 'deepseek-chat', baseUrl: '', apiKey: 'sk-x-12345678' });
-    const s = readLlmSettings(db)!;
-    expect(s.config.provider).toBe('deepseek');
-    expect(s.config.apiKey).toBe('sk-x-12345678');
+    const p = saveProvider(db, { provider: 'deepseek', baseUrl: '', apiKey: 'sk-x-12345678' });
+    expect(p.id).toBeTruthy();
+    const list = listProviders(db);
+    expect(list).toHaveLength(1);
+    expect(list[0]!.provider).toBe('deepseek');
+    expect(list[0]!.apiKeyEnc).not.toContain('sk-x-12345678'); // DPAPI 密文
   });
 
-  it('没配过返回 null', () => {
-    expect(readLlmSettings(openDb(':memory:'))).toBeNull();
+  it('更新:apiKey undefined = 保留已存;空串 = 清空', () => {
+    const db = fresh();
+    const p = saveProvider(db, { provider: 'deepseek', apiKey: 'sk-keep-me-1234' });
+    // 读取走三层(凭证→条目→分配),所以要有一条被用途引用的条目才读得到
+    addEntry(db, { providerId: p.id, model: 'deepseek-chat' });
+    saveProvider(db, { id: p.id, provider: 'deepseek', baseUrl: 'http://x/v1' });
+    expect(readLlmSettings(db, 'chat')!.config.apiKey).toBe('sk-keep-me-1234');
+    saveProvider(db, { id: p.id, provider: 'deepseek', apiKey: '' });
+    expect(readLlmSettings(db, 'chat')!.config.apiKey).toBe('');
   });
 
-  it('apiKey 留 undefined = 不改动已存的', () => {
+  it('非法 baseUrl 抛错(沿用 provider.ts 的报错文案)', () => {
     const db = fresh();
-    saveLlmSettings(db, { provider: 'deepseek', model: 'deepseek-chat', apiKey: 'sk-keep-me-1234' });
-    saveLlmSettings(db, { provider: 'deepseek', model: 'deepseek-chat', baseUrl: 'http://x/v1' });
-    expect(readLlmSettings(db)!.config.apiKey).toBe('sk-keep-me-1234');
+    expect(() => saveProvider(db, { provider: 'ollama', baseUrl: 'huangchunhua' })).toThrow(/接口地址看起来不对/);
   });
 
-  it('apiKey 传空串 = 清空', () => {
+  it('删除被条目引用的凭证 → throw;无引用可删', () => {
     const db = fresh();
-    saveLlmSettings(db, { provider: 'deepseek', model: 'deepseek-chat', apiKey: 'sk-drop-me-1234' });
-    saveLlmSettings(db, { provider: 'deepseek', model: 'deepseek-chat', apiKey: '' });
-    expect(readLlmSettings(db)!.config.apiKey).toBe('');
-  });
-
-  it('上下文/输出为 0 拒绝保存', () => {
-    const db = fresh();
-    expect(() => saveLlmSettings(db, { provider: 'ollama', model: 'x', contextWindow: 0 })).toThrow();
-    expect(() => saveLlmSettings(db, { provider: 'ollama', model: 'x', maxOutput: 0 })).toThrow();
-  });
-
-  // 输入和输出共享窗口 —— 相等就等于输入预算为 0,而后果是静默的
-  it('最大输出等于上下文也拒绝(不是只有大于才拒)', () => {
-    const db = fresh();
-    expect(() => saveLlmSettings(db, { provider: 'ollama', model: 'x', contextWindow: 8192, maxOutput: 8192 })).toThrow(
-      /小于上下文/,
-    );
-  });
-
-  it('最大输出大于上下文拒绝', () => {
-    const db = fresh();
-    expect(() => saveLlmSettings(db, { provider: 'ollama', model: 'x', contextWindow: 8000, maxOutput: 99000 })).toThrow();
-  });
-
-  it('非法 baseUrl 拒绝保存', () => {
-    const db = fresh();
-    expect(() => saveLlmSettings(db, { provider: 'ollama', model: 'x', baseUrl: 'huangchunhua' })).toThrow(
-      /接口地址看起来不对/,
-    );
-  });
-
-  // 老版本存下的坏组合不能让聊天静默失去上下文
-  it('读到 maxOutput ≥ contextWindow 的坏数据时退回默认值,输入预算保持为正', () => {
-    const db = fresh();
-    set(db, LLM_KEYS.contextWindow, '32768');
-    set(db, LLM_KEYS.maxOutput, '32768');
-    const s = readLlmSettings(db)!;
-    expect(s.ctx.maxOutput).toBeLessThan(s.ctx.contextWindow);
-    expect(s.ctx.contextWindow - s.ctx.maxOutput - 1500).toBeGreaterThan(0);
-    expect(s.ctx.verified).toBe(false); // 退回默认值了,该标 ⚠️
-  });
-
-  it('正常的手填值仍然生效', () => {
-    const db = fresh();
-    set(db, LLM_KEYS.contextWindow, '32768');
-    set(db, LLM_KEYS.maxOutput, '8192');
-    const s = readLlmSettings(db)!;
-    expect(s.ctx.contextWindow).toBe(32768);
-    expect(s.ctx.maxOutput).toBe(8192);
-    expect(s.ctx.verified).toBe(true);
+    seedLlm(db);
+    const [p] = listProviders(db);
+    expect(() => deleteProvider(db, p!.id)).toThrow(/先删/);
+    // 条目被用途引用时不让删,先解引用(与「删除被用途引用的条目」同一套规矩)
+    for (const purpose of PURPOSES) setAssignment(db, purpose, null);
+    deleteEntry(db, listEntries(db)[0]!.id);
+    expect(() => deleteProvider(db, p!.id)).not.toThrow();
+    expect(listProviders(db)).toHaveLength(0);
   });
 });
 
-// ── 用途分组(§3:不同功能可以用不同的模型)──────────────
+describe('条目层', () => {
+  it('添加条目:四用途全空 → 自动全分配', () => {
+    const db2 = fresh();
+    const p = saveProvider(db2, { provider: 'ollama' });
+    const e = addEntry(db2, { providerId: p.id, model: 'qwen2.5:14b' });
+    const a = getAssignments(db2);
+    for (const purpose of PURPOSES) expect(a[purpose]).toBe(e.id);
+  });
 
-describe('打标模型(tag 用途)', () => {
-  it('没配打标模型 → 读到的是主模型(底层共享)', () => {
+  it('已有分配时,新条目不动现有用途', () => {
     const db = fresh();
-    saveLlmSettings(db, { provider: 'deepseek', model: 'deepseek-flash', baseUrl: '', apiKey: 'sk-main' });
-
-    const s = readLlmSettings(db, 'tag');
-    expect(s).not.toBeNull();
-    expect(s!.config.model).toBe('deepseek-flash');
-    expect(s!.config.apiKey).toBe('sk-main');
+    seedLlm(db);
+    const [first] = listEntries(db);
+    const p2 = saveProvider(db, { provider: 'deepseek', apiKey: 'sk-second-1234' });
+    const e2 = addEntry(db, { providerId: p2.id, model: 'deepseek-chat' });
+    const a = getAssignments(db);
+    for (const purpose of PURPOSES) expect(a[purpose]).toBe(first!.id);
+    expect(e2.id).not.toBe(first!.id);
   });
 
-  it('配了打标模型 → 用它自己的;没填的 key/baseUrl 逐项沿用主模型', () => {
+  it('删除被用途引用的条目 → throw;改指后可删', () => {
     const db = fresh();
-    saveLlmSettings(db, { provider: 'deepseek', model: 'deepseek-flash', baseUrl: '', apiKey: 'sk-main' });
-    // 打标只换模型名和厂商 —— key/baseUrl 故意留空,就是"沿用主模型"的常见形态
-    saveLlmSettings(db, { provider: 'ollama', model: 'qwen3-4b-instruct-2507:latest' }, 'tag');
-
-    const s = readLlmSettings(db, 'tag')!;
-    expect(s.config.provider).toBe('ollama');
-    expect(s.config.model).toBe('qwen3-4b-instruct-2507:latest');
-    // key 从主模型沿用(解密后的明文)—— 否则本地模型不用 key,云端打标反而没凭证
-    expect(s.config.apiKey).toBe('sk-main');
-    // 主模型不动
-    expect(readLlmSettings(db)!.config.model).toBe('deepseek-flash');
+    seedLlm(db);
+    const [e] = listEntries(db);
+    expect(() => deleteEntry(db, e!.id)).toThrow(/用途/);
+    for (const purpose of PURPOSES) setAssignment(db, purpose, null);
+    expect(() => deleteEntry(db, e!.id)).not.toThrow();
+    expect(listEntries(db)).toHaveLength(0);
   });
 
-  it('主模型没配、打标模型配了 → tag 能读到,main 返回 null', () => {
-    // **不能用 fresh()** —— 它预置了主模型,这个用例要的恰恰是"主模型不存在"
-    const db = openDb(':memory:');
-    saveLlmSettings(db, { provider: 'ollama', model: 'qwen3-4b-instruct-2507:latest' }, 'tag');
-
-    expect(readLlmSettings(db)).toBeNull();
-    expect(readLlmSettings(db, 'tag')!.config.model).toBe('qwen3-4b-instruct-2507:latest');
-  });
-
-  it('打标模型只配了一半(有 provider 没 model)→ 视为没配,整体回落主模型', () => {
+  it('setAssignment 指向不存在的条目 → throw', () => {
     const db = fresh();
-    saveLlmSettings(db, { provider: 'deepseek', model: 'deepseek-flash', baseUrl: '', apiKey: 'sk-main' });
-    set(db, 'tag.provider', 'ollama'); // 只写一个键,模拟半截配置
-
-    expect(readLlmSettings(db, 'tag')!.config.model).toBe('deepseek-flash');
+    expect(() => setAssignment(db, 'chat', 'm_nope')).toThrow();
   });
+});
 
-  // ★ 这个判据是**给 UI 回填用的**:readLlmSettings 的逐项回落让"这张卡配过没有"
-  //   从外面看不出来 —— 实测的坑就是打标卡拿回落值回填,把主模型的 baseUrl
-  //   冒充成打标模型的,用户改选 ollama 后本地模型列表直接空掉。
-  it('isPurposeConfigured:主模型配了、打标没配 → tag 必须是 false(哪怕 readLlmSettings 非 null)', () => {
-    const db = fresh(); // fresh() 预置了主模型 ollama/qwen2.5:14b
-
-    expect(readLlmSettings(db, 'tag')).not.toBeNull(); // 回落让"配过没有"看不出来
-    expect(isPurposeConfigured(db, 'main')).toBe(true);
-    expect(isPurposeConfigured(db, 'tag')).toBe(false);
-  });
-
-  it('isPurposeConfigured:半截配置(只有 provider)不算配过,两个键都在才算', () => {
+describe('readLlmSettings(三层查找)', () => {
+  it('purpose 有分配 → 拼 config + ctx;apiKey 解密;数字来自注册表', () => {
     const db = fresh();
-    set(db, 'tag.provider', 'ollama');
-    expect(isPurposeConfigured(db, 'tag')).toBe(false);
-
-    set(db, 'tag.model', 'qwen3-4b-instruct-2507:latest');
-    expect(isPurposeConfigured(db, 'tag')).toBe(true);
+    seedLlm(db, { provider: 'deepseek', model: 'deepseek-chat', apiKey: 'sk-x-12345678' });
+    const s = readLlmSettings(db, 'rules')!;
+    expect(s.config).toMatchObject({ provider: 'deepseek', model: 'deepseek-chat', apiKey: 'sk-x-12345678' });
+    expect(s.ctx.contextWindow).toBe(128_000); // 注册表里的,不是手填
+    expect(s.ctx.maxOutput).toBe(8_192);
+    expect(s.ctx.verified).toBe(true);
   });
 
-  it('isPurposeConfigured:空串不算配过(与 readLlmSettings 的取键口径一致)', () => {
-    const db = fresh();
-    set(db, 'tag.provider', 'ollama');
-    set(db, 'tag.model', '');
-    expect(isPurposeConfigured(db, 'tag')).toBe(false);
+  it('用途没分配 → null;分配指向不存在的条目(脏数据)→ null', () => {
+    expect(readLlmSettings(fresh(), 'chat')).toBeNull();
+    const db2 = fresh();
+    // setAssignment 自己会拦不存在的条目,脏数据只能绕过它直接落库
+    setRaw(db2, 'llm.purpose.chat', 'm_gone');
+    expect(readLlmSettings(db2, 'chat')).toBeNull();
   });
 
-  it('保存打标模型不动主模型的任何键', () => {
+  it('ollama 条目:llm.ollama.meta 有真实值 → 用它且 verified:true', () => {
     const db = fresh();
-    saveLlmSettings(db, { provider: 'deepseek', model: 'deepseek-flash', baseUrl: '', apiKey: 'sk-main', contextWindow: 1000, maxOutput: 500 });
-    saveLlmSettings(db, { provider: 'ollama', model: 'qwen3-4b-instruct-2507:latest' }, 'tag');
+    seedLlm(db, { provider: 'ollama', model: 'qwen3-custom:latest' });
+    setRaw(db, 'llm.ollama.meta', JSON.stringify({ 'qwen3-custom:latest': { contextWindow: 40_960, maxOutput: 8_192 } }));
+    const s = readLlmSettings(db, 'chat')!;
+    expect(s.ctx.contextWindow).toBe(40_960);
+    expect(s.ctx.verified).toBe(true);
+  });
 
-    const main = readLlmSettings(db)!;
-    expect(main.config.model).toBe('deepseek-flash');
-    expect(main.ctx.contextWindow).toBe(1000);
-    expect(main.config.apiKey).toBe('sk-main');
+  it('ollama 条目:meta 没有 → 兜底 32K/4K + verified:false', () => {
+    const db = fresh();
+    seedLlm(db, { provider: 'ollama', model: 'never-seen:latest' });
+    const s = readLlmSettings(db, 'chat')!;
+    expect(s.ctx.contextWindow).toBe(32_768);
+    expect(s.ctx.verified).toBe(false);
+  });
+
+  it('seedLlm:铺好凭证+条目+四用途(测试基建自证)', () => {
+    const db = fresh();
+    seedLlm(db);
+    expect(listProviders(db)).toHaveLength(1);
+    expect(listEntries(db)).toHaveLength(1);
+    const a = getAssignments(db);
+    for (const purpose of PURPOSES) expect(a[purpose]).toBe(listEntries(db)[0]!.id);
   });
 });
