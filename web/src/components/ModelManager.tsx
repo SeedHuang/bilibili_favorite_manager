@@ -303,6 +303,13 @@ function ProviderCard({
       setApiKey('');
       setEditingId(null);
       setBaseUrlTouched(false);
+      // 新建后把 provider/baseUrl 一并归零 —— 只留着的后果是连点两次「保存」
+      // 会建出两条一模一样的凭证(实测过这类重复行,删起来还得分清哪条是哪条)
+      if (!editingId) {
+        setProvider('ollama');
+        setBaseUrl('');
+        setModel('');
+      }
       await onDone();
     } catch (e) {
       setError((e as Error).message);
@@ -673,6 +680,8 @@ function AssignCard({
   onDone: () => Promise<void>;
 }) {
   const [error, setError] = useState('');
+  /** 变更进行中锁住全部下拉 —— 快速连改两次时旧响应会晚到,把界面刷回旧值 */
+  const [saving, setSaving] = useState(false);
 
   if (assignments === null) {
     return (
@@ -693,11 +702,14 @@ function AssignCard({
 
   const change = async (purpose: LlmPurpose, v: string) => {
     setError('');
+    setSaving(true);
     try {
       await llmApi.setAssignments({ [purpose]: v || null });
       await onDone();
     } catch (e) {
       setError((e as Error).message);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -714,7 +726,7 @@ function AssignCard({
             value={assignments[p] ?? ''}
             onChange={(v) => void change(p, v)}
             options={options}
-            disabled={entries.length === 0}
+            disabled={entries.length === 0 || saving}
             style={{ width: 320 }}
           />
         </Field>

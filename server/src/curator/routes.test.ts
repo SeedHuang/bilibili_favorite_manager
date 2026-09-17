@@ -6,7 +6,7 @@ import { createServer } from '../http/index.js';
 import { upsertFolder } from '../db/repo/folders.js';
 import { upsertItem, linkFolderItem } from '../db/repo/items.js';
 import { getLatestDraft, getMessages, getSession } from '../db/repo/sessions.js';
-import { seedLlm, saveProvider, listProviders, listEntries } from '../llm/config.js';
+import { seedLlm, saveProvider, listProviders, listEntries, addEntry, setAssignment, readLlmSettings } from '../llm/config.js';
 import { saveClassification, getClassification } from '../db/repo/classifications.js';
 import { setItemTagging } from '../db/repo/tagging.js';
 import { saveRule } from '../db/repo/rules.js';
@@ -31,7 +31,7 @@ const stubClient = {
 const PROPOSAL = '{"folders":[{"tempId":"f1","name":"AI/编程","rule":"含 Python","reuseFolderId":7}],"notes":"n"}';
 const ASSIGN = '[{"itemId":"BV1","folderTempId":"f1","confidence":0.9,"reason":"是教程"}]';
 
-function makeApp(opts: { llm?: boolean; seed?: boolean } = {}) {
+function makeApp(opts: { llm?: boolean; seed?: boolean; ollamaFetchImpl?: typeof fetch } = {}) {
   const db = openDb(':memory:');
   const log = new Logger(db, { silent: true });
   if (opts.llm !== false) {
@@ -42,7 +42,7 @@ function makeApp(opts: { llm?: boolean; seed?: boolean } = {}) {
     upsertItem(db, { id: 'BV1', type: 2, title: 'Python 教程' });
     linkFolderItem(db, 7, 'BV1', 1);
   }
-  const app = createServer({ db, log, client: stubClient });
+  const app = createServer({ db, log, client: stubClient, ...(opts.ollamaFetchImpl ? { ollamaFetchImpl: opts.ollamaFetchImpl } : {}) });
   return { app, db };
 }
 
@@ -1112,6 +1112,39 @@ describe('模型管理', () => {
     const dumped = JSON.stringify(rows);
     expect(dumped).not.toContain('sk-live-DEADBEEF');
     expect(dumped).toContain('***');
+    await app.close();
+  });
+
+  it('ollama-models 成功时把真实数字写进 llm.ollama.meta(条目不存数字,读取侧靠它)', async () => {
+    // 假 Ollama:/api/tags 回一个模型名,/api/show 回它的真实上下文长度
+    const fake = (async (url: string | URL) => {
+      const u = String(url);
+      if (u.endsWith('/api/tags')) {
+        return { ok: true, json: async () => ({ models: [{ name: 'qwen-fake:latest' }] }) };
+      }
+      return {
+        ok: true,
+        json: async () => ({ model_info: { 'qwen-fake.context_length': 40_960 } }),
+      };
+    }) as unknown as typeof fetch;
+    const { app, db } = makeApp({ ollamaFetchImpl: fake });
+    const res = await app.inject({ method: 'GET', url: '/api/settings/ollama-models' });
+    expect(res.statusCode).toBe(200);
+
+    // 数字落了库,且 readLlmSettings 读侧真的用它(verified:true,不再退 32K 兜底)
+    const raw = db
+      .prepare(`SELECT value FROM settings WHERE key = 'llm.ollama.meta'`)
+      .get() as { value: string } | undefined;
+    expect(JSON.parse(raw!.value)).toMatchObject({
+      'qwen-fake:latest': { contextWindow: 40_960 },
+    });
+
+    const [p] = listProviders(db);
+    const e = addEntry(db, { providerId: p!.id, model: 'qwen-fake:latest' });
+    setAssignment(db, 'chat', e.id);
+    const s = readLlmSettings(db, 'chat')!;
+    expect(s.ctx.contextWindow).toBe(40_960);
+    expect(s.ctx.verified).toBe(true);
     await app.close();
   });
 });
