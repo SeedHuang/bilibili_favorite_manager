@@ -34,6 +34,16 @@ describe('凭证层', () => {
     expect(readLlmSettings(db, 'chat')!.config.apiKey).toBe('');
   });
 
+  it('更新:baseUrl undefined = 保留已存;空串 = 清空(与 apiKey 同规矩)', () => {
+    const db = fresh();
+    // custom 不在 DEFAULT_BASE_URLS 里 —— 端点被冲掉就彻底丢了
+    const p = saveProvider(db, { provider: 'custom', baseUrl: 'http://127.0.0.1:9999/v1', apiKey: 'sk-old-1234' });
+    saveProvider(db, { id: p.id, provider: 'custom', apiKey: 'sk-rotated-9999' }); // 只换 key
+    expect(listProviders(db)[0]!.baseUrl).toBe('http://127.0.0.1:9999/v1');
+    saveProvider(db, { id: p.id, provider: 'custom', baseUrl: '' });
+    expect(listProviders(db)[0]!.baseUrl).toBe('');
+  });
+
   it('非法 baseUrl 抛错(沿用 provider.ts 的报错文案)', () => {
     const db = fresh();
     expect(() => saveProvider(db, { provider: 'ollama', baseUrl: 'huangchunhua' })).toThrow(/接口地址看起来不对/);

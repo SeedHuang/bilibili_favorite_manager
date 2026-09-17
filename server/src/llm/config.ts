@@ -92,10 +92,15 @@ export function saveProvider(
         : ''
       : existing?.apiKeyEnc ?? '';
 
+  // baseUrl 与 apiKey 同规矩:undefined = 保留已存、'' = 清空、有值 = 覆写。
+  // 否则"只换 key"的调用会把端点冲成空 —— 对没有 DEFAULT_BASE_URLS 的
+  // provider(custom / anthropic-compatible)就是把地址弄丢了。
+  const baseUrl = input.baseUrl !== undefined ? input.baseUrl.trim() : existing?.baseUrl ?? '';
+
   const entry: ProviderEntry = {
     id: existing?.id ?? newId('p'),
     provider: input.provider.trim(),
-    baseUrl: input.baseUrl?.trim() ?? '',
+    baseUrl,
     apiKeyEnc,
   };
   writeJson(db, PROVIDERS_KEY, existing ? list.map((p) => (p.id === entry.id ? entry : p)) : [...list, entry]);
