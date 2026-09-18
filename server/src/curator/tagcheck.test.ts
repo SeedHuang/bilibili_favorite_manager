@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { openDb } from '../db/index.js';
-import { addAlias, ensureTag, listTagTree, normalizeTagName, findTag } from '../db/repo/tags.js';
+import { upsertItem } from '../db/repo/items.js';
+import { Logger } from '../logger/index.js';import {
+  addAlias, ensureTag, itemTagIds, linkItemTag, listTagTree, normalizeTagName, findTag,
+} from '../db/repo/tags.js';
 
 const mocks = vi.hoisted(() => ({ complete: vi.fn() }));
 vi.mock('../llm/provider.js', () => ({ complete: mocks.complete }));
@@ -122,5 +125,55 @@ describe('runTagCheck', () => {
     ensureTag(db, '美食', null);
     await runTagCheck({ config, tree: listTagTree(db), newNames: [], db });
     expect(mocks.complete).not.toHaveBeenCalled();
+  });
+
+  it('**只动本轮新词** —— 判到树里的老词也一个字不动', async () => {
+    const db = openDb(':memory:');
+    // 美食 = 上一轮建的**老词**(有视频挂着);露营 = 本轮的新词
+    const food = ensureTag(db, '美食', null);
+    ensureTag(db, '露营', null);
+    upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
+    linkItemTag(db, 'BV1', food, 'ai');
+
+    // prompt 里摆着**整棵树**,而 CHECK_SYSTEM 自己的例子就是「AI」「视频」「教程」
+    // —— 点着老词说 drop/merge 是这条链路里最容易发生的事。而 drop 删节点、merge
+    // 并节点:两个都不可逆,两个都不经用户确认。所以闸门只能是"这个名字在不在
+    // **本轮新词**里"(spec C8 ①②③ 说的都是"新词"),不是"在不在树里"。
+    mocks.complete.mockResolvedValue(
+      JSON.stringify([
+        { name: '美食', action: 'drop' },
+        { name: '美食', action: 'merge', target: '露营' },
+        { name: '露营', action: 'keep' },
+      ]),
+    );
+    const r = await runTagCheck({ config, tree: listTagTree(db), newNames: ['露营'], db });
+
+    expect(r).toEqual({ dropped: 0, merged: 0, moved: 0 });
+    // 节点还在 —— 而且它挂的视频还在(merge 会把 item_tags 一起搬走)
+    expect(db.prepare(`SELECT id FROM tags WHERE id = ?`).get(food)).toEqual({ id: food });
+    expect(itemTagIds(db, ['BV1']).get('BV1')).toEqual([food]);
+  });
+
+  it('一个词都没判回来 → 出声(不能长得像"什么都没变")', async () => {
+    const db = openDb(':memory:');
+    ensureTag(db, '露营', null);
+    // 被截断的数组 —— 真实成因是输出撞上服务商默认上限(`provider.ts` 没设 maxOutputTokens)
+    mocks.complete.mockResolvedValue('[{"name":"露营","action":"ke');
+    const log = new Logger(db, { silent: true });
+    await runTagCheck({ config, tree: listTagTree(db), newNames: ['露营'], db, log });
+    const rows = db.prepare(`SELECT message FROM events WHERE code = 'TAGCHECK_EMPTY'`).all() as
+      { message: string }[];
+    expect(rows).toHaveLength(1);
+    // 说清"几个词送出去了" —— 光说"什么都没判"没有可行动的信息
+    expect(rows[0]!.message).toContain('1 个新词');
+  });
+
+  it('没传 logger 也不炸(可选参数)', async () => {
+    const db = openDb(':memory:');
+    ensureTag(db, '露营', null);
+    mocks.complete.mockResolvedValue(JSON.stringify([]));
+    await expect(
+      runTagCheck({ config, tree: listTagTree(db), newNames: ['露营'], db }),
+    ).resolves.toEqual({ dropped: 0, merged: 0, moved: 0 });
   });
 });

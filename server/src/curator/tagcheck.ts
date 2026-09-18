@@ -19,6 +19,7 @@
 import type Database from 'better-sqlite3';
 import type { ModelConfig } from '../llm/provider.js';
 import { complete } from '../llm/provider.js';
+import type { Logger } from '../logger/index.js';
 import { parseJsonArray } from './parse.js';
 import type { ChatMessage } from '../llm/context.js';
 import {
@@ -87,6 +88,8 @@ export async function runTagCheck(opts: {
   tree: readonly TagNode[];
   newNames: readonly string[];
   db: Database.Database;
+  /** 只为「一个词都没判回来」那条告警 —— 可选:测试和纯调用的地方不必造一个 */
+  log?: Logger;
 }): Promise<{ dropped: number; merged: number; moved: number }> {
   const { db } = opts;
   // 闸门:**没有新词就一次 LLM 都不调** —— 所以放在每轮末尾是免费的
@@ -97,6 +100,16 @@ export async function runTagCheck(opts: {
     for (const n of nodes) { known.add(n.name); collect(n.children); }
   };
   collect(opts.tree);
+
+  // 闸门:**只有本轮的新词归它管**(spec C8 ①②③ 说的都是"定每个**新词**在树里的位置")。
+  //
+  // 少这一句的话它的权力是**整个词库**:`coerceVerdicts` 只校验 target 是不是已知名,
+  // 对 `name` 毫无限制,于是一句"drop 美食"就能删掉一个用了三个月的词 —— 而 drop 和
+  // merge 是本文件里**唯一两个不可逆**的动作,做完不通知也不确认。
+  // 这不是假想的路径:`renderTree` 把整棵树摆在模型眼前,而 `CHECK_SYSTEM` 自己的
+  // drop 例子就是「AI」「视频」「教程」「分享」「合集」—— 正是 §9F.0 说会从第一轮的
+  // `domains` 里漏进来的那批词。模型照着例子点名老词,闸门是开着的。
+  const fresh = new Set(opts.newNames.map(normalizeTagName));
 
   const messages: ChatMessage[] = [
     { role: 'system', content: CHECK_SYSTEM },
@@ -115,8 +128,33 @@ export async function runTagCheck(opts: {
     known,
   );
 
+  /**
+   * **判回来 0 条,不等于"这批词都没问题"。**
+   *
+   * `parseJsonArray` 遇到**被截断**的数组返回 null(`sliceBalanced` 要一对闭括号),
+   * 于是 `coerceVerdicts` 得到 `[]`、三个计数器全是 0 —— 而这一路**没有任何红点**:
+   * 不抛错、不记 TAGCHECK_FAILED、变化清单写一份空的。用户看到的是"上一轮变化:还没有
+   * 跑过标注,或者上一轮什么都没变",旁边写着本轮新增了几百个词 —— 而 §9F.6 说首轮
+   * 那个形状会一直留在界面上。
+   *
+   * 这不是假想的路径:`provider.ts` 全程没设 `maxOutputTokens`,几百条 verdict
+   * (每条 ~20 token)撞上服务商的默认输出上限就会被截断。**要不要切批、上限定多少
+   * 是设计取舍,不在这儿偷偷定**(见文件头那段)—— 但"什么都没判"必须出声。
+   *
+   * 上面那道闸门保证走到这里 `newNames` 非空,所以"送出去 0 个词"不需要另判。
+   */
+  if (verdicts.length === 0) {
+    opts.log?.event({
+      level: 'warn', category: 'llm', code: 'TAGCHECK_EMPTY',
+      message: `标签质检一个词都没判回来:${opts.newNames.length} 个新词送出去、0 条判定 —— 本轮的变化清单是空的,别当成"都没问题"(输出可能被截断)`,
+    });
+  }
+
   let dropped = 0, merged = 0, moved = 0;
   for (const v of verdicts) {
+    // **老词一律不碰** —— 比较走归一化,树里存的是显示名("NBA"),模型可能吐 "nba"
+    if (!fresh.has(normalizeTagName(v.name))) continue;
+
     if (v.action === 'drop') {
       // **drop 只认规范名**(`tags.norm`),不查别名表。
       //

@@ -149,6 +149,8 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
             tree: listTagTree(db),
             newNames: r.newWords,
             db,
+            // 质检"一个词都没判回来"要出声 —— 那个失败看起来和"什么都没变"一模一样
+            log,
           });
         } catch (e) {
           // 质检失败**不该**把已经标好的东西废掉 —— 下一轮还会再判一次
