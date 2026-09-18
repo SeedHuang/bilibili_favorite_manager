@@ -141,4 +141,42 @@ describe('reconcile', () => {
     expect(second.map((c) => c.kind)).toEqual(['merge']);
     expect(db.prepare(`SELECT name FROM tags`).all()).toEqual([{ name: '甲' }]);
   });
+
+  it('合并之后重取快照 —— 被并掉的词不能再用旧集合挂着谁', () => {
+    const db = openDb(':memory:');
+    const jia = ensureTag(db, '甲', null);
+    const yi = ensureTag(db, '乙', null);
+    const bing = ensureTag(db, '丙', null); // 根
+
+    // 甲 / 乙 双向 90% → 合并,乙 被并进甲(平局时保留先建的那个)
+    seed(db, 18, [jia, yi], 0);      // 共享的 18 条
+    seed(db, 2, [jia], 100);         // 甲 独有 → |甲| = 20、cover(甲→乙) = 18/20 = 0.9
+    seed(db, 2, [yi], 200);          // 乙 独有 → |乙| = 20、cover(乙→甲) = 0.9
+
+    // 丙 **整个在 乙 里面**(10 条:共享的 8 条 + 乙 独有的 2 条),
+    // 但和 甲 只重合 8/10 = 80% —— 所以它只对 乙 单向 ≥90%
+    for (let i = 0; i < 8; i++) linkItemTag(db, `BV${i}`, bing, 'ai');
+    linkItemTag(db, 'BV200', bing, 'ai');
+    linkItemTag(db, 'BV201', bing, 'ai');
+
+    const changes = reconcile(db);
+
+    // ① 合并 乙→甲;② 丙 挂到 甲 下。
+    //
+    // **这一条钉的就是合并之后那个 `take()`。** 不重取快照的话,`sets` / `cov` /
+    // `parentOf` 里 乙 还活着(父边 null、集合 20 条),于是第二段会拿 丙(100% 在乙里)
+    // 去挂父 —— `setTagParent(db, 丙, 乙)` 里的乙**在库里已经不存在了**,UPDATE 撞
+    // tags.parent_id 的 FK(openDb 开了 foreign_keys)→ 整轮抛错。
+    // 快照一重取,乙 根本不进 `pairs`,丙 按数据挂到甲下。
+    //
+    // 为什么以前没有测试钉得住:第二段那句"双向 ≥cover 的一对不挂父"现在会把
+    // (甲,乙) 这对**跳过**,而它正是过去唯一撞上过期快照的一对 —— 于是删掉那行
+    // 全绿,只有真实运行时才会崩。夹具因此要三个词:一个双向对 + 一个**整个躲在
+    // 被并掉的那个词里**的词。
+    expect(changes.map((c) => c.kind)).toEqual(['merge', 'reparent']);
+    expect(changes[1]).toMatchObject({ kind: 'reparent', from: '丙', to: '甲' });
+    expect(db.prepare(`SELECT parent_id FROM tags WHERE id = ?`).get(bing))
+      .toEqual({ parent_id: jia });
+    expect(db.prepare(`SELECT id FROM tags WHERE id = ?`).get(yi)).toBeUndefined();
+  });
 });
