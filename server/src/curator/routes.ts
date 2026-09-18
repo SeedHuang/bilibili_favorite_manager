@@ -50,7 +50,7 @@ import {
   describeReport,
   type FolderLite,
 } from './classifier.js';
-import { matchAll, renderConditions, type ValidSuggestion } from './rules.js';
+import { matchAll, renderConditions, toRuleItem, type ValidSuggestion } from './rules.js';
 import { runSuggestions, suggestionInput } from './suggestions.js';
 import { buildReorganizeAudit, saveAudit, listAudits } from './audit.js';
 import { buildWorkbenchView } from '../db/repo/workbenchView.js';
@@ -370,10 +370,7 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
     // 匹配置信度给 1 —— 规则命中是"确定"不是"猜",和 AI 的 0.9 不是同一种东西
     const tagsOf = itemTagIds(db);
     const matched = matchAll(
-      items.map((i) => ({
-        id: i.id, title: i.title, intro: i.intro, upperName: i.upper_name,
-        tagIds: tagsOf.get(i.id) ?? [],
-      })),
+      items.map((i) => ({ ...toRuleItem(i), tagIds: tagsOf.get(i.id) ?? [] })),
       rules,
       // §9F:缺 subtree 时 tag 条件一律不命中 —— 规则先跑这一段就白跑了
       { subtree: subtreeSets(db) },
@@ -385,7 +382,13 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
           itemId,
           folderTempId: String(hit.folderId),
           confidence: 1,
-          reason: `规则命中:${hit.tokens.map((t) => t.token).join('、')}`,
+          // tag 命中的 token 是 **id**,而这句话唯一的用途就是被人读到(C11:任何给人
+          // 或模型看的出口都必须印词名)。翻不到名字的**跳过**,不退回 id —— id 正是
+          // 绝不能露出去的那个东西(和 renderConditions 同一条规矩)
+          reason: `规则命中:${hit.tokens
+            .map((t) => (t.field === 'tag' ? tagNameOf.get(Number(t.token)) : t.token))
+            .filter((x): x is string => !!x)
+            .join('、')}`,
         });
       }
     }

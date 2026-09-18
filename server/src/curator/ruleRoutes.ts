@@ -19,7 +19,7 @@ import type { ItemRow } from '../db/repo/items.js';
 import { itemTagIds, subtreeSets } from '../db/repo/tags.js';
 import { readLlmSettings } from '../llm/config.js';
 import { batchSize } from '../llm/context.js';
-import { matchAll, validateSuggestion, type RuleItem } from './rules.js';
+import { matchAll, toRuleItem, validateSuggestion } from './rules.js';
 import { runSuggestions, suggestionInput } from './suggestions.js';
 
 export interface RuleDeps {
@@ -41,14 +41,6 @@ export interface RuleView {
   hit: number;
 }
 
-/** 出口形状的 item 投影 + 出口形状的规则视图,路由里两处都要用 */
-const toRuleItem = (i: ItemRow): RuleItem => ({
-  id: i.id,
-  title: i.title,
-  intro: i.intro,
-  upperName: i.upper_name,
-});
-
 export function registerRuleRoutes(app: FastifyInstance, deps: RuleDeps): void {
   const { db } = deps;
 
@@ -67,10 +59,7 @@ export function registerRuleRoutes(app: FastifyInstance, deps: RuleDeps): void {
     // §9F:不传 ctx 的话 tag 条件一律不命中(缺 subtree 时实现刻意返回"没有标签"),
     // 于是界面上"命中 N 条"恒为 0,而规则看起来是配好的
     const matched = matchAll(
-      items.map((i) => ({
-        id: i.id, title: i.title, intro: i.intro, upperName: i.upper_name,
-        tagIds: tagsOf.get(i.id) ?? [],
-      })),
+      items.map((i) => ({ ...toRuleItem(i), tagIds: tagsOf.get(i.id) ?? [] })),
       rules,
       { subtree: subtreeSets(db) },
     );
@@ -188,6 +177,8 @@ export function registerRuleRoutes(app: FastifyInstance, deps: RuleDeps): void {
       { ...body, folderTempId: folderId },
       {
         validFolderIds: new Set([folderId]),
+        // 这里**故意**不带 tagIds:自证的探针字段只能是 VALID_FIELDS 里那三个文本字段
+        // —— tag 建议根本进不来(见 VALID_FIELDS 那条注释),带了也没人读
         itemsById: new Map(items.map((i) => [i.id, toRuleItem(i)])),
       },
     );

@@ -1,4 +1,5 @@
 import type { FolderRule, RuleCondition, RuleField } from '../db/repo/rules.js';
+import type { ItemRow } from '../db/repo/items.js';
 
 /**
  * 规则匹配 —— **纯函数,无 IO**。
@@ -41,6 +42,20 @@ export interface RuleHit {
 const FIELD_LABEL: Record<RuleField, string> = {
   title: '标题', intro: '简介', upper: 'UP 名', tag: '标签',
 };
+
+/**
+ * 库里的条目 → 规则引擎看的那个投影。**只有这一处**。
+ *
+ * 它跟着 `RuleItem` 住在同一个模块里:三个调用点(归类前先跑规则、规则面板算命中数、
+ * 建议算"规则覆盖了谁")看到的东西必须一模一样 —— 各写一遍的话,漏掉 `tagIds`
+ * (或某天多一个字段)只会让其中一条路上的规则悄悄少命中,而另外两条路看着是对的。
+ *
+ * `tagIds` 不在这个基础投影里:只有规则匹配那两条路要它,自证那条路用不上
+ * (探针字段只可能是文本字段)。需要它的地方自己铺一层,见下面的用法。
+ */
+export const toRuleItem = (i: ItemRow): RuleItem => ({
+  id: i.id, title: i.title, intro: i.intro, upperName: i.upper_name,
+});
 
 /** 一条条目命中哪些夹子的规则。**可多个** —— 命中即成员 */
 export function matchItem(

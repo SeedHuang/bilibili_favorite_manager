@@ -15,7 +15,7 @@ import { itemTagIds, listTagsWithParent, subtreeSets } from '../db/repo/tags.js'
 import { complete, type ModelConfig } from '../llm/provider.js';
 import { parseJsonArray } from './parse.js';
 import {
-  matchAll, renderConditions, validateSuggestions, mergeSuggestions,
+  matchAll, renderConditions, toRuleItem, validateSuggestions, mergeSuggestions,
   type RawSuggestion, type RuleItem, type ValidSuggestion,
 } from './rules.js';
 
@@ -77,10 +77,6 @@ export function buildSuggestionPrompt(opts: {
     '给规则建议。输出 JSON 数组,字段:folderTempId / field / any / because / evidenceItemIds',
   ].join('\n');
 }
-
-const toRuleItem = (i: ItemRow): RuleItem => ({
-  id: i.id, title: i.title, intro: i.intro, upperName: i.upper_name,
-});
 
 /** 建一次 itemId → tagIds 的表,闭包给下面用 —— 别在 toRuleItem 里逐条查 */
 const toRuleItemWith = (tagsOf: ReadonlyMap<string, number[]>) => (i: ItemRow): RuleItem => ({

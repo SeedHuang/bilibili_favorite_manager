@@ -476,6 +476,34 @@ describe('Pass 2', () => {
     await app.close();
   });
 
+  // §9F C11:任何给人/模型看的出口都必须印词名。这句 reason 的唯一用途就是被读到 ——
+  // 印「规则命中:42」等于没写;而翻不到名字的 token 要**跳过**,不能退回 id
+  it('规则命中的 reason 印 tag 词名,不印 id', async () => {
+    const { app, db } = makeApp();
+    seed(db);
+    const work = await seedWorkcopy(app);
+
+    const sport = ensureTag(db, '体育', null);
+    linkItemTag(db, 'BV1', sport, 'ai');
+    linkItemTag(db, 'BV2', sport, 'ai');
+    await app.inject({
+      method: 'PUT',
+      url: `/api/rules/${work}`,
+      payload: { conditions: [{ field: 'tag', any: [String(sport)] }] },
+    });
+
+    mocks.complete.mockClear();
+    const sid = await newSession(app);
+    const res = await app.inject({ method: 'POST', url: `/api/curator/sessions/${sid}/run-pass-2` });
+    expect(res.statusCode).toBe(200);
+
+    const stored = getClassification(db, sid)!;
+    // 两条都命中 → reason 里是词名;id 一个数字都不该出现
+    expect(stored.assignments.map((a) => a.reason)).toEqual(['规则命中:体育', '规则命中:体育']);
+    expect(mocks.complete).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   // 「新增规则」建出来就是 `[{field:'title',any:[]}]`,它渲染成空串 ——
   // 那种夹子必须和"没规则"一样待遇,不然模型只看到一个光秃秃的名字(§9C.0)
   it('规则行存在但渲染为空 → 照旧带样本标题', async () => {
