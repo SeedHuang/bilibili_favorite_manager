@@ -4,7 +4,6 @@ import type {
   AuditSummary,
   DryRun,
   EntryView,
-  FailedBatch,
   FolderSpec,
   Item,
   LlmPurpose,
@@ -20,8 +19,10 @@ import type {
   SessionDetail,
   SessionSummary,
   TagProgressPayload,
+  TagRunResult,
   TagRunStatus,
   TagTreeView,
+  TreeChange,
   WorkbenchView,
 } from './types';
 
@@ -376,6 +377,15 @@ export const tagApi = {
   /** 词库树 —— 规则里选标签(§9F C11)和「标签」页都用它 */
   tree: () => api<TagTreeView>('/api/tags/tree'),
 
+  changes: () => api<{ changes: TreeChange[] }>('/api/tags/changes'),
+
+  merge: (fromId: number, toId: number) => json<{ ok: true }>('POST', '/api/tags/merge', { fromId, toId }),
+
+  update: (id: number, patch: { name?: string; parentId?: number | null }) =>
+    json<{ ok: true }>('PATCH', `/api/tags/${id}`, patch),
+
+  remove: (id: number) => json<{ ok: true }>('DELETE', `/api/tags/${id}`),
+
   /**
    * 跑一遍标注(SSE,照 classifyStream 的骨架)。
    *
@@ -388,7 +398,7 @@ export const tagApi = {
     scope: 'missing' | 'all',
     onProgress: (p: TagProgressPayload) => void,
     opts: { signal?: AbortSignal } = {},
-  ): Promise<{ tagged: number; failedBatches: FailedBatch[] }> => {
+  ): Promise<TagRunResult> => {
     const res = await fetch(`/api/tags/run?scope=${scope}`, {
       method: 'POST',
       ...(opts.signal ? { signal: opts.signal } : {}),
@@ -405,7 +415,7 @@ export const tagApi = {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let done: { tagged: number; failedBatches: FailedBatch[] } | null = null;
+    let done: TagRunResult | null = null;
     let failure: string | null = null;
 
     for (;;) {
@@ -420,7 +430,7 @@ export const tagApi = {
         const data = /^data: (.*)$/m.exec(block)?.[1];
         if (!data) continue;
         if (event === 'progress') onProgress(JSON.parse(data) as TagProgressPayload);
-        else if (event === 'done') done = JSON.parse(data) as { tagged: number; failedBatches: FailedBatch[] };
+        else if (event === 'done') done = JSON.parse(data) as TagRunResult;
         else if (event === 'aborted') throw new DOMException('已中止', 'AbortError');
         else if (event === 'error') failure = (JSON.parse(data) as { reason?: string }).reason ?? '标注失败';
       }

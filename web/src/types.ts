@@ -324,6 +324,25 @@ export interface TagTreeView {
   total: number;
 }
 
+/** 一轮整理对树做了什么 —— 「标签」页顶部的清单(§9F C10) */
+export interface TreeChange {
+  kind: 'merge' | 'reparent';
+  from: string;
+  to: string;
+  detail: string;
+}
+
+export interface TagRunResult {
+  tagged: number;
+  failedBatches: { firstItemId: string; size: number; reason: string }[];
+  /** 质检做了什么 —— 剔了几个泛词、合了几组、挪了几个 */
+  check: { dropped: number; merged: number; moved: number };
+  /** 这轮树发生了什么(质检的 + 判据的),「标签」页顶部那张清单 */
+  changes: TreeChange[];
+  /** 本轮新建了多少个词 */
+  newWordCount: number;
+}
+
 /** §9F C14:一个夹子的标签画像 + 离群条目 */
 export interface FolderProfile {
   folderId: number;
