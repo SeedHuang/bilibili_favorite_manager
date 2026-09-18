@@ -2,14 +2,16 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { openDb } from '../db/index.js';
 import { upsertItem } from '../db/repo/items.js';
 import { listUntaggedItemIds } from '../db/repo/tagging.js';
-import { itemTagIds, listTagTree, normalizeTagName, findTag } from '../db/repo/tags.js';
+import {
+  ensureTag, itemTagIds, linkItemTag, listTagTree, normalizeTagName, findTag,
+} from '../db/repo/tags.js';
 import type { ItemRow } from '../db/repo/items.js';
 import type { ModelMeta } from '../llm/registry.js';
 
 const mocks = vi.hoisted(() => ({ complete: vi.fn() }));
 vi.mock('../llm/provider.js', () => ({ complete: mocks.complete }));
 
-const { runTagging, coerceTagOutput, TAG_KINDS } = await import('./tagger.js');
+const { runTagging, coerceTagOutput, applyTagOutput, TAG_KINDS } = await import('./tagger.js');
 
 const ctx: ModelMeta = { provider: 'ollama', model: 'qwen3-4b', contextWindow: 262_144, maxOutput: 8_192, verified: true };
 const config = { id: '本地', provider: 'ollama', baseUrl: '', apiKey: '', model: 'qwen3-4b' };
@@ -58,6 +60,41 @@ describe('coerceTagOutput', () => {
 
   it('TAG_KINDS 是六个受控值', () => {
     expect(TAG_KINDS).toEqual(['教学', '娱乐', '评测', '资讯', '工具', '其它']);
+  });
+});
+
+describe('applyTagOutput', () => {
+  it('**重标是替换不是叠加** —— 上一轮的标签不会留下当幽灵成员', () => {
+    const db = openDb(':memory:');
+    upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
+    applyTagOutput(db, { id: 'BV1', kind: '娱乐', domains: ['户外'], tags: ['露营', '烤羊肉'] });
+    // 第二次标同一条(「重新标注全部」就是这条路):露营 留着,烤羊肉 换成 天幕
+    applyTagOutput(db, { id: 'BV1', kind: '娱乐', domains: ['户外'], tags: ['露营', '天幕'] });
+
+    const roast = findTag(db, normalizeTagName('烤羊肉'))!;
+    const ids = itemTagIds(db, ['BV1']).get('BV1')!;
+    // 三个(户外 + 露营 + 天幕),**不是**并集的四个 —— §9F 的判据是集合关系,
+    // 集里多一个上一轮的词,那个词之后的每一个覆盖率就都是错的
+    expect(ids).toHaveLength(3);
+    expect(ids).not.toContain(roast);
+    // 词本身还在词库里 —— 换掉的是"这条视频挂着它",不是删词
+    expect(db.prepare(`SELECT id FROM tags WHERE norm = ?`).get(normalizeTagName('烤羊肉')))
+      .toBeDefined();
+  });
+
+  it('只清 `ai` 挂的 —— `user` 的标签不被一次模型重跑带走', () => {
+    const db = openDb(':memory:');
+    upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
+    const camp = ensureTag(db, '露营', null);
+    linkItemTag(db, 'BV1', camp, 'ai');
+    const manual = ensureTag(db, '手动加的', null);
+    linkItemTag(db, 'BV1', manual, 'user');
+
+    applyTagOutput(db, { id: 'BV1', kind: '娱乐', domains: ['户外'], tags: ['天幕'] });
+
+    const ids = itemTagIds(db, ['BV1']).get('BV1')!;
+    expect(ids).toContain(manual); // 别的来源挂的不动
+    expect(ids).not.toContain(camp); // 模型自己挂的那批整批换掉
   });
 });
 

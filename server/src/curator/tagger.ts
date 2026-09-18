@@ -115,11 +115,18 @@ export function applyTagOutput(db: Database.Database, o: TagOutput): { created: 
   }
   const host = domainIds[0] ?? null;
 
-  // ⚠ 悬挂问题(已上报,未决):这里的挂靠是**累加**的 —— `linkItemTag` 的
-  // ON CONFLICT DO NOTHING 只保证不重复挂,不淘汰上一轮挂上的词。于是 `scope=all`
-  // 重标会让一条视频留着历次的词,而集合判据(C9)吃的正是这份数据。
-  // 「重新标注全部」该是"重做"还是"叠加"是产品决定,不在这儿私自选边;
-  // 定了要淘汰的话,在这行前面加 `DELETE FROM item_tags WHERE item_id=? AND source='ai'`。
+  // ⚠ **这里曾经是累加的(留档)** —— 原来只有下面那个 `linkItemTag` 的
+  // ON CONFLICT DO NOTHING,它只保证不重复挂、不淘汰上一轮挂上的词。于是
+  // `scope=all`(「重新标注全部」)实际是**追加**:一条 {露营,烤羊肉} 重标成
+  // {露营,天幕} 之后三个都挂着,而那个过期的词成了它 item 集里的**幽灵成员**。
+  // §9F 的整套判据是**集合关系**,集脏了后面每一个覆盖率都是错的;§9F.6 又说
+  // 由它推出来的合并**不可逆** —— 拿脏集合判出来的合并撤不回来。
+  //
+  // 所以是**替换**:按钮叫「重新标注全部」,`source` 这列存在的意义就是记谁挂的
+  // (§9E C7 的增量/全量语义里,全量本来就是重写记录)。只清 `'ai'` 的 ——
+  // `'rule'` / `'user'` 是别的来源挂的,不该被一次模型重跑带走。
+  db.prepare(`DELETE FROM item_tags WHERE item_id = ? AND source = 'ai'`).run(o.id);
+
   for (const name of o.tags) {
     // 领域名自己不重复挂一遍(模型偶尔把 domains 也写进 tags)
     if (o.domains.some((d) => normalizeTagName(d) === normalizeTagName(name))) continue;
