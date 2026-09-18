@@ -34,6 +34,7 @@ export default function WorkFolderTree({
   onRemoveSelected,
   checked,
   onToggleCheck,
+  outliersByFolder,
 }: {
   folders: WorkFolderView[];
   removed: RemovedFolder[];
@@ -48,6 +49,13 @@ export default function WorkFolderTree({
   onMerge: (fromId: number, intoId: number) => void;
   onDelete: (folderId: number) => void;
   onRemoveSelected: (folderId: number, itemIds: string[]) => void;
+  /**
+   * 夹子 id → 和它不搭的条目 id(§9F C14)。
+   *
+   * 由 `curator.tsx` 从 `/api/workbench` 的 `profiles` 按 folderId 摊平 ——
+   * 这里只负责画那个 ⚠,**不自动移任何东西**(画像是镜子不是裁判,§9F.6)。
+   */
+  outliersByFolder: ReadonlyMap<number, readonly string[]>;
   /**
    * 被勾中的夹子 —— 它们是「移动 / 也放进」的**源**。
    *
@@ -77,6 +85,7 @@ export default function WorkFolderTree({
           onRemoveSelected={onRemoveSelected}
           checked={checked}
           onToggleCheck={onToggleCheck}
+          outliersByFolder={outliersByFolder}
         />
       ))}
 
@@ -130,6 +139,7 @@ function FolderRow({
   onRemoveSelected,
   checked,
   onToggleCheck,
+  outliersByFolder,
 }: {
   folder: WorkFolderView;
   allFolders: WorkFolderView[];
@@ -147,6 +157,7 @@ function FolderRow({
   onRemoveSelected: (folderId: number, itemIds: string[]) => void;
   checked: Set<number>;
   onToggleCheck: (folderId: number) => void;
+  outliersByFolder: ReadonlyMap<number, readonly string[]>;
 }) {
   // 静态 Modal.confirm 拿不到 ConfigProvider 的主题,用 App.useApp() 这套
   const { modal } = AntApp.useApp();
@@ -162,6 +173,7 @@ function FolderRow({
   };
 
   const others = allFolders.filter((f) => f.id !== folder.id);
+  const outliers = outliersByFolder.get(folder.id) ?? [];
   const selectedHere = items.filter((it) => selected.has(it.id)).length;
 
   /**
@@ -327,6 +339,19 @@ function FolderRow({
                 {folder.mark === 'renamed' && folder.originName && (
                   <span style={{ color: 'var(--text-dim)' }}> ← 「{folder.originName}」</span>
                 )}
+              </span>
+            )}
+
+            {/* §9F C14:这个夹子里有几条和其余内容对不上(零参数判据 —— 它每个标签
+                在夹子里都没有同伴)。点开能看是哪几条,不自动改任何东西 */}
+            {outliers.length > 0 && (
+              <span
+                role="img"
+                aria-label={`${outliers.length} 条可能放错了`}
+                title={`${outliers.length} 条可能放错了:${outliers.slice(0, 3).join('、')}${outliers.length > 3 ? ' …' : ''}`}
+                style={{ fontSize: 11, color: 'var(--warn)', flex: 'none', cursor: 'help' }}
+              >
+                ⚠
               </span>
             )}
 

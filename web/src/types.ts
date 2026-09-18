@@ -214,6 +214,8 @@ export interface WorkbenchView {
   folders: WorkFolderView[];
   removed: RemovedFolder[];
   unassignedCount: number;
+  /** §9F C14:夹子画像。后端一次算完整个数组 */
+  profiles?: FolderProfile[];
 }
 
 export type OpKind =
@@ -320,4 +322,15 @@ export interface TagNode {
 export interface TagTreeView {
   tree: TagNode[];
   total: number;
+}
+
+/** §9F C14:一个夹子的标签画像 + 离群条目 */
+export interface FolderProfile {
+  folderId: number;
+  name: string;
+  itemCount: number;
+  /** 高频标签,降序 —— 模型提改进时看的就是它 */
+  topTags: { name: string; count: number }[];
+  /** 和这个夹子不搭的条目 id(零参数判据) */
+  outliers: string[];
 }

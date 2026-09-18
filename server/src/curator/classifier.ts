@@ -316,6 +316,15 @@ export function buildPass1Prompt(opts: {
    * 看不到标签" —— 不报错、不红测试,只是提示词悄悄变薄。
    */
   tagInfo: TagInfoMap;
+  /** §9F C15:每个夹子里**实际**是什么 —— `renderProfiles` 渲染好的那段 */
+  profiles?: string;
+  /**
+   * ⚠️ **参数名必须是 `rulesText`,不能叫 `rules`。** `runPass1` 的 opts 里已经有一个
+   * `rules?: ReadonlyMap<string, readonly string[]>`(keyword 初分用的词表,
+   * `classifier.ts:461`),同一层再加一个同名的 `string` 直接**编译不过**。
+   * 名字里带 `Text` 也正好说明它是"给人/给模型看的那段文本",不是数据。
+   */
+  rulesText?: string;
 }): string {
   const folders = opts.existingFolders.length
     ? opts.existingFolders.map((f) => `#${f.id} ${f.name}`).join('\n')
@@ -324,15 +333,23 @@ export function buildPass1Prompt(opts: {
   const parts = [
     `## 用户现有的收藏夹(${opts.existingFolders.length} 个)`,
     folders,
-    '',
-    `## 收藏样本(${opts.sample.length} 条,从整个收藏库里均衡抽取)`,
-    opts.sample
-      .map((i) => {
-        const t = opts.tagInfo.get(i.id);
-        return renderItem(i, 120, t?.names, t?.kind);
-      })
-      .join('\n\n'),
   ];
+  // §9F C15:画像 = "这个夹子里**实际**是什么"。没有它,模型只能看名字猜 ——
+  // §9C.0 那次事故(4 条 AI 教程被归进「黑神话」)就是这个猜造成的。
+  if (opts.profiles) parts.push('', '### 每个夹子里实际是什么(按标签统计)', opts.profiles);
+  if (opts.sample.length) {
+    parts.push(
+      '',
+      `## 收藏样本(${opts.sample.length} 条,从整个收藏库里均衡抽取)`,
+      opts.sample
+        .map((i) => {
+          const t = opts.tagInfo.get(i.id);
+          return renderItem(i, 120, t?.names, t?.kind);
+        })
+        .join('\n\n'),
+    );
+  }
+  if (opts.rulesText) parts.push('', '### 现有的归类规则', opts.rulesText);
   if (opts.clusterNote) parts.push('', `## 本地关键词初筛的情况`, opts.clusterNote);
   if (opts.userConstraint) parts.push('', `## 用户的约束(必须遵守)`, opts.userConstraint);
   parts.push('', '请给出建议体系。');
@@ -502,6 +519,10 @@ export async function runPass1(opts: {
   perGroupMax?: number;
   /** §9F:标签进 prompt —— 调用方一次查好(`tagInfoByItem`),必填(理由见 C11) */
   tagInfo: TagInfoMap;
+  /** §9F C15:每个夹子里**实际**是什么 —— 没有它模型只能看名字猜 */
+  profilesText?: string;
+  /** 现有规则的可读文本。**别叫 `rules`** —— 那个名字已经被 keyword 词表占了 */
+  rulesText?: string;
 }): Promise<Pass1Result> {
   const rules = opts.rules ?? DEFAULT_RULES;
 
@@ -539,6 +560,8 @@ export async function runPass1(opts: {
         sample,
         clusterNote,
         ...(opts.userConstraint ? { userConstraint: opts.userConstraint } : {}),
+        ...(opts.profilesText ? { profiles: opts.profilesText } : {}),
+        ...(opts.rulesText ? { rulesText: opts.rulesText } : {}),
         tagInfo: opts.tagInfo,
       }),
     },

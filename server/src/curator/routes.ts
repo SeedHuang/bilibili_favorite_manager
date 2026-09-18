@@ -26,7 +26,7 @@ import {
 import { listFolders, isLockedFolder } from '../db/repo/folders.js';
 import { listRules } from '../db/repo/rules.js';
 import { getItem, type ItemRow } from '../db/repo/items.js';
-import { itemTagIds, listTagsWithParent, subtreeSets, tagInfoByItem } from '../db/repo/tags.js';
+import { itemTagIds, subtreeSets, tagInfoByItem, tagNamesById } from '../db/repo/tags.js';
 // 条目出口形状与 /api/folders/:id/items 共用同一份 —— 前端用同一套渲染,
 // 分两份写迟早会分叉
 import { shapeItem } from '../http/routes/items.js';
@@ -51,6 +51,7 @@ import {
   type FolderLite,
 } from './classifier.js';
 import { matchAll, renderConditions, toRuleItem, type ValidSuggestion } from './rules.js';
+import { buildFolderProfiles, renderProfiles } from './folderProfile.js';
 import { runSuggestions, suggestionInput } from './suggestions.js';
 import { buildReorganizeAudit, saveAudit, listAudits } from './audit.js';
 import { buildWorkbenchView } from '../db/repo/workbenchView.js';
@@ -260,11 +261,19 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
     try {
       // §9F:标签和 kind 一次取齐 —— 一批几百条,别在 renderItem 里逐条查(那就是 N+1)
       const tagInfo = tagInfoByItem(db);
+      // renderConditions 要拿到名字表,否则 tag 条件会印成一串 id(Task 6)
+      const tagNameOf = tagNamesById(db);
       const result = await runPass1({
         config: llm.config,
         existingFolders: existingFolders(db),
         items,
         tagInfo,
+        // §9F C15:画像让"提体系"看得见每个夹子**实际**是什么 ——
+        // 只给名字的话模型只能猜(§9C.0 那次事故就是这么来的)
+        profilesText: renderProfiles(buildFolderProfiles(db)),
+        rulesText: listRules(db)
+          .map((r) => `${r.folderId}: ${renderConditions(r.conditions, tagNameOf) || '(空)'}`)
+          .join('\n'),
         ...(constraint?.trim() ? { userConstraint: constraint.trim() } : {}),
       });
 
@@ -334,7 +343,7 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
     const ruleOf = new Map(rules.map((r) => [r.folderId, r]));
 
     // 规则里的 tag 条件存的是 id —— 给模型看的那份必须翻成词名(见 renderConditions)
-    const tagNameOf = new Map(listTagsWithParent(db).map((r) => [r.id, r.name]));
+    const tagNameOf = tagNamesById(db);
 
     const folders: FolderSpec[] = work.map((w) => ({
       tempId: String(w.id),
@@ -725,6 +734,13 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
       // 整理期间又同步过 → 界面顶部要提示(不阻断,但不能不吭声)
       stale: state !== null && state.basedOn !== currentFull,
       ...view,
+      /**
+       * §9F C14:每个夹子的标签画像 + 离群条目。
+       *
+       * **一次算完整个数组**(几十个夹子,内存统计),不要在字段里按需算 ——
+       * 那会让这个本来一次查询的接口变成 N 次。
+       */
+      profiles: buildFolderProfiles(db),
     };
   });
 

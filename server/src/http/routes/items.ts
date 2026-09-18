@@ -7,6 +7,7 @@ import {
   countFolderItems,
   type ItemRow,
 } from '../../db/repo/items.js';
+import { tagInfoByItem } from '../../db/repo/tags.js';
 
 /** FTS 表默认返回条数上限(搜索没分页,UI 只展示首屏) */
 const SEARCH_LIMIT = 50;
@@ -126,6 +127,11 @@ export function registerItemRoutes(
       )
       .all(id) as { id: number; title: string }[];
 
-    return { item: shapeItem(item, null), folders };
+    // 在**原有返回值**上加一个字段 —— 别整段重写:这里的局部变量和出口形状
+    // 以它本来的写法为准(shapeItem 的注释要求出口只有一个口径)。
+    // 标签放**同级**而不是塞进 item 里:那个形状是 /api/folders/:id/items
+    // 和整理工作台共用的,多一个只在这儿出现的字段就是分叉。
+    const info = tagInfoByItem(db).get(id);
+    return { item: shapeItem(item, null), folders, tagNames: info?.names ?? [] };
   });
 }

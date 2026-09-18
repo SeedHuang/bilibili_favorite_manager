@@ -178,6 +178,15 @@ export function listTagsWithParent(db: Database.Database): TagRow[] {
 }
 
 /**
+ * tagId → 显示名。规则条件、夹子画像、建议都要把 id 翻回词名 ——
+ * **一处建一份**(原来在四个调用点各写了一遍同样的 `new Map(...)`);
+ * 而且它必须是**每次调用现建**,库里改了名/合并了词就要跟着变。
+ */
+export function tagNamesById(db: Database.Database): Map<number, string> {
+  return new Map(listTagsWithParent(db).map((r) => [r.id, r.name]));
+}
+
+/**
  * tagId → 挂它的**视频 id 集合**。集合判据的原料。
  *
  * 用 Set<string> 而不是 bitset:3250 条 × 几千个词的规模下,内存和速度都够,

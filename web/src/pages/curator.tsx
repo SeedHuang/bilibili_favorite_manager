@@ -269,6 +269,11 @@ export default function CuratorPage() {
    * 新建夹子是**主操作**,给 primary —— 它不该和旁边那些普通按钮长得一样。
    */
   const hasChecked = checkedFolders.size > 0;
+  /**
+   * §9F C14:夹子 id → 离群条目 id。摊平一次给树用 —— 树里逐行 find 就是 O(n²),
+   * 而夹子有几十个、每行都渲染。
+   */
+  const outliersByFolder = new Map((view?.profiles ?? []).map((p) => [p.folderId, p.outliers]));
   const BUTTON_GROUPS: ReactNode[][] = [
     [
       <Button
@@ -392,6 +397,7 @@ export default function CuratorPage() {
                 }
                 checked={checkedFolders}
                 onToggleCheck={toggleCheckFolder}
+                outliersByFolder={outliersByFolder}
                 onRemoveSelected={(folderId, itemIds) =>
                   void act(
                     () => workbenchApi.remove(itemIds, folderId),
