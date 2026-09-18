@@ -60,11 +60,19 @@ items(
   invalid_checked_at INTEGER,
   -- ↓ AI 派生字段,与上面的同步字段物理隔离(C8)
   ai_tags TEXT, ai_summary TEXT, ai_checked_at INTEGER
+  -- §9F(2026-09-18)起:ai_kind 存形态(教学/娱乐/…),ai_checked_at 复用为标注水位线,
+  -- ai_tags / ai_summary **已废弃**(标签改走下面的 tags 树,见 §9F)
 )
 
 -- 多对多:一个视频可以同时在多个收藏夹里
 folder_items(folder_id, item_id, fav_time, PRIMARY KEY(folder_id, item_id))
 CREATE INDEX idx_fi_item ON folder_items(item_id);
+
+-- ↓ §9F 词库树(2026-09-18):取代 items.ai_tags
+tags(id, name, parent_id, created_at)              -- parent_id NULL = 根(大类)
+  UNIQUE(parent_id, name)
+tag_aliases(name TEXT PRIMARY KEY, tag_id)         -- 见过的所有写法 → 规范节点
+item_tags(item_id, tag_id, source, PRIMARY KEY(item_id, tag_id))
 
 -- 同步断点续传游标
 sync_state(key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER)

@@ -13,6 +13,7 @@
 | 做可中止的 AI 调用 + 归类进度(2026-09-17) | `m4d-abort-and-progress.md` + `m4-curator-classification.md` + `shared-frontend.md` |
 | 做条目 AI 标注(2026-09-17) | `m4e-item-tagging.md` + `m4d-abort-and-progress.md` + `shared-data-model.md` |
 | 改模型管理(三层凭证/条目/用途,2026-09-17) | `2026-09-17-model-config-redesign.md` + `shared-llm-provider.md` |
+| 做标签体系(词库树/质检/规则接入,2026-09-18) | `m4f-tag-library.md` + `m4e-item-tagging.md` + `shared-data-model.md` |
 | 写 M5 plan(写回 B 站) | `m5-writeback.md` + `shared-data-model.md` + `shared-logging.md` + `shared-frontend.md` + `shared-testing.md` |
 | 改 M1/M2/M3 实现 | `m1-sync-foundation.md` + `shared-logging.md` + `shared-data-model.md` |
 | 看 §1 背景 / §2 硬性约束 / §15 非目标 | `shared-charter.md` |
