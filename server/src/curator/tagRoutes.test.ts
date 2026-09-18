@@ -143,12 +143,7 @@ describe('标注路由', () => {
     const tagged = (db.prepare(`SELECT COUNT(*) AS n FROM items WHERE ai_checked_at IS NOT NULL`).get() as { n: number }).n;
     expect(tagged).toBeGreaterThan(0); // 已完成的批次保留
     expect(tagged).toBeLessThan(40); // 没跑的批次没被补成"结果"
-    // 中止真的让后面**一次调用都没再发**:40 条 / 批上限 16 = **3 批**(16+16+8),
-    // 而调用停在 2 次 —— 少的正是"中止之后的那一次"。断在第 2 批:call 2 抛 AbortError 之后
-    // 补轮那道守卫(tagger.ts:226 `if (signal.aborted) break`)让这批不再补轮,外层每批
-    // 开工前的同一道守卫(:210)接着挡住第 3 批。所以落库的 16 条是**第 1 批整批**,
-    // 第 2 批一条没落 —— 上面两个 `>`/`<` 断言量出来的就是这件事。
-    expect(mocks.complete).toHaveBeenCalledTimes(2);
+    // 落库的 16 条 = **第 1 批整批**,第 2 批一条没落 —— 上面两个 `>`/`<` 量的是这件事
 
     // 中止记 warn 不是 error(用户改主意不是故障)。silent 只关 stdout,events 表照写。
     // **要 waitFor** —— 断开那一刻 inject 的 promise 就落定了,路由的收尾(记日志 → end)
@@ -158,6 +153,22 @@ describe('标注路由', () => {
         level: 'warn',
       }),
     );
+
+    // 中止之后**一次调用都没再发**:40 条 / 批上限 16 = **3 批**(16+16+8),而调用停在 2
+    // —— 少的正是"中止之后的那一次"。中止发生在 call 2(第 2 批)的抛出处,之后每批开工前
+    // 的守卫(tagger.ts:210)与补轮那条(:216)都看得见同一个 `signal.aborted`,于是第 3 批
+    // (剩下 8 条)一次都没发出去。
+    //
+    // **这一句的位置是承重的,不能挪到上面几个断言旁边**:"第 3 批有没有发出去"是路由在
+    // 断开**之后**才走到的地方,而 inject 的 promise 断开那一刻就落定了。实测:把 :210 和
+    // :216 都删掉,这一句放在上面那几个断言旁边时**照样绿**(那一刻读到的是 2,80ms 后才是 3);
+    // 放到 waitFor 之后才当场红(3 次)。等 TAGGING_ABORTED 落了日志 = 路由已跑完 runTagging
+    // 的收尾,这时候这个数才有意义。
+    //
+    // 它钉的是"中止后不再有调用"这个 §9D B2 契约,**不是**某一条守卫 —— 那两条互为备份,
+    // 实测:只删 :210 → 16 passed,只删 :216 → 16 passed,两条都删 → 这一句红(2≠3)。
+    expect(mocks.complete).toHaveBeenCalledTimes(2);
+
     await app.close();
   });
 

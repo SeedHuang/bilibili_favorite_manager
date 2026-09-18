@@ -327,11 +327,13 @@ export default function TagPanel() {
 
   /**
    * 进度条要的那一个数。**分母为 0 时给 0** —— 空池子(一条待标的都没有)下
-   * `done/total` 是 `0/0` = NaN,Progress 拿到它会画出一根坏条。0% 才是真话:
-   * 这一跑确实没有可标的东西。
+   * `done/total` 是 `0/0` = NaN,而 `0/0` 根本不是个数:0% 才是真话,这一跑确实
+   * 没有可标的东西。(antd 内部会把 NaN 夹成 0 —— `progress/utils.js` 的
+   * `validProgress` 用 `!progress` 一把捞掉 —— 所以条不会真的画坏;但那**是它的
+   * 实现细节**,不该由我们依赖,该由我们说出 0。)
    *
-   * 取**下取整**不四舍五入:15/16 舍成 100% 就是"还没跑完却报跑完了",
-   * 而进度条正好卡在 100% 不动,比停在 94% 更让人以为卡死。
+   * 取**下取整**不四舍五入:199/200 舍上去就是 100% —— "还没跑完却报跑完了",
+   * 而进度条正好卡在 100% 不动(下一批还在跑),比停在 99% 更让人以为卡死。
    */
   const tagPct =
     tagProgress && tagProgress.total > 0
@@ -400,8 +402,9 @@ export default function TagPanel() {
         {/* 进度条 —— 只在跑的时候有(空闲那行说的是"库里标了多少",不是一次跑的进度,
             给它配一根条会让人以为有个东西正在动)。
             §9D.2 那行等宽数字照旧是准确读数,这根条是**一眼看到大概到哪**;
-            颜色走 `--accent`(不留给 antd 默认的 `colorInfo` —— 那是蓝色,
-            和这块面板的青色对不上;主题只改了 colorPrimary) */}
+            颜色走 `--accent`(不留给 antd 的默认色:`Progress` 用的是 `colorInfo`,
+            主题里那几个色(primary/error/success/warning 和底色)都改过,唯独没碰
+            `colorInfo` —— 它还是 antd 种子里的蓝 #1677ff,和这块面板的青色对不上) */}
         {tagging && (
           <div style={{ marginTop: 6 }}>
             <Progress percent={tagPct} size="small" strokeColor="var(--accent)" />
