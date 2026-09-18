@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ModelMeta } from '../llm/registry.js';
 import type { ItemRow } from '../db/repo/items.js';
 import type { FolderSpec } from '../db/repo/sessions.js';
+import type { TagInfoMap } from './classifier.js';
 
 const mocks = vi.hoisted(() => ({ complete: vi.fn() }));
 vi.mock('../llm/provider.js', () => ({ complete: mocks.complete }));
@@ -35,6 +36,13 @@ const tinyCtx: ModelMeta = {
   verified: true,
 };
 const config = { id: '本地', provider: 'ollama', baseUrl: '', apiKey: '', model: 'qwen2.5:14b' };
+
+/**
+ * §9F:标签映射。绝大多数用例不关心标签,共用这一份空的 —— `tagInfo` 是**必填**的
+ * (C11:给默认值会把"忘了传"变成"模型永远看不到标签"),所以每个调用点都得写。
+ * 真喂标签的只有 `renderItem` 那几条和 routes.test.ts 的 C5。
+ */
+const noTags: TagInfoMap = new Map();
 
 const item = (id: string, title: string, extra: Partial<ItemRow> = {}): ItemRow => ({
   id,
@@ -276,6 +284,7 @@ describe('prompt 组装', () => {
     const p = buildPass1Prompt({
       existingFolders: existing,
       sample: [item('BV1', 'Python 教程')],
+      tagInfo: noTags,
     });
     expect(p).toContain('#42 深度学习');
     expect(p).toContain('#43 前端');
@@ -287,6 +296,7 @@ describe('prompt 组装', () => {
       existingFolders: existing,
       sample: [],
       userConstraint: '控制在 15 个以内',
+      tagInfo: noTags,
     });
     expect(p).toContain('控制在 15 个以内');
   });
@@ -295,6 +305,7 @@ describe('prompt 组装', () => {
     const p = buildPass2Prompt({
       folders: [{ ...folder('f1', 'AI/编程'), description: '很长的说明', estCount: 999 }],
       items: [item('BV1', '题')],
+      tagInfo: noTags,
     });
     // tempId 用**方括号单独框出来** —— 它现在是裸数字(工作夹子 id),
     // 写成 `63:健身` 时实测小模型会填名字而不是数字,整批归类全落空
@@ -319,7 +330,7 @@ describe('prompt 组装', () => {
   });
 
   it('Pass 2 不带收藏时间(fav_time 与主题无关,spec §9.3)', () => {
-    const p = buildPass2Prompt({ folders: [folder('f1', 'A')], items: [item('BV1', '题')] });
+    const p = buildPass2Prompt({ folders: [folder('f1', 'A')], items: [item('BV1', '题')], tagInfo: noTags });
     expect(p).not.toContain('fav');
   });
 
@@ -327,6 +338,7 @@ describe('prompt 组装', () => {
     const p = buildPass1Prompt({
       existingFolders: [],
       sample: [item('BV1', '题', { intro: '长'.repeat(5000) })],
+      tagInfo: noTags,
     });
     expect(p.length).toBeLessThan(2000);
   });
@@ -337,6 +349,7 @@ describe('buildPass2Prompt · 规则与样本', () => {
     const p = buildPass2Prompt({
       folders: [folder('42', 'AI/编程')],
       items: [item('BV1', '题')],
+      tagInfo: noTags,
     });
     // folder() helper 默认 rule 是 '看标题'
     expect(p).toContain('[42] AI/编程 —— 看标题');
@@ -347,13 +360,14 @@ describe('buildPass2Prompt · 规则与样本', () => {
       folders: [folder('42', '黑神话')],
       items: [item('BV1', '题')],
       samples: new Map([[42, ['黑神话悟空 第一回', '黑神话 全成就攻略']]]),
+      tagInfo: noTags,
     });
     expect(p).toContain('黑神话悟空 第一回');
     expect(p).toContain('黑神话 全成就攻略');
   });
 
   it('Pass 2 不带样本时不留空行', () => {
-    const p = buildPass2Prompt({ folders: [folder('42', 'AI/编程')], items: [item('BV1', '题')] });
+    const p = buildPass2Prompt({ folders: [folder('42', 'AI/编程')], items: [item('BV1', '题')], tagInfo: noTags });
     expect(p).not.toContain('现有条目');
   });
 });
@@ -419,7 +433,7 @@ describe('runPass1', () => {
   it('校验不通过直接抛,并带上报告 —— Pass 2 绝不跟着错的体系跑', async () => {
     mocks.complete.mockResolvedValue('{"folders":[{"tempId":"f1","name":"A","reuseFolderId":999}]}');
     await expect(
-      runPass1({ config, existingFolders: existing, items }),
+      runPass1({ config, existingFolders: existing, items, tagInfo: noTags }),
     ).rejects.toBeInstanceOf(TaxonomyValidationError);
   });
 
@@ -427,21 +441,21 @@ describe('runPass1', () => {
     mocks.complete.mockResolvedValue(
       '{"folders":[{"tempId":"f1","name":"A","reuseFolderId":42},{"tempId":"f2","name":"B","reuseFolderId":42}]}',
     );
-    await expect(runPass1({ config, existingFolders: existing, items })).rejects.toBeInstanceOf(
+    await expect(runPass1({ config, existingFolders: existing, items, tagInfo: noTags })).rejects.toBeInstanceOf(
       TaxonomyValidationError,
     );
   });
 
   it('只是警告(有未复用的现有夹子)不阻断,体系照常返回', async () => {
     mocks.complete.mockResolvedValue('{"folders":[{"tempId":"f1","name":"新名","reuseFolderId":42}]}');
-    const r = await runPass1({ config, existingFolders: existing, items });
+    const r = await runPass1({ config, existingFolders: existing, items, tagInfo: noTags });
     expect(r.validation.unmatchedExistingFolders).toEqual([43]);
     expect(r.taxonomy.folders).toHaveLength(1);
   });
 
   it('keyword 初分是本地算的,不花 token', async () => {
     mocks.complete.mockResolvedValue('{"folders":[{"tempId":"f1","name":"A","reuseFolderId":42}]}');
-    const r = await runPass1({ config, existingFolders: existing, items });
+    const r = await runPass1({ config, existingFolders: existing, items, tagInfo: noTags });
     expect(r.keywordStats.matched).toBe(30); // "Python" 全命中
     expect(r.keywordStats.clusters.get('AI/编程')).toBe(30);
     expect(mocks.complete).toHaveBeenCalledTimes(1);
@@ -450,13 +464,13 @@ describe('runPass1', () => {
   it('喂进去的样本不超过 §9.1 的上限', async () => {
     mocks.complete.mockResolvedValue('{"folders":[{"tempId":"f1","name":"A","reuseFolderId":42}]}');
     const many = Array.from({ length: 500 }, (_, i) => item(`BV${i}`, `随手拍 ${i}`));
-    const r = await runPass1({ config, existingFolders: existing, items: many });
+    const r = await runPass1({ config, existingFolders: existing, items: many, tagInfo: noTags });
     expect(r.sample.length).toBeLessThanOrEqual(100);
   });
 
   it('吐不出可用 JSON 时报错,而不是返回一个空体系', async () => {
     mocks.complete.mockResolvedValue('抱歉,我需要更多信息');
-    await expect(runPass1({ config, existingFolders: existing, items })).rejects.toThrow(/JSON/);
+    await expect(runPass1({ config, existingFolders: existing, items, tagInfo: noTags })).rejects.toThrow(/JSON/);
   });
 });
 
@@ -472,7 +486,7 @@ describe('runPass2', () => {
 
   it('40 条 / 批 16 → 3 批,每批一次调用', async () => {
     mocks.complete.mockResolvedValue('[{"itemId":"x","folderTempId":"f1"}]');
-    await runPass2({ config, ctx: tinyCtx, folders, items });
+    await runPass2({ config, ctx: tinyCtx, folders, items, tagInfo: noTags });
     expect(mocks.complete).toHaveBeenCalledTimes(3);
   });
 
@@ -484,6 +498,7 @@ describe('runPass2', () => {
       ctx: tinyCtx,
       folders,
       items,
+      tagInfo: noTags,
       onBatch: (b) => seen.push({ batch: b.batch, batches: b.batches, done: b.done, total: b.total }),
     });
     expect(seen).toEqual([
@@ -514,6 +529,7 @@ describe('runPass2', () => {
       ctx: tinyCtx,
       folders: [folder('42', 'AI/编程')],
       items: [item('BV1', 'a'), item('BV2', 'b'), item('BV3', 'c')],
+      tagInfo: noTags,
       onBatch: (b) => seen.push(b),
     });
     expect(seen.map(({ batch, batches, done, total }) => ({ batch, batches, done, total }))).toEqual([
@@ -549,6 +565,7 @@ describe('runPass2', () => {
       ctx: tinyCtx,
       folders: [folder('42', 'AI/编程')],
       items,
+      tagInfo: noTags,
       signal: controller.signal,
     });
     expect(calls).toBe(1); // 真的两批:没有 abort 时这里会是 2
@@ -572,6 +589,7 @@ describe('runPass2', () => {
       ctx: tinyCtx,
       folders: [folder('42', 'AI/编程')],
       items: [item('BV1', 'a'), item('BV2', 'b'), item('BV3', 'c')],
+      tagInfo: noTags,
       signal: controller.signal,
     });
     expect(got.failedBatches).toEqual([]); // ← 回归这里是全绿变红的关键断言
@@ -588,6 +606,7 @@ describe('runPass2', () => {
       ctx: tinyCtx,
       folders,
       items: items.slice(0, 16), // 正好一批 16 > MIN_BATCH
+      tagInfo: noTags,
     });
 
     expect(r.failedBatches).toEqual([]);
@@ -602,7 +621,7 @@ describe('runPass2', () => {
       return calls <= 3 ? '看不懂' : '[{"itemId":"x","folderTempId":"f1"}]';
     });
 
-    const r = await runPass2({ config, ctx: tinyCtx, folders, items: items.slice(0, 32) });
+    const r = await runPass2({ config, ctx: tinyCtx, folders, items: items.slice(0, 32), tagInfo: noTags });
 
     expect(r.failedBatches.length).toBeGreaterThan(0);
     expect(r.failedBatches.every((b) => b.size <= MIN_BATCH)).toBe(true);
@@ -611,14 +630,14 @@ describe('runPass2', () => {
 
   it('请求本身失败时不缩批 —— 网络问题缩批没用,只会白打', async () => {
     mocks.complete.mockRejectedValue(new Error('ECONNREFUSED'));
-    const r = await runPass2({ config, ctx: tinyCtx, folders, items });
+    const r = await runPass2({ config, ctx: tinyCtx, folders, items, tagInfo: noTags });
     expect(mocks.complete).toHaveBeenCalledTimes(3); // 3 批各一次,没有裂开
     expect(r.failedBatches).toHaveLength(3);
     expect(r.failedBatches[0]!.reason).toContain('ECONNREFUSED');
   });
 
   it('空体系 / 空条目直接返回,不打模型', async () => {
-    expect(await runPass2({ config, ctx: tinyCtx, folders: [], items })).toEqual({
+    expect(await runPass2({ config, ctx: tinyCtx, folders: [], items, tagInfo: noTags })).toEqual({
       assignments: [],
       failedBatches: [],
     });
@@ -637,7 +656,7 @@ describe('classifyAll', () => {
       .mockResolvedValueOnce(okProposal)
       .mockResolvedValue('[{"itemId":"BV0","folderTempId":"f1","confidence":0.9,"reason":"是教程"}]');
 
-    const r = await classifyAll({ config, ctx: tinyCtx, existingFolders: existing, items });
+    const r = await classifyAll({ config, ctx: tinyCtx, existingFolders: existing, items, tagInfo: noTags });
 
     expect(r.taxonomy.folders[0]!.name).toBe('AI/编程');
     expect(r.assignments).toHaveLength(40);
@@ -648,7 +667,7 @@ describe('classifyAll', () => {
       .mockResolvedValueOnce(okProposal)
       .mockResolvedValue('[{"itemId":"BV0","folderTempId":"f1","confidence":0.9,"reason":"是教程"}]');
 
-    const r = await classifyAll({ config, ctx: tinyCtx, existingFolders: existing, items });
+    const r = await classifyAll({ config, ctx: tinyCtx, existingFolders: existing, items, tagInfo: noTags });
 
     expect(new Set(r.assignments.map((a) => a.itemId)).size).toBe(40);
     const unassigned = r.assignments.filter((a) => a.folderTempId === null);
@@ -663,7 +682,7 @@ describe('classifyAll', () => {
         '[{"itemId":"BV0","folderTempId":"f1","confidence":0.3},{"itemId":"BV0","folderTempId":null,"confidence":0.9}]',
       );
 
-    const r = await classifyAll({ config, ctx: tinyCtx, existingFolders: existing, items });
+    const r = await classifyAll({ config, ctx: tinyCtx, existingFolders: existing, items, tagInfo: noTags });
     expect(r.assignments.find((a) => a.itemId === 'BV0')!.confidence).toBe(0.9);
   });
 
@@ -672,7 +691,7 @@ describe('classifyAll', () => {
       '[{"itemId":"BV0","folderTempId":"f1","op":"remove_item","action":"delete"}]',
     );
 
-    const r = await classifyAll({ config, ctx: tinyCtx, existingFolders: existing, items });
+    const r = await classifyAll({ config, ctx: tinyCtx, existingFolders: existing, items, tagInfo: noTags });
     const serialized = JSON.stringify(r);
     expect(serialized).not.toContain('remove_item');
     expect(serialized).not.toContain('delete');

@@ -51,9 +51,9 @@ const strList = (v: unknown): string[] =>
 
 /** 收窄模型输出。**只收本批的 id** —— 模型编别的条目无效(和归类同款纪律) */
 export function coerceTagOutput(raw: unknown, batchIds: ReadonlySet<string>): TagOutput[] {
-  // 生产的 `raw` 是模型的原样输出(字符串);这里也认已经解析好的数组 ——
-  // 测试直接喂数组,而 `parseLooseJson` 对非字符串一律 null,不认就等于口径不一
-  const list = Array.isArray(raw) ? raw : (parseJsonArray(raw) ?? []);
+  // `raw` 是模型的原样输出(字符串)。**只认字符串** —— 和 `coerceAssignments` /
+  // Task 3 的 `coerceVerdicts` 同一个口径,别在这儿开第二个方言
+  const list = parseJsonArray(raw) ?? [];
   const out: TagOutput[] = [];
   for (const r of list) {
     const o = r as { id?: unknown; kind?: unknown; domains?: unknown; tags?: unknown };
@@ -115,6 +115,11 @@ export function applyTagOutput(db: Database.Database, o: TagOutput): { created: 
   }
   const host = domainIds[0] ?? null;
 
+  // ⚠ 悬挂问题(已上报,未决):这里的挂靠是**累加**的 —— `linkItemTag` 的
+  // ON CONFLICT DO NOTHING 只保证不重复挂,不淘汰上一轮挂上的词。于是 `scope=all`
+  // 重标会让一条视频留着历次的词,而集合判据(C9)吃的正是这份数据。
+  // 「重新标注全部」该是"重做"还是"叠加"是产品决定,不在这儿私自选边;
+  // 定了要淘汰的话,在这行前面加 `DELETE FROM item_tags WHERE item_id=? AND source='ai'`。
   for (const name of o.tags) {
     // 领域名自己不重复挂一遍(模型偶尔把 domains 也写进 tags)
     if (o.domains.some((d) => normalizeTagName(d) === normalizeTagName(name))) continue;

@@ -25,11 +25,11 @@ beforeEach(() => vi.clearAllMocks());
 describe('coerceTagOutput', () => {
   it('只收本批的 id;tags/domains 非数组或空串一律丢掉', () => {
     const got = coerceTagOutput(
-      [
+      JSON.stringify([
         { id: 'BV1', kind: '娱乐', domains: ['美食'], tags: ['烤羊肉', ''] },
         { id: 'BV9', kind: '娱乐', domains: ['美食'], tags: ['不该收'] },
         { id: 'BV2', kind: '教学', domains: 'not-array', tags: ['x'] },
-      ],
+      ]),
       new Set(['BV1', 'BV2']),
     );
     expect(got.map((o) => o.id)).toEqual(['BV1', 'BV2']);
@@ -40,17 +40,17 @@ describe('coerceTagOutput', () => {
   it('领域和标签都空 → 整条丢弃,当没标(留给下一轮重试)', () => {
     // 收下它的话会写 ai_checked_at、于是这条**再也不会被重标**(增量只挑
     // ai_checked_at IS NULL),而它一个标签都没拿到 —— 等于永久漏掉
-    expect(coerceTagOutput([{ id: 'BV1' }], new Set(['BV1']))).toEqual([]);
+    expect(coerceTagOutput(JSON.stringify([{ id: 'BV1' }]), new Set(['BV1']))).toEqual([]);
   });
 
   it('只有 kind、没有标签 → 也算没标上(标签才是这条链路的目的)', () => {
-    expect(coerceTagOutput([{ id: 'BV1', kind: '教学' }], new Set(['BV1']))).toEqual([]);
+    expect(coerceTagOutput(JSON.stringify([{ id: 'BV1', kind: '教学' }]), new Set(['BV1']))).toEqual([]);
   });
 
   // kind 受控枚举(C3)—— 越界的 kind 落库时按「其它」处理,不照单全收
   it('kind 越界 → 空串(落库按「其它」处理)', () => {
     const got = coerceTagOutput(
-      [{ id: 'BV1', kind: '宇宙无敌', domains: ['美食'], tags: ['烤羊肉'] }],
+      JSON.stringify([{ id: 'BV1', kind: '宇宙无敌', domains: ['美食'], tags: ['烤羊肉'] }]),
       new Set(['BV1']),
     );
     expect(got[0]!.kind).toBe('');

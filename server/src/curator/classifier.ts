@@ -244,7 +244,7 @@ export const PASS1_SYSTEM = `你是 bilibili 收藏整理管家。用户会给�
 5. 尊重用户的约束(夹子数量上限、要保留哪些夹子)。
 6. **永远不要提议删除任何条目**。
 
-样本里的「AI标签」行是另一轮 AI 的判断,**标签是参考**:原始标题和简介才是事实,
+样本里的「标签」行是另一轮 AI 的判断,**标签是参考**:原始标题和简介才是事实,
 冲突时以原始数据为准 —— 别让标签带偏你提的体系。
 
 只输出 JSON,不要 markdown 围栏,不要解释文字:
@@ -265,7 +265,7 @@ export const PASS2_SYSTEM = `你是收藏归类助手。用户给你一套已确
 5. reason 一句话说清为什么归这里(用户会点开看)。
 6. **不要提议删除任何条目**。
 
-条目里的「AI标签」行是另一轮 AI 的判断,**标签是参考**:原始标题和简介才是事实,
+条目里的「标签」行是另一轮 AI 的判断,**标签是参考**:原始标题和简介才是事实,
 冲突时以原始数据为准。标签可以帮你快速理解条目,但不要盲信。
 
 只输出 JSON 数组,不要 markdown 围栏,不要解释文字。
@@ -309,8 +309,13 @@ export function buildPass1Prompt(opts: {
   sample: readonly ItemRow[];
   userConstraint?: string;
   clusterNote?: string;
-  /** itemId → 标签显示名。调用方一次算好(`tagInfoByItem`),别在渲染里逐条查 */
-  tagInfo?: TagInfoMap;
+  /**
+   * itemId → 标签显示名。调用方一次算好(`tagInfoByItem`),别在渲染里逐条查。
+   *
+   * **必填,别给它默认值**(§9F C11):可选的话,"调用方忘了传"就变成"模型永远
+   * 看不到标签" —— 不报错、不红测试,只是提示词悄悄变薄。
+   */
+  tagInfo: TagInfoMap;
 }): string {
   const folders = opts.existingFolders.length
     ? opts.existingFolders.map((f) => `#${f.id} ${f.name}`).join('\n')
@@ -323,7 +328,7 @@ export function buildPass1Prompt(opts: {
     `## 收藏样本(${opts.sample.length} 条,从整个收藏库里均衡抽取)`,
     opts.sample
       .map((i) => {
-        const t = opts.tagInfo?.get(i.id);
+        const t = opts.tagInfo.get(i.id);
         return renderItem(i, 120, t?.names, t?.kind);
       })
       .join('\n\n'),
@@ -345,8 +350,13 @@ export function buildPass2Prompt(opts: {
    * 给它三条标题,它立刻知道那夹子是放什么的。
    */
   samples?: ReadonlyMap<number, readonly string[]>;
-  /** itemId → 标签显示名。调用方一次算好(`tagInfoByItem`),别在渲染里逐条查 */
-  tagInfo?: TagInfoMap;
+  /**
+   * itemId → 标签显示名。调用方一次算好(`tagInfoByItem`),别在渲染里逐条查。
+   *
+   * **必填,别给它默认值**(§9F C11):可选的话,"调用方忘了传"就变成"模型永远
+   * 看不到标签" —— 不报错、不红测试,只是提示词悄悄变薄。
+   */
+  tagInfo: TagInfoMap;
 }): string {
   // 只带 tempId + name + rule —— description/estCount 对归类没用,纯占 token(spec §9.3)。
   // **tempId 用方括号单独框出来**:它现在是裸数字(工作夹子 id),写成 `63:健身` 时
@@ -368,7 +378,7 @@ export function buildPass2Prompt(opts: {
     `## 待归类条目(${opts.items.length} 条)`,
     opts.items
       .map((i) => {
-        const t = opts.tagInfo?.get(i.id);
+        const t = opts.tagInfo.get(i.id);
         return renderItem(i, 120, t?.names, t?.kind);
       })
       .join('\n\n'),
@@ -490,8 +500,8 @@ export async function runPass1(opts: {
   groupOf?: (item: ItemRow) => string;
   sampleMax?: number;
   perGroupMax?: number;
-  /** §9F:标签进 prompt —— 调用方一次查好(`tagInfoByItem`),别在渲染里逐条查 */
-  tagInfo?: TagInfoMap;
+  /** §9F:标签进 prompt —— 调用方一次查好(`tagInfoByItem`),必填(理由见 C11) */
+  tagInfo: TagInfoMap;
 }): Promise<Pass1Result> {
   const rules = opts.rules ?? DEFAULT_RULES;
 
@@ -529,7 +539,7 @@ export async function runPass1(opts: {
         sample,
         clusterNote,
         ...(opts.userConstraint ? { userConstraint: opts.userConstraint } : {}),
-        ...(opts.tagInfo ? { tagInfo: opts.tagInfo } : {}),
+        tagInfo: opts.tagInfo,
       }),
     },
   ];
@@ -591,8 +601,8 @@ export async function runPass2(opts: {
   items: readonly ItemRow[];
   /** 透传给 buildPass2Prompt —— 没规则的夹子靠已有标题表达"我是放什么的" */
   samples?: ReadonlyMap<number, readonly string[]>;
-  /** §9F:标签进 prompt —— 调用方一次查好(`tagInfoByItem`),别在渲染里逐条查 */
-  tagInfo?: TagInfoMap;
+  /** §9F:标签进 prompt —— 调用方一次查好(`tagInfoByItem`),必填(理由见 C11) */
+  tagInfo: TagInfoMap;
   /** §9D A2:每批完成一次。批次从 1 计,done/total 是**条目**数 */
   onBatch?: (b: BatchProgress) => void;
   /** §9D B2:用户点了停止。批与批之间检查;批内由 complete 的 abortSignal 中断 */
@@ -635,7 +645,7 @@ export async function runPass2(opts: {
               folders: opts.folders,
               items: batch,
               ...(opts.samples ? { samples: opts.samples } : {}),
-              ...(opts.tagInfo ? { tagInfo: opts.tagInfo } : {}),
+              tagInfo: opts.tagInfo,
             }),
           },
         ],
@@ -735,8 +745,8 @@ export async function classifyAll(opts: {
   userConstraint?: string;
   rules?: ReadonlyMap<string, readonly string[]>;
   groupOf?: (item: ItemRow) => string;
-  /** §9F:标签进 prompt —— 两条 pass 都要,所以在这儿透传两次 */
-  tagInfo?: TagInfoMap;
+  /** §9F:标签进 prompt —— 两条 pass 都要,所以在这儿透传两次(必填,理由见 C11) */
+  tagInfo: TagInfoMap;
   onBatch?: (b: BatchProgress) => void;
 }): Promise<ClassifyResult> {
   const pass1 = await runPass1({
@@ -746,7 +756,7 @@ export async function classifyAll(opts: {
     ...(opts.userConstraint ? { userConstraint: opts.userConstraint } : {}),
     ...(opts.rules ? { rules: opts.rules } : {}),
     ...(opts.groupOf ? { groupOf: opts.groupOf } : {}),
-    ...(opts.tagInfo ? { tagInfo: opts.tagInfo } : {}),
+    tagInfo: opts.tagInfo,
   });
 
   const pass2 = await runPass2({
@@ -754,7 +764,7 @@ export async function classifyAll(opts: {
     ctx: opts.ctx,
     folders: pass1.taxonomy.folders,
     items: opts.items,
-    ...(opts.tagInfo ? { tagInfo: opts.tagInfo } : {}),
+    tagInfo: opts.tagInfo,
     ...(opts.onBatch ? { onBatch: opts.onBatch } : {}),
   });
 
