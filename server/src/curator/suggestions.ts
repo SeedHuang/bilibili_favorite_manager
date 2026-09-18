@@ -11,7 +11,7 @@ import { getItem, type ItemRow } from '../db/repo/items.js';
 import { listFolders, isLockedFolder } from '../db/repo/folders.js';
 import { listRules } from '../db/repo/rules.js';
 import { listWorkFolders, workItemIds } from '../db/repo/workbench.js';
-import { itemTagIds, listTagsWithParent, subtreeSets } from '../db/repo/tags.js';
+import { itemTagIds, tagNamesById, subtreeSets } from '../db/repo/tags.js';
 import { complete, type ModelConfig } from '../llm/provider.js';
 import { parseJsonArray } from './parse.js';
 import {
@@ -105,7 +105,7 @@ export function suggestionInput(db: Database.Database): {
   const ruleOf = new Map(rules.map((r) => [r.folderId, r]));
   const all = db.prepare(`SELECT * FROM items`).all() as ItemRow[];
   // 规则里的 tag 条件存的是 id —— 给模型看的那份必须翻成词名(见 renderConditions)
-  const tagNameOf = new Map(listTagsWithParent(db).map((r) => [r.id, r.name]));
+  const tagNameOf = tagNamesById(db);
 
   // **锁定的夹子(默认收藏夹)不能加规则**(spec §9C.6 约束 4)—— 那就别让模型给它提建议。
   //

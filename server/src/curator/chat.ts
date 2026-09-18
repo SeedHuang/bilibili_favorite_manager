@@ -32,7 +32,7 @@ import {
 import { listFolders } from '../db/repo/folders.js';
 import { listWorkFolders, workItemIds } from '../db/repo/workbench.js';
 import { listRules } from '../db/repo/rules.js';
-import { listTagsWithParent } from '../db/repo/tags.js';
+import { tagNamesById } from '../db/repo/tags.js';
 import { renderConditions } from './rules.js';
 
 /** 保留原文的最近消息条数(8 轮问答) */
@@ -77,7 +77,7 @@ function renderStructure(db: Database.Database): string {
     // (spec §9C.5 c)。规则只挂在工作副本的夹子上,所以快照那条路不带它。
     const ruleOf = new Map(listRules(db).map((r) => [r.folderId, r]));
     // 规则里的 tag 条件存的是 id —— 聊天里给模型看的这份得翻成词名(见 renderConditions)
-    const tagNameOf = new Map(listTagsWithParent(db).map((r) => [r.id, r.name]));
+    const tagNameOf = tagNamesById(db);
     return work
       .map((w) => {
         const rule = renderConditions(ruleOf.get(w.id)?.conditions ?? [], tagNameOf);

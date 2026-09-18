@@ -320,8 +320,8 @@ export function buildPass1Prompt(opts: {
   profiles?: string;
   /**
    * ⚠️ **参数名必须是 `rulesText`,不能叫 `rules`。** `runPass1` 的 opts 里已经有一个
-   * `rules?: ReadonlyMap<string, readonly string[]>`(keyword 初分用的词表,
-   * `classifier.ts:461`),同一层再加一个同名的 `string` 直接**编译不过**。
+   * `rules?: ReadonlyMap<string, readonly string[]>`(keyword 初分用的词表),
+   * 同一层再加一个同名的 `string` 直接**编译不过**。
    * 名字里带 `Text` 也正好说明它是"给人/给模型看的那段文本",不是数据。
    */
   rulesText?: string;

@@ -12,7 +12,7 @@
  */
 import type Database from 'better-sqlite3';
 import { listWorkFolders, workItemIds } from '../db/repo/workbench.js';
-import { itemTagIds, listTagsWithParent } from '../db/repo/tags.js';
+import { itemTagIds, tagNamesById } from '../db/repo/tags.js';
 
 /** 离群判定外的统计下限 —— 与 C9 同一个数,理由也一样:少于它没有统计意义 */
 export const MIN_SAMPLE = 5;
@@ -28,7 +28,7 @@ export interface FolderProfile {
 }
 
 export function buildFolderProfiles(db: Database.Database): FolderProfile[] {
-  const nameOf = new Map(listTagsWithParent(db).map((r) => [r.id, r.name]));
+  const nameOf = tagNamesById(db);
   const tagsOf = itemTagIds(db);
 
   return listWorkFolders(db).map((f) => {
