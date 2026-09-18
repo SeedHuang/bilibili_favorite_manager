@@ -38,7 +38,9 @@
 | `server/src/db/index.ts` | 改 | 加 `ensureColumn`,`applySchema` 里给 items 补 `ai_kind` |
 | `server/src/db/repo/tags.ts` | **新建** | 词库树的唯一写手:归一化、别名、建树、合并、挂父、覆盖统计 |
 | `server/src/db/repo/tags.test.ts` | **新建** | 上面这些的测试 |
-| `server/src/db/repo/tagging.ts` | 改 | 删 `setItemTagging`/`parseItemTagging`(被 tags.ts 取代),加 `setItemKind` |
+| `server/src/db/repo/tagging.ts` | 改 | 删 `ItemTagging`/`parseItemTagging`/`getItemTagging`/`setItemTagging`,加 `markItemTagged`(写 `ai_kind` **和 `ai_checked_at`**) |
+| `server/src/db/repo/tagging.test.ts` | 改 | 上面四个被删函数的测试 —— 整个文件重写 |
+| `server/src/curator/routes.test.ts` | 改 | `:11` import 了 `setItemTagging`、`:396` 断言 `AI标签:…` |
 | `server/src/curator/tagger.ts` | 重写 | 两步标注(说领域 → 取词)+ 路径落库 |
 | `server/src/curator/tagger.test.ts` | 重写 | 新输出形状的测试 |
 | `server/src/curator/classifier.ts` | 改 | `renderItem` 渲染树标签(需传入 map,避免 N+1) |
@@ -162,13 +164,18 @@ export async function complete(opts: {
 
 - [ ] **Step 5: 批量调用方传 `false`**
 
-四处(都在 `curator/`):
+**这个任务排在最先,所以这里只能改"现在就已经存在"的调用点** —— 后面任务新写的
+模块(比如 Task 3 的 `tagcheck.ts`)在各自的任务里带上这个参数。清单:
 
-- `tagger.ts` 的 `complete(...)` → `thinking: false`
-- `classifier.ts` 的 `runPass1` / `runPass2` 两处 `complete(...)` → `thinking: false`
-- `tagcheck.ts` 的 `complete(...)` → `thinking: false`
-- `chat.ts` 的 `compact()`(滚动摘要,也是批量) → `thinking: false`
-- **`chatStream` 不传** —— 聊天要思考流(§9D.5)
+- `curator/tagger.ts` 的 `complete(...)`
+- `curator/classifier.ts` 的 `runPass1` / `runPass2` 两处 `complete(...)`
+- `curator/chat.ts` 的 `compact()`(滚动摘要,也是批量)
+- `curator/routes.ts` 的 `/api/settings/test-llm` —— 连通性测试发的是"回复两个字",
+  开满推理会让用户白等十几秒,还以为连不上
+- **`chatStream` / `/api/curator/sessions/:id/messages` 不传** —— 聊天要思考流(§9D.5)
+
+> Task 3 写 `tagcheck.ts` 时,它的 `complete` 也要带 `thinking: false` ——
+> 那行已经在 Task 3 的代码里了。
 
 - [ ] **Step 6: 跑全量 + 提交**
 
@@ -205,8 +212,8 @@ git commit -m "feat(llm): thinking 开关 —— 批量环节关掉思考模式"
   - `export function tagCounts(db): Map<number, number>`
   - `export function listTagTree(db): TagNode[]`
   - `export function subtreeSets(db): Map<number, Set<number>>`
-  - `export function mergeTags(db, fromId: number, toId: number): void`
-  - `export function setTagParent(db, id: number, parentId: number | null): void`
+  - `export function mergeTags(db, fromId: number, toId: number): boolean` —— false = 这两个词不能并(会成环/超深),**不是抛错**
+  - `export function setTagParent(db, id: number, parentId: number | null): boolean` —— 树结构的**唯一收口**,内置防环 + 深度闸
   - `export function renameTag(db, id: number, name: string): void`
   - `export function deleteTag(db, id: number): void`
   - `export const MAX_TAG_DEPTH = 4`
@@ -336,6 +343,22 @@ describe('ensureTag', () => {
     const food = ensureTag(db, '美食', null);
     expect(ensureTag(db, '篮球', sport)).not.toBe(ensureTag(db, '篮球', food));
   });
+
+  it('子节点不自动记别名 —— 否则"不同父同名"做不到', () => {
+    const db = fresh();
+    const sport = ensureTag(db, '体育', null);
+    const ball = ensureTag(db, '篮球', sport);
+    // 别名表是**全局身份**,只有根配得上它;子节点的身份是 (父, 名)
+    expect(findTag(db, normalizeTagName('篮球'))).toBeNull();
+    // 但同一父下重复调用仍然复用同一个节点(靠 (父,名) 那条唯一索引)
+    expect(ensureTag(db, '篮球', sport)).toBe(ball);
+  });
+
+  it('根在创建时记一笔别名 —— 拿名字直接查得到', () => {
+    const db = fresh();
+    const sport = ensureTag(db, '体育', null);
+    expect(findTag(db, normalizeTagName('体育'))).toBe(sport);
+  });
 });
 
 describe('别名表', () => {
@@ -403,8 +426,20 @@ describe('mergeTags', () => {
 
     expect(db.prepare(`SELECT id FROM tags WHERE id = ?`).get(drop)).toBeUndefined();
     expect(itemTagIds(db, ['BV1']).get('BV1')).toEqual([keep]);
-    expect(db.prepare(`SELECT parent_id FROM tags WHERE id = ?`).get(child)).toEqual({ parentId: keep });
+    // 列名是 parent_id —— better-sqlite3 原样回列名,所以断言用 snake_case
+    expect(db.prepare(`SELECT parent_id FROM tags WHERE id = ?`).get(child)).toEqual({ parent_id: keep });
     expect(findTag(db, normalizeTagName('鲁夫'))).toBe(keep);
+  });
+
+  it('不让自己并进自己的后代(会成环)', () => {
+    const db = fresh();
+    const parent = ensureTag(db, '美食', null);
+    const child = ensureTag(db, '烤羊肉', parent);
+    expect(mergeTags(db, parent, child)).toBe(false);
+    // 反过来可以:子是孙的后代,但孙不是子的后代
+    const grand = ensureTag(db, '羊', child);
+    expect(mergeTags(db, child, grand)).toBe(false);
+    expect(mergeTags(db, grand, parent)).toBe(true);
   });
 });
 
@@ -413,15 +448,41 @@ describe('setTagParent / renameTag / deleteTag', () => {
     const db = fresh();
     const sport = ensureTag(db, '体育', null);
     const camp = ensureTag(db, '露营', null);
-    setTagParent(db, camp, sport);
+    expect(setTagParent(db, camp, sport)).toBe(true);
     expect(subtreeSets(db).get(sport)!.has(camp)).toBe(true);
   });
 
-  it('renameTag 换 name 与 norm', () => {
+  it('拒绝自己挂自己、挂到自己后代(防环)', () => {
+    const db = fresh();
+    const parent = ensureTag(db, '美食', null);
+    const child = ensureTag(db, '烤羊肉', parent);
+    expect(setTagParent(db, parent, parent)).toBe(false);
+    expect(setTagParent(db, parent, child)).toBe(false);
+    // 环没造出来 —— 两个节点仍在正常的父子关系上
+    expect(listTagTree(db)).toHaveLength(1);
+    expect(listTagTree(db)[0]!.children).toHaveLength(1);
+  });
+
+  it('拒绝挂到会超深的位置', () => {
+    const db = fresh();
+    const a = ensureTag(db, 'L1', null);
+    const b = ensureTag(db, 'L2', a);
+    const c = ensureTag(db, 'L3', b);
+    const d = ensureTag(db, 'L4', c);
+    // a 这棵子树高 4,挂到 d(深度 4)下面会到 7 层,超封顶
+    expect(setTagParent(db, a, d)).toBe(false);
+    expect(depthOf(db, a)).toBe(1);
+    // 挂到 b(深度 2)下 → a 在最深第 4 层,允许
+    expect(setTagParent(db, a, b)).toBe(true);
+    expect(depthOf(db, d)).toBe(4);
+  });
+
+  it('renameTag 换 name 与 norm,并把**旧名**留进别名表', () => {
     const db = fresh();
     const id = ensureTag(db, 'NBA', null);
     renameTag(db, id, '美职篮');
     expect(findTag(db, normalizeTagName('美职篮'))).toBe(id);
+    expect(findTag(db, normalizeTagName('NBA'))).toBe(id); // 老引用还找得到
     expect(db.prepare(`SELECT name FROM tags WHERE id = ?`).get(id)).toEqual({ name: '美职篮' });
   });
 
@@ -484,7 +545,13 @@ export function normalizeTagName(raw: string): string {
     .toLowerCase();
 }
 
-/** 先查别名表,再查根节点。命中就回 id,否则 null */
+/**
+ * 按名字找节点 —— 查的是**全局身份**:先查别名表,再查根。
+ *
+ * **它故意不查子节点**。子节点的身份是 (父, 名),同名可以有好几个,
+ * 所以"按名字返回唯一一个"对它没有意义 —— 那种查找要用 `ensureTag(name, parentId)`
+ * 或者直接按 `norm` 查表(`tagcheck.ts` 的 `byName` 就是后者)。
+ */
 export function findTag(db: Database.Database, norm: string): number | null {
   const aliased = db.prepare(`SELECT tag_id FROM tag_aliases WHERE name = ?`).get(norm) as
     | { tag_id: number }
@@ -531,8 +598,14 @@ export function ensureTag(
     .prepare(`INSERT INTO tags (name, norm, parent_id, created_at) VALUES (?, ?, ?, ?)`)
     .run(name.trim() || norm, norm, parentId, Date.now());
   const id = Number(info.lastInsertRowid);
-  // 新节点自己也记一笔别名,这样以后拿名字直接查得到(不必先知道父)
-  addAlias(db, norm, id);
+  // **只有根记别名,子节点不记。**
+  //
+  // 别名表是**全局身份**(一个写法 → 一个节点),而子节点的身份是 **(父, 名)** ——
+  // 不同父下同名是合法的,`UNIQUE(parent_id, norm)` 保的就是这个。
+  // 给子节点也记一笔的话,`findTag` 会短路:第二次 `ensureTag('篮球', 别的父)`
+  // 在别名表命中、返回**同一个节点**,"不同父可以同名"就永远做不到,那个唯一索引
+  // 成了死条款。(这一版初稿就是这么写的,测试和实现直接对不上。)
+  if (parentId === null) addAlias(db, norm, id);
   return id;
 }
 
@@ -644,8 +717,20 @@ export function subtreeSets(db: Database.Database): Map<number, Set<number>> {
  * **这就是为什么要用关联表而不是一列 JSON** —— 字符串数组做不到"改一次词,
  * 所有视频跟着走"。
  */
-export function mergeTags(db: Database.Database, fromId: number, toId: number): void {
-  if (fromId === toId) return;
+/**
+ * 把 from 并进 to。**先过和挂父同一套闸。**
+ *
+ * 它换的是整棵子树(子节点跟着改父),所以两条都可能踩:并进**自己的后代**会造环,
+ * 并进深层节点会超深。而它走的是裸 SQL,绕过了 `setTagParent` —— 闸必须在这儿
+ * 再查一次。
+ *
+ * 返回 false = 这两个词不能并(**不是抛错**):用户在下拉里挑错目标很正常,
+ * 质检判错也很正常,那都该是"这次不动",不该炸掉整轮。
+ */
+export function mergeTags(db: Database.Database, fromId: number, toId: number): boolean {
+  if (fromId === toId) return false;
+  if (isDescendant(db, toId, fromId)) return false; // to 是 from 的后代 → 会成环
+  if (wouldExceedDepth(db, fromId, toId)) return false;
   db.transaction(() => {
     const from = db.prepare(`SELECT name FROM tags WHERE id = ?`).get(fromId) as
       | { name: string }
@@ -661,26 +746,77 @@ export function mergeTags(db: Database.Database, fromId: number, toId: number): 
     db.prepare(`UPDATE tag_aliases SET tag_id = ? WHERE tag_id = ?`).run(toId, fromId);
     db.prepare(`DELETE FROM tags WHERE id = ?`).run(fromId);
   })();
+  return true;
 }
 
-export function setTagParent(db: Database.Database, id: number, parentId: number | null): void {
-  if (id === parentId) return;
+/**
+ * 挂父 —— **树结构的唯一收口**,两道闸都在这儿。
+ *
+ * 为什么不放在各调用点:挂父有四条路(质检的 move、判据的 reparent、手动 PATCH、
+ * 手动合并的批量改父)。分散着写必然漏,而漏掉**挂到自己后代**那一处的后果是
+ * **造出环** —— 环上的节点全都不是 root,`listTagTree` 把它们塞进自己的 children,
+ * 于是整段子树从页面上消失(库里还在)。
+ *
+ * 返回 false = 这次挂父被拒(自己挂自己 / 挂到自己后代 / 会超深)。调用方**不该**
+ * 因此报错 —— 这是"这条改动不合法",不是"出故障了"。
+ *
+ * `ponytail: 每次全表读一遍父边。树是几千个词、挂父是低频操作(每轮几十次),
+ * 值不上把父边缓存在调用方传进来。真变成热点再说。`
+ */
+export function setTagParent(
+  db: Database.Database,
+  id: number,
+  parentId: number | null,
+): boolean {
+  if (id === parentId) return false;
+  if (parentId !== null && isDescendant(db, parentId, id)) return false; // 挂到自己后代 → 成环
+  if (parentId !== null && wouldExceedDepth(db, id, parentId)) return false;
   db.prepare(`UPDATE tags SET parent_id = ? WHERE id = ?`).run(parentId, id);
+  return true;
+}
+
+/** node 是不是 anc 的后代(anc 自己在不在它的祖先链上)—— 防环 */
+function isDescendant(db: Database.Database, node: number, anc: number): boolean {
+  const parentOf = new Map(
+    (db.prepare(`SELECT id, parent_id FROM tags`).all() as
+      { id: number; parent_id: number | null }[]).map((r) => [r.id, r.parent_id]),
+  );
+  let cur: number | null | undefined = node;
+  const seen = new Set<number>();
+  while (cur != null && !seen.has(cur)) {
+    if (cur === anc) return true;
+    seen.add(cur);
+    cur = parentOf.get(cur) ?? null;
+  }
+  return false;
 }
 
 export function renameTag(db: Database.Database, id: number, name: string): void {
   const norm = normalizeTagName(name);
   if (!norm) return;
   db.transaction(() => {
+    const prev = db.prepare(`SELECT name, parent_id FROM tags WHERE id = ?`).get(id) as
+      | { name: string; parent_id: number | null }
+      | undefined;
     db.prepare(`UPDATE tags SET name = ?, norm = ? WHERE id = ?`).run(name.trim(), norm, id);
-    addAlias(db, name, id);
+    // **旧名进别名表**(老的引用还找得到它);**根**顺带把新名也记一笔 ——
+    // 子节点的新名不进别名表,理由和 `ensureTag` 那条一样:别名是全局身份,
+    // 而子节点的身份是 (父, 名)
+    if (prev) addAlias(db, prev.name, id);
+    if (prev?.parent_id === null) addAlias(db, norm, id);
   })();
 }
 
 export function deleteTag(db: Database.Database, id: number): void {
   db.transaction(() => {
     // 子节点提一级,别连带删掉一整棵 —— 删一个词不该毁掉它底下所有东西
+    const kids = db.prepare(`SELECT id, name FROM tags WHERE parent_id = ?`).all(id) as
+      { id: number; name: string }[];
     db.prepare(`UPDATE tags SET parent_id = NULL WHERE parent_id = ?`).run(id);
+    // 提上来的子节点**现在是根了** —— 根要能被名字直接查到(见 findTag),
+    // 所以补一笔别名。漏了这一步会出现"查不到自己的根"
+    for (const k of kids) addAlias(db, k.name, k.id);
+
     db.prepare(`DELETE FROM item_tags WHERE tag_id = ?`).run(id);
     db.prepare(`DELETE FROM tag_aliases WHERE tag_id = ?`).run(id);
     db.prepare(`DELETE FROM tags WHERE id = ?`).run(id);
@@ -758,21 +894,22 @@ git commit -m "feat(tags): 词库树三张表 + 仓储层(归一化/别名/建�
 一次切换:`items.ai_tags` 停止读写,标注产出树标签,归类看到树标签。**这两件事必须同一个任务** —— 分开的话中间那一步 `classifier.ts` 会 import 一个已被删掉的函数。
 
 **Files:**
-- Modify: `server/src/db/repo/tagging.ts`(删两个导出,加 `setItemKind`)
-- Rewrite: `server/src/curator/tagger.ts`
-- Rewrite: `server/src/curator/tagger.test.ts`
+- Modify: `server/src/db/repo/tagging.ts`(删四个导出,加 `markItemTagged`)
+- Rewrite: `server/src/curator/tagger.ts` / `tagger.test.ts`
 - Modify: `server/src/curator/classifier.ts`(`renderItem` + 两个 prompt builder 签名)
 - Modify: `server/src/curator/classifier.test.ts`(跟着改)
-- Modify: `server/src/curator/routes.ts`(run-pass-1 / run-pass-2 建标签 map)
+- Modify: `server/src/curator/routes.ts`(run-pass-1 / run-pass-2 建 tagInfo map)
+- **Modify**: `server/src/db/repo/tagging.test.ts` —— 整个文件,它 import 了被删的四个函数
+- **Modify**: `server/src/curator/routes.test.ts` —— `:11` 的 import、`:384` 的调用、`:396` 的 `AI标签:…` 断言
 
 **Interfaces:**
 - Consumes: Task 1 的 `ensureTag` / `addAlias` / `linkItemTag` / `itemTagIds` / `normalizeTagName`
 - Produces:
-  - `export function setItemKind(db, itemId: string, kind: string): void`(`db/repo/tagging.ts`)
+  - `export function markItemTagged(db, itemId: string, kind: string): void`(`db/repo/tagging.ts`)—— 同时写 `ai_kind` 与 `ai_checked_at`(增量水位线)
   - `export interface TagOutput { id: string; kind: string; domains: string[]; tags: string[] }`
   - `export function coerceTagOutput(raw: unknown, batchIds: ReadonlySet<string>): TagOutput[]`(`curator/tagger.ts`)
   - `export function applyTagOutput(db, o: TagOutput): { created: string[] }`(`curator/tagger.ts`)
-  - `export function tagNamesByItem(db): Map<string, string[]>`(写到 `db/repo/tags.ts`)
+  - `export function tagInfoByItem(db): Map<string, { names: string[]; kind: string | null }>`(写到 `db/repo/tags.ts`)
   - `export function renderItem(i: ItemRow, maxIntro: number, tagNames?: readonly string[]): string`(`curator/classifier.ts`)
   - `export function buildPass1Prompt(opts: {…; tagNames: ReadonlyMap<string, readonly string[]>})` / `buildPass2Prompt(opts: {…; tagNames: ReadonlyMap<string, readonly string[]>})`
 
@@ -782,17 +919,37 @@ git commit -m "feat(tags): 词库树三张表 + 仓储层(归一化/别名/建�
 
 ```ts
 /**
- * 形态(教学/娱乐/…)—— §9F C7 明文规定它是**独立的正交轴**,不并入主题树。
- * 混进树会让集合判据的合并/挂父要给保留节点开一堆例外;一列比一套例外便宜。
+ * 标注落地的那两个 AI 列:形态 + **水位线**。
  *
- * 和 ai_checked_at 一样属于 C8 的 AI 派生列 —— 同步永不写它。
+ * 形态(教学/娱乐/…)是 §9F C7 明文规定的**独立正交轴**,不并入主题树 ——
+ * 混进树会让集合判据的合并/挂父要给保留节点开一堆例外,一列比一套例外便宜。
+ *
+ * **`ai_checked_at` 是增量标注的唯一依据**(`listUntaggedItemIds` 查的就是
+ * `ai_checked_at IS NULL`)。它必须在这儿写:原来写它的那个函数
+ * (`setItemTagging`)被这次改造删掉了 —— 忘了接手的话,「AI 标注」每次都把
+ * 全库 3250 条重标一遍,「增量」和「重新标注全部」不再有区别,而界面上
+ * **看不出任何异常**(进度条照跑,「已标 N/M」恒为 0)。
+ *
+ * 两列都属于 C8 的 AI 派生列 —— 同步永不写它们。
  */
-export function setItemKind(db: Database.Database, id: string, kind: string): void {
-  db.prepare(`UPDATE items SET ai_kind = ? WHERE id = ?`).run(kind, id);
+export function markItemTagged(db: Database.Database, id: string, kind: string): void {
+  db.prepare(`UPDATE items SET ai_kind = ?, ai_checked_at = ? WHERE id = ?`)
+    .run(kind, Date.now(), id);
 }
 ```
 
-`listUntaggedItemIds` / `tagStats` 原样保留(`ai_checked_at` 继续当增量水位线)。
+`listUntaggedItemIds` / `tagStats` 原样保留 —— **它们现在靠 `markItemTagged` 喂**。
+
+被删掉的 `ItemTagging` / `parseItemTagging` / `getItemTagging` / `setItemTagging`
+没有一个生产调用方(`parseItemTagging` 只有 `classifier.ts` 的 `renderItem` 用,
+Step 7 会改掉),但**两个测试文件直接 import 它们**:
+
+- `server/src/db/repo/tagging.test.ts` —— 整个文件
+- `server/src/curator/routes.test.ts`(`:11` 的 import、`:384` 的调用、`:396` 的断言)
+
+这两个必须**同一个任务里改掉**,否则 import 期就崩、整个文件红。它们钉的
+两条守卫要在新测试里补回来:① 标注写 `ai_checked_at`(增量靠它);
+② 同步的 `upsertItem` 不碰 `ai_*` 列(§9E C8 硬规矩)。
 
 - [ ] **Step 2: 写失败测试 `server/src/curator/tagger.test.ts`**
 
@@ -800,6 +957,7 @@ export function setItemKind(db: Database.Database, id: string, kind: string): vo
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { openDb } from '../db/index.js';
 import { upsertItem } from '../db/repo/items.js';
+import { listUntaggedItemIds } from '../db/repo/tagging.js';
 import { itemTagIds, listTagTree, normalizeTagName, findTag } from '../db/repo/tags.js';
 import type { ItemRow } from '../db/repo/items.js';
 
@@ -834,10 +992,14 @@ describe('coerceTagOutput', () => {
     expect(got[1]!.domains).toEqual([]);
   });
 
-  it('模型漏 items 字段时整条丢弃(不猜)', () => {
-    expect(coerceTagOutput([{ id: 'BV1' }], new Set(['BV1']))).toEqual([
-      { id: 'BV1', kind: '', domains: [], tags: [] },
-    ]);
+  it('领域和标签都空 → 整条丢弃,当没标(留给下一轮重试)', () => {
+    // 收下它的话会写 ai_checked_at、于是这条**再也不会被重标**(增量只挑
+    // ai_checked_at IS NULL),而它一个标签都没拿到 —— 等于永久漏掉
+    expect(coerceTagOutput([{ id: 'BV1' }], new Set(['BV1']))).toEqual([]);
+  });
+
+  it('只有 kind、没有标签 → 也算没标上(标签才是这条链路的目的)', () => {
+    expect(coerceTagOutput([{ id: 'BV1', kind: '教学' }], new Set(['BV1']))).toEqual([]);
   });
 });
 
@@ -961,12 +1123,22 @@ export function coerceTagOutput(raw: unknown, batchIds: ReadonlySet<string>): Ta
   for (const r of list) {
     const o = r as { id?: unknown; kind?: unknown; domains?: unknown; tags?: unknown };
     if (typeof o?.id !== 'string' || !batchIds.has(o.id)) continue;
+
+    const domains = strList(o.domains);
+    const tags = strList(o.tags);
+    // **一个标签都没给 → 整条丢弃,当没标**(C6 "不合法的整条丢弃")。
+    //
+    // 收下它的话会写 `ai_checked_at`,于是这条**再也不会被重标** ——
+    // 增量只挑 `ai_checked_at IS NULL` 的。而它一个标签都没拿到,等于永久漏掉。
+    // 丢掉才是对的:下一轮它还在增量池里,有机会重新被标上。
+    if (domains.length === 0 && tags.length === 0) continue;
+
     out.push({
       id: o.id,
       // kind 越界 → 空串;落库时按「其它」处理。受控词表的定义(C3)
       kind: TAG_KINDS.includes(o.kind as never) ? (o.kind as string) : '',
-      domains: strList(o.domains),
-      tags: strList(o.tags),
+      domains,
+      tags,
     });
   }
   return out;
@@ -999,7 +1171,7 @@ export function applyTagOutput(db: Database.Database, o: TagOutput): { created: 
     linkItemTag(db, o.id, ensureTag(db, name, host), 'ai');
   }
   for (const id of domainIds) linkItemTag(db, o.id, id, 'ai');
-  setItemKind(db, o.id, o.kind || '其它');
+  markItemTagged(db, o.id, o.kind || '其它');
 
   return {
     created: (db.prepare(`SELECT id, name FROM tags`).all() as { id: number; name: string }[])
@@ -1009,8 +1181,9 @@ export function applyTagOutput(db: Database.Database, o: TagOutput): { created: 
 }
 ```
 
-`askOnce` 里改成调 `coerceTagOutput` + `applyTagOutput`,返回收到 id 的集合。
-**删掉** `setItemTagging` 调用与 `setItemTagging` 之后那行里的 `opts.db` 依赖保持原样。
+`askOnce` 里把原来的 `coerceTag` + `setItemTagging` 换成 `coerceTagOutput` + `applyTagOutput`,
+仍然只收本批的 id、仍然返回"标到了哪些 id"的集合。**批大小(16)、逐条覆盖断言(最多 2 轮补标)、
+缩批、abort 判定一律照旧** —— 这一步换的是"怎么落库",不是"怎么跑批"。
 
 - [ ] **Step 5: 跑测试确认通过**
 
@@ -1021,7 +1194,12 @@ Expected: PASS
 
 ```ts
 /** 把一条收藏渲染成模型读的文本。**不带 fav_time** —— 那是"你什么时候收藏的",与主题无关(§9.3) */
-function renderItem(i: ItemRow, maxIntro = 120, tagNames?: readonly string[]): string {
+export function renderItem(
+  i: ItemRow,
+  maxIntro = 120,
+  tagNames?: readonly string[],
+  kind?: string | null,
+): string {
   const lines = [`[${i.id}] ${i.title}`];
   if (i.intro) {
     const intro = i.intro.length > maxIntro ? `${i.intro.slice(0, maxIntro)}…` : i.intro;
@@ -1029,47 +1207,123 @@ function renderItem(i: ItemRow, maxIntro = 120, tagNames?: readonly string[]): s
   }
   if (i.upper_name) lines.push(`  UP:${i.upper_name}`);
   if (i.duration) lines.push(`  时长:${Math.round(i.duration / 60)} 分钟`);
-  // §9F:标签是**补充信号**,原始标题/简介仍在场(C6 的"冲突时以原始数据为准")
-  if (tagNames?.length) lines.push(`  标签:${tagNames.join('·')}`);
+
+  // §9F:标签和 kind 都是**补充信号**,原始标题/简介仍在场(C6 的"冲突时以原始数据为准")
+  //
+  // **kind 必须继续出现在这儿。** 它是 §9E 实测唯一被验证过有用的那个信号
+  // (4b 把"Stable Diffusion"判成教学、"玄幻"判成娱乐,分对了)。只渲染标签的话,
+  // `ai_kind` 就成了只写不读的死列 —— 占一列、占标注的输出 token、进不了 prompt、
+  // 界面上也不显示。C7 特意论证它是"独立的正交轴",那就得让它继续有用。
+  //
+  // kind 为「其它」时**不占行** —— 它跟"没有 kind"是一个意思,写出来只是噪音
+  // (§9E 的旧实现踩过这个:渲染出一行光秃秃的「AI标签:」)
+  const tagPart = tagNames?.length ? tagNames.join('·') : '';
+  const kindPart = kind && kind !== '其它' ? `[${kind}]` : '';
+  if (tagPart || kindPart) {
+    lines.push(`  标签:${tagPart}${tagPart && kindPart ? ' ' : ''}${kindPart}`);
+  }
   return lines.join('\n');
 }
 ```
 
-两个 builder 的 opts 各加 `tagNames: ReadonlyMap<string, readonly string[]>`(调用方一次算好,避免 N+1),`opts.items.map((i) => renderItem(i, 120, opts.tagNames.get(i.id)))`。
+两个 builder 的 opts 各加两个 map(**调用方一次算好** —— 一批几百条,别在渲染里逐条查):
 
-`buildPass1Prompt` 同样处理 `opts.sample`。
+```ts
+  /** itemId → 标签显示名 */
+  tagInfo: ReadonlyMap<string, { names: readonly string[]; kind: string | null }>;
+```
+
+渲染处改成:
+
+```ts
+opts.items.map((i) => {
+  const t = opts.tagInfo.get(i.id);
+  return renderItem(i, 120, t?.names, t?.kind);
+})
+```
+
+`buildPass1Prompt` 的 `opts.sample` 同样处理。
 
 - [ ] **Step 7: 改 `routes.ts` 的两处调用**
 
-`run-pass-1` 与 `run-pass-2` 各加一行,并把结果传进去:
+`run-pass-1` 与 `run-pass-2` 各加一行,并把它传进 prompt builder:
 
 ```ts
-// §9F:标签名一次取齐(避免 renderItem 里每条一次查询变成 N+1)
-const tagNameOf = tagNamesByItem(db);
+// §9F:标签和 kind 一次取齐 —— 一批几百条,别在 renderItem 里逐条查(那就是 N+1)
+const tagInfo = tagInfoByItem(db);
 ```
 
-**这个助手加到 `db/repo/tags.ts`**(Task 1 建的文件)—— 它不只这一处用:Task 7 的夹子画像、Task 9 的「浏览」页都要按 itemId 拿标签名。
+**这个助手加到 `db/repo/tags.ts`**(Task 1 建的文件)—— 它不只这一处用:Task 7 的夹子画像、Task 9 的「浏览」页都要按 itemId 拿标签。
 
 ```ts
-/** itemId → 标签显示名。**一次查完** —— 归类一批几百条,别在渲染里逐条查 */
-export function tagNamesByItem(db: Database.Database): Map<string, string[]> {
+/**
+ * itemId → { 标签显示名, 形态 }。**一次查完** —— 归类一批几百条,别在渲染里逐条查。
+ *
+ * 两样一起回:它们同源(都是 `items` 上的 AI 派生列)、同一批消费者
+ * (renderItem / 详情栏),分两个函数就是两次全表扫。
+ */
+export function tagInfoByItem(
+  db: Database.Database,
+): Map<string, { names: string[]; kind: string | null }> {
+  const out = new Map<string, { names: string[]; kind: string | null }>();
+  const get = (id: string) => {
+    const cur = out.get(id);
+    if (cur) return cur;
+    const fresh = { names: [] as string[], kind: null as string | null };
+    out.set(id, fresh);
+    return fresh;
+  };
+
   const rows = db
-    .prepare(`SELECT it.item_id, t.name FROM item_tags it JOIN tags t ON t.id = it.tag_id
-              ORDER BY it.item_id, t.name`)
+    .prepare(
+      `SELECT it.item_id, t.name FROM item_tags it JOIN tags t ON t.id = it.tag_id
+        ORDER BY it.item_id, t.name`,
+    )
     .all() as { item_id: string; name: string }[];
-  const out = new Map<string, string[]>();
-  for (const r of rows) {
-    const arr = out.get(r.item_id);
-    if (arr) arr.push(r.name);
-    else out.set(r.item_id, [r.name]);
-  }
+  for (const r of rows) get(r.item_id).names.push(r.name);
+
+  const kinds = db
+    .prepare(`SELECT id, ai_kind FROM items WHERE ai_kind IS NOT NULL`)
+    .all() as { id: string; ai_kind: string }[];
+  for (const r of kinds) get(r.id).kind = r.ai_kind;
+
   return out;
 }
 ```
 
 - [ ] **Step 8: 改 `classifier.test.ts` 里 renderItem 相关用例**
 
-把断言从 `AI标签:…` 改成 `标签:…`,并把 `item(..., { ai_tags: '…' })` 的构造改成传 `tagNames` map。原有那条"没标签不占行"的用例保留(传 `undefined`)。
+新签名是 `renderItem(i, maxIntro, tagNames?, kind?)`,断言要跟着改:
+
+- 把 `item(..., { ai_tags: '…' })` 那种构造改成**直接传参**:`renderItem(i, 120, ['Stable Diffusion'], '教学')`
+- 断言字符串从 `AI标签:` 改成 `标签:`
+- **kind 的三条用例必须保留并改对**(原 `classifier.test.ts:379/385/407` 测的
+  "有标签有 kind" / "只有 kind" / "只有标签" 三种排版)—— 它们是 §9E 踩过的坑,
+  而且正是 C7"kind 不能断链"的守卫:
+  - `(i, 120, [], '教学')` → `标签:[教学]`,**中间不能多一个空格**
+    (旧实现渲染出过一行光秃秃的「AI标签:」)
+  - `(i, 120, ['随手拍'], '其它')` → `标签:随手拍` ——「其它」不占位
+  - `(i, 120, ['随手拍'], null)` → `标签:随手拍`
+- 保留"没标签也不占行"那条(全传 `undefined`)
+
+**另外补一条守卫**:标注必须写 `ai_checked_at`。加进 `tagger.test.ts`:
+
+```ts
+  it('标注写 ai_checked_at —— 增量靠它(漏了就是每次全库重标)', async () => {
+    const db = openDb(':memory:');
+    upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
+    mocks.complete.mockResolvedValue(
+      JSON.stringify([{ id: 'BV1', kind: '娱乐', domains: ['美食'], tags: ['露营'] }]),
+    );
+    await runTagging({ config, ctx, items: [item('BV1', 'a')], db });
+    const row = db.prepare(`SELECT ai_kind, ai_checked_at FROM items WHERE id='BV1'`).get() as
+      { ai_kind: string | null; ai_checked_at: number | null };
+    expect(row.ai_kind).toBe('娱乐');
+    expect(row.ai_checked_at).not.toBeNull();
+    // 反过来说:水位线一落，增量池里就没有它了
+    expect(listUntaggedItemIds(db)).toEqual([]);
+  });
+```
 
 - [ ] **Step 9: 全量测试 + 提交**
 
@@ -1077,8 +1331,12 @@ Run: `cd server && npm test`
 Expected: 全部通过
 
 ```bash
-git add server/src/db/repo/tagging.ts server/src/db/repo/tags.ts server/src/curator/tagger.ts server/src/curator/tagger.test.ts server/src/curator/classifier.ts server/src/curator/classifier.test.ts server/src/curator/routes.ts
+git add server/src/db/repo/tagging.ts server/src/db/repo/tagging.test.ts server/src/db/repo/tags.ts \
+        server/src/curator/tagger.ts server/src/curator/tagger.test.ts \
+        server/src/curator/classifier.ts server/src/curator/classifier.test.ts \
+        server/src/curator/routes.ts server/src/curator/routes.test.ts
 git commit -m "feat(tags): 标注产出树标签,归类看得到树标签(ai_tags 停用)"
+```
 ```
 
 ---
@@ -1134,20 +1392,32 @@ const config = { id: 'flash', provider: 'deepseek', baseUrl: '', apiKey: 'k', mo
 beforeEach(() => vi.clearAllMocks());
 
 describe('coerceVerdicts', () => {
-  it('target 必须是已有词(编的一律丢掉),action 越界丢', () => {
+  it('drop 原样留着(它不需要 target);merge/move 的目标必须存在,否则退回 keep', () => {
     const got = coerceVerdicts(
       [
-        { name: 'AI', action: 'drop' },
-        { name: '鲁夫', action: 'merge', target: '路飞' },
-        { name: '鲁夫', action: 'merge', target: '不存在的词' },
-        { name: 'x', action: '乱写' },
+        { name: 'AI', action: 'drop' },                              // 泛词:留着,别被降级
+        { name: '鲁夫', action: 'merge', target: '路飞' },            // 目标合法 → 保留
+        { name: '鲁夫', action: 'merge', target: '不存在的词' },       // 目标编的 → keep
+        { name: 'x', action: '乱写' },                                // action 越界 → keep
       ],
       new Set(['路飞']),
     );
     expect(got).toEqual([
       { name: 'AI', action: 'drop' },
-      { name: '鲁夫', action: 'merge', target: undefined },
+      { name: '鲁夫', action: 'merge', target: '路飞' },
+      { name: '鲁夫', action: 'keep' },
+      { name: 'x', action: 'keep' },
     ]);
+  });
+
+  it('目标按归一化比 —— 显示名是 NBA、模型吐 nba 也算命中', () => {
+    const got = coerceVerdicts([{ name: '美职篮', action: 'merge', target: 'nba' }], new Set(['NBA']));
+    expect(got).toEqual([{ name: '美职篮', action: 'merge', target: 'NBA' }]);
+  });
+
+  it('move 没有目标 → keep(别把"没听懂"当"该删")', () => {
+    const got = coerceVerdicts([{ name: '露营', action: 'move' }], new Set(['户外']));
+    expect(got).toEqual([{ name: '露营', action: 'keep' }]);
   });
 });
 
@@ -1224,8 +1494,7 @@ import { complete } from '../llm/provider.js';
 import { parseJsonArray } from './parse.js';
 import type { ChatMessage } from '../llm/context.js';
 import {
-  listTagTree, mergeTags, normalizeTagName, setTagParent, deleteTag,
-  wouldExceedDepth, type TagNode,
+  listTagTree, mergeTags, normalizeTagName, setTagParent, deleteTag, type TagNode,
 } from '../db/repo/tags.js';
 
 export const CHECK_SYSTEM = `你是标签词库的质检员。用户给你一棵标签树和一批**新出现的词**,判断每个词该怎么办。
@@ -1245,17 +1514,36 @@ export interface TagVerdict {
   target?: string;
 }
 
-/** 收窄。**target 必须是已有词** —— 模型编的目标一律丢掉,落回 keep */
+/** 收窄。**target 必须是已有词** —— 模型编的目标一律丢掉,退回 keep */
 export function coerceVerdicts(raw: unknown, known: ReadonlySet<string>): TagVerdict[] {
   const list = parseJsonArray(raw) ?? [];
   const out: TagVerdict[] = [];
+
+  // 名字比较走**归一化** —— 树里存的是显示名("NBA"),模型可能吐 "nba"。
+  // 用精确串比会把合法目标当成"编的"丢掉,然后静默退回 keep —— 而 keep 是"什么都不做",
+  // 用户看不出任何异常,只会觉得"质检好像不太灵"
+  const knownNorm = new Map([...known].map((n) => [normalizeTagName(n), n]));
+
   for (const r of list) {
     const o = r as { name?: unknown; action?: unknown; target?: unknown };
     if (typeof o?.name !== 'string' || !o.name.trim()) continue;
-    const action = o.action === 'drop' || o.action === 'merge' || o.action === 'move' ? o.action : 'keep';
-    const target = typeof o.target === 'string' && known.has(o.target.trim()) ? o.target.trim() : undefined;
-    // merge/move 没有有效目标 = 做不到,退回 keep(不是 drop —— 别把"没听懂"当"该删")
-    out.push(action !== 'keep' && !target ? { name: o.name.trim(), action: 'keep' } : { name: o.name.trim(), action, ...(target ? { target } : {}) });
+
+    const name = o.name.trim();
+    const action =
+      o.action === 'drop' || o.action === 'merge' || o.action === 'move' ? o.action : 'keep';
+    const targetNorm = typeof o.target === 'string' ? normalizeTagName(o.target) : '';
+    const target = targetNorm ? knownNorm.get(targetNorm) : undefined;
+
+    // **只有 merge / move 需要目标。**
+    //
+    // 这里原来写成 `action !== 'keep' && !target` —— 而 `drop` 天然没有目标,
+    // 于是条件恒真、**每个 drop 都被改写成 keep**,「剔泛词」那道闸门整轮失效。
+    // §9F.6 明说"剔除裸泛词是这套判据**唯一**的软肋",那唯一的闸门却是关着的。
+    if ((action === 'merge' || action === 'move') && !target) {
+      out.push({ name, action: 'keep' });
+      continue;
+    }
+    out.push({ name, action, ...(target ? { target } : {}) });
   }
   return out;
 }
@@ -1293,26 +1581,34 @@ export async function runTagCheck(opts: {
     },
   ];
 
-  const verdicts = coerceVerdicts(await complete({ config: opts.config, messages }), known);
+  const verdicts = coerceVerdicts(
+    // 批量判断:关思考模式(Task 0)。它要的是"照格式吐 JSON",不是"想清楚"
+    await complete({ config: opts.config, messages, thinking: false }),
+    known,
+  );
 
   let dropped = 0, merged = 0, moved = 0;
   for (const v of verdicts) {
     const id = byName(db, v.name);
     if (id === null) continue;
-    if (v.action === 'drop') { deleteTag(db, id); dropped++; continue; }
+
+    if (v.action === 'drop') {
+      // **泛词从词库里删掉,不是"留原地"** —— 它没有任何区分力,留着只会被
+      // 集合判据推到树顶(§9F.6 说的那个软肋)。这是整套系统里唯一的防线
+      deleteTag(db, id);
+      dropped++;
+      continue;
+    }
     if (v.action === 'merge' && v.target) {
       const targetId = byName(db, v.target);
-      if (targetId !== null && targetId !== id) { mergeTags(db, id, targetId); merged++; }
+      // 闸在 mergeTags 里(防环 + 深度):false = 这两个词不能并 —— 跳过,不是抛错
+      if (targetId !== null && targetId !== id && mergeTags(db, id, targetId)) merged++;
       continue;
     }
     if (v.action === 'move' && v.target) {
       const parentId = byName(db, v.target);
-      // 挂父前先过深度闸(C2 封顶 4 层)。超了就**留原位** —— 不截断:
-      // 截断会把这棵子树底下的东西整段丢掉
-      if (parentId !== null && parentId !== id && !wouldExceedDepth(db, id, parentId)) {
-        setTagParent(db, id, parentId);
-        moved++;
-      }
+      // 闸在 setTagParent 里(唯一收口):false = 这次挂父不合法 → 留原位
+      if (parentId !== null && setTagParent(db, id, parentId)) moved++;
     }
   }
   return { dropped, merged, moved };
@@ -1352,12 +1648,13 @@ git commit -m "feat(tags): 标签质检(第五个用途 tagcheck)—— 剔泛�
 
 **Files:**
 - Create: `server/src/curator/tagtree.ts` / `tagtree.test.ts`
+- Modify: `server/src/db/repo/tags.ts`(补 `listTagsWithParent` / `tagSets`,Step 4)
 
 **Interfaces:**
 - Consumes: Task 1 的 `listTagTree` / `itemTagIds` / `subtreeSets` / `mergeTags` / `setTagParent`
 - Produces:
   - `export interface Coverage { a: number; b: number; ratio: number }`
-  - `export function coverageOf(sets: ReadonlyMap<number, ReadonlySet<string>>): Coverage[]`
+  - `export function coverageMap(sets: ReadonlyMap<number, ReadonlySet<string>>): Map<string, number>` —— `"a,b" → |A∩B|/|A|`,一次算完;零交集的不存
   - `export interface TreeChange { kind: 'merge' | 'reparent'; from: string; to: string; detail: string }`
   - `export function reconcile(db, opts?: { minSample?: number; cover?: number }): TreeChange[]`
 
@@ -1368,9 +1665,14 @@ import { describe, it, expect } from 'vitest';
 import { openDb } from '../db/index.js';
 import { upsertItem } from '../db/repo/items.js';
 import { ensureTag, linkItemTag, listTagTree } from '../db/repo/tags.js';
-import { reconcile, coverageOf } from './tagtree.js';
+import { reconcile, coverageMap } from './tagtree.js';
 
-/** 建 N 条视频,前 k 条挂 tagIds 里的全部标签 */
+/**
+ * 建 n 条视频,每条挂 tagIds 里的全部标签。
+ *
+ * `from` 是编号起点 —— 用不同的起点把几批视频**分开**,这样"重叠多少"
+ * 完全由测试说了算。
+ */
 function seed(db: ReturnType<typeof openDb>, n: number, tagIds: number[], from = 0) {
   for (let i = from; i < from + n; i++) {
     const id = `BV${i}`;
@@ -1379,14 +1681,23 @@ function seed(db: ReturnType<typeof openDb>, n: number, tagIds: number[], from =
   }
 }
 
-describe('coverageOf', () => {
-  it('算出 |A∩B| / |A|', () => {
+describe('coverageMap', () => {
+  it('一次算完两个方向', () => {
     const sets = new Map<number, ReadonlySet<string>>([
       [1, new Set(['a', 'b', 'c', 'd'])],
       [2, new Set(['a', 'b'])],
     ]);
-    const [c] = coverageOf(sets);
-    expect(c!.ratio).toBe(0.5); // B 有 100% 落在 A 里 → A 覆盖 B 的比是 2/4
+    const m = coverageMap(sets);
+    expect(m.get('1,2')).toBe(0.5); // |1∩2| / |1| = 2/4
+    expect(m.get('2,1')).toBe(1);   // |2∩1| / |2| = 2/2
+  });
+
+  it('零交集的对不存 —— 缺席即 0', () => {
+    const sets = new Map<number, ReadonlySet<string>>([
+      [1, new Set(['a'])],
+      [2, new Set(['b'])],
+    ]);
+    expect(coverageMap(sets).size).toBe(0);
   });
 });
 
@@ -1395,22 +1706,27 @@ describe('reconcile', () => {
     const db = openDb(':memory:');
     const food = ensureTag(db, '美食', null);
     const roast = ensureTag(db, '烤羊肉', null);
-    seed(db, 20, [food]);
-    seed(db, 18, [food, roast], 20);   // 烤羊肉的 18 条全都在美食里
+    // 美食 40 条(其中 18 条也挂烤羊肉),烤羊肉 18 条
+    // → cover(烤羊肉→美食)=1.0,cover(美食→烤羊肉)=18/40=0.45
+    //   单向高 → 挂父,不是合并(双向都高才是合并)
+    seed(db, 40, [food]);
+    seed(db, 18, [food, roast], 40);
     const changes = reconcile(db);
     expect(changes.some((c) => c.kind === 'reparent')).toBe(true);
-    expect(db.prepare(`SELECT parent_id FROM tags WHERE id = ?`).get(roast)).toEqual({ parentId: food });
+    expect(changes.some((c) => c.kind === 'merge')).toBe(false);
+    expect(db.prepare(`SELECT parent_id FROM tags WHERE id = ?`).get(roast)).toEqual({ parent_id: food });
   });
 
-  it('双向都 ≥90% → 合并', () => {
+  it('双向都 ≥90% → 合并,保留挂得多的那个', () => {
     const db = openDb(':memory:');
     const a = ensureTag(db, '路飞', null);
     const b = ensureTag(db, '鲁夫', null);
-    seed(db, 10, [a, b]);
-    seed(db, 2, [a], 100);
+    seed(db, 10, [a, b]);            // 10 条同时挂两个
+    seed(db, 1, [a], 100);           // 只有 a 多一条 → |a|=11 |b|=10
+    // cover(a→b)=10/11=0.909 ≥0.9,cover(b→a)=10/10=1.0 → 合并
     const changes = reconcile(db);
     expect(changes.some((c) => c.kind === 'merge')).toBe(true);
-    expect(listTagTree(db).map((n) => n.name)).toEqual(['路飞']);
+    expect(db.prepare(`SELECT name FROM tags`).all()).toEqual([{ name: '路飞' }]); // 挂得多的留下
   });
 
   it('各挂各的 → 平级,什么都不做(露营 vs 美食)', () => {
@@ -1419,9 +1735,10 @@ describe('reconcile', () => {
     const camp = ensureTag(db, '露营', null);
     seed(db, 30, [food]);
     seed(db, 5, [camp], 100);
-    seed(db, 2, [food], 200);       // 只有 2 条重叠
+    seed(db, 2, [food, camp], 200);  // 只有 2 条同时挂两个
+    // cover(露营→美食)=2/7=0.29,cover(美食→露营)=2/32=0.06 → 两边都低
     expect(reconcile(db)).toEqual([]);
-    expect(db.prepare(`SELECT parent_id FROM tags WHERE id = ?`).get(camp)).toEqual({ parentId: null });
+    expect(db.prepare(`SELECT parent_id FROM tags WHERE id = ?`).get(camp)).toEqual({ parent_id: null });
   });
 
   it('样本 <5 条不判(统计下限)', () => {
@@ -1429,17 +1746,18 @@ describe('reconcile', () => {
     const a = ensureTag(db, '小词', null);
     const b = ensureTag(db, '大词', null);
     seed(db, 50, [b]);
-    seed(db, 3, [a, b], 100);       // 覆盖率 100% 但只有 3 条
+    seed(db, 3, [a, b], 100);        // 覆盖率 100% 但只有 3 条
     expect(reconcile(db)).toEqual([]);
   });
 
-  it('互为父子时不来回改(已经是 B 的孩子就不再报)', () => {
+  it('已经是父子的一对不合并 —— 否则会把树压塌', () => {
     const db = openDb(':memory:');
-    const parent = ensureTag(db, '美食', null);
-    const child = ensureTag(db, '烤羊肉', parent);
-    seed(db, 20, [parent]);
-    seed(db, 18, [parent, child], 20);
+    const parent = ensureTag(db, '体育', null);
+    const child = ensureTag(db, '篮球', parent);  // 树里**已经**是父子
+    seed(db, 10, [parent, child]);                // 篮球的视频全都挂着体育
+    // 双向都 100%,但树里已经表达过这个包含关系了 —— 合并就等于把篮球删掉
     expect(reconcile(db)).toEqual([]);
+    expect(listTagTree(db)[0]!.children.map((n) => n.name)).toEqual(['篮球']);
   });
 });
 ```
@@ -1471,15 +1789,8 @@ Expected: FAIL —— `Failed to resolve import "./tagtree.js"`
  */
 import type Database from 'better-sqlite3';
 import {
-  listTagsWithParent, mergeTags, setTagParent, tagSets, wouldExceedDepth, type TagRow,
+  listTagsWithParent, mergeTags, setTagParent, tagSets, type TagRow,
 } from '../db/repo/tags.js';
-
-export interface Coverage {
-  a: number;
-  b: number;
-  /** |A∩B| / |A| —— A 有多大比例落在 B 里 */
-  ratio: number;
-}
 
 export interface TreeChange {
   kind: 'merge' | 'reparent';
@@ -1488,24 +1799,60 @@ export interface TreeChange {
   detail: string;
 }
 
-/** A → B 的覆盖率。**只算候选对**(共现过的)—— 全量两两是 O(n²) */
-export function coverageOf(
-  sets: ReadonlyMap<number, ReadonlySet<string>>,
-): Coverage[] {
-  const ids = [...sets.keys()];
-  const out: Coverage[] = [];
+/** `${a},${b}` → |A∩B| / |A|。缺席即 0 */
+type RatioMap = Map<string, number>;
+const k = (a: number, b: number) => `${a},${b}`;
+
+/**
+ * 一次算完全部有向覆盖率。
+ *
+ * **必须一次算完。** 在循环里为每一对现算,等于把 O(n²) 的活做成 O(n⁴)
+ * —— 初稿就这么写的(还在循环里临时构造一个 2 项 Map 再调一次自己)。
+ *
+ * **只存非 0 的**:两个词的视频集毫无交集时覆盖率必然是 0,存它只是占内存。
+ * 查的时候 `?? 0`。
+ */
+export function coverageMap(sets: ReadonlyMap<number, ReadonlySet<string>>): RatioMap {
+  const ids = [...sets.keys()].sort((x, y) => x - y);
+  const out: RatioMap = new Map();
   for (const a of ids) {
     const A = sets.get(a)!;
     if (A.size === 0) continue;
     for (const b of ids) {
       if (a === b) continue;
       const B = sets.get(b)!;
+      if (B.size === 0) continue;
       let hit = 0;
       for (const x of A) if (B.has(x)) hit++;
-      out.push({ a, b, ratio: hit / A.size });
+      if (hit > 0) out.set(k(a, b), hit / A.size);
     }
   }
   return out;
+}
+
+/** 无序对,每对只出一次 —— 双向判断在循环里自己做(查 `k(a,b)` 和 `k(b,a)`) */
+function pairs(sets: ReadonlyMap<number, ReadonlySet<string>>): [number, number][] {
+  const ids = [...sets.keys()].sort((x, y) => x - y);
+  const out: [number, number][] = [];
+  for (let i = 0; i < ids.length; i++)
+    for (let j = i + 1; j < ids.length; j++) out.push([ids[i]!, ids[j]!]);
+  return out;
+}
+
+/** node 是不是 anc 的后代(anc 在不在它的祖先链上)*/
+function isAncestor(
+  parentOf: ReadonlyMap<number, number | null>,
+  node: number,
+  anc: number,
+): boolean {
+  let cur: number | null | undefined = node;
+  const seen = new Set<number>();
+  while (cur != null && !seen.has(cur)) {
+    if (cur === anc) return true;
+    seen.add(cur);
+    cur = parentOf.get(cur) ?? null;
+  }
+  return false;
 }
 
 /**
@@ -1523,71 +1870,79 @@ export function reconcile(
   const minSample = opts.minSample ?? 5;
   const cover = opts.cover ?? 0.9;
 
-  const rows: TagRow[] = listTagsWithParent(db);
-  const parentOf = new Map(rows.map((r) => [r.id, r.parentId]));
-  const nameOf = new Map(rows.map((r) => [r.id, r.name]));
-  const sets = tagSets(db);
-
   const changes: TreeChange[] = [];
-  const dead = new Set<number>();
+  const take = () => {
+    const rows: TagRow[] = listTagsWithParent(db);
+    const sets = tagSets(db);
+    return {
+      sets,
+      cov: coverageMap(sets),
+      nameOf: new Map(rows.map((r) => [r.id, r.name])),
+      parentOf: new Map(rows.map((r) => [r.id, r.parentId])),
+    };
+  };
+
+  let { sets, cov, nameOf, parentOf } = take();
 
   // ── ① 合并:双向都 ≥cover 且都够样本 ──────────────────
-  for (const { a, b, ratio } of coverageOf(sets)) {
-    if (dead.has(a) || dead.has(b)) continue;
-    if (a > b) continue;                       // 每对只处理一次(用 id 排序定方向)
+  for (const [a, b] of pairs(sets)) {
     const sizeA = sets.get(a)!.size;
     const sizeB = sets.get(b)!.size;
     if (sizeA < minSample || sizeB < minSample) continue;
-    const back = coverageOf(new Map([[b, sets.get(b)!], [a, sets.get(a)!]]))[0]!.ratio;
-    if (ratio < cover || back < cover) continue;
+
+    // **已经是父子关系的一对不合并。** 树里已经表达过这个包含关系了 ——
+    // 再合并一次就是把树压塌。(父子挂的视频高度重合是完全正常的:
+    // 篮球的视频本来就都挂着体育。测试夹具也特别容易造出"父和子一模一样"。)
+    if (isAncestor(parentOf, b, a) || isAncestor(parentOf, a, b)) continue;
+
+    const fwd = cov.get(k(a, b)) ?? 0;
+    const back = cov.get(k(b, a)) ?? 0;
+    if (fwd < cover || back < cover) continue;
 
     // 保留挂得多的那个(信息更全),把另一个并进来
     const [keep, drop] = sizeA >= sizeB ? [a, b] : [b, a];
-    mergeTags(db, drop, keep);
-    dead.add(drop);
+    if (!mergeTags(db, drop, keep)) continue; // 防环 + 深度闸(mergeTags 内置)
     changes.push({
       kind: 'merge',
       from: nameOf.get(drop) ?? String(drop),
       to: nameOf.get(keep) ?? String(keep),
-      detail: `挂的是同一批视频(${Math.round(Math.max(ratio, back) * 100)}% 重合)`,
+      detail: `挂的是同一批视频(${Math.round(Math.max(fwd, back) * 100)}% 重合)`,
     });
   }
 
-  // ── ② 挂父:单向外包 ≥cover,且样本够 ────────────────
-  for (const { a, b, ratio } of coverageOf(sets)) {
-    if (dead.has(a) || dead.has(b) || a === b) continue;
-    if (ratio < cover) continue;
-    if (sets.get(a)!.size < minSample || sets.get(b)!.size < minSample) continue;
-    // 已经是 b 的孩子(或 b 已在 a 的子树里)→ 不动,免得来回改
-    if (parentOf.get(a) === b || isAncestor(parentOf, b, a)) continue;
-    // 根与根之间才挂;已经有父的不动(那是质检给的判断,数据只纠正"没有父"的)
-    if (parentOf.get(a) !== null) continue;
-    // 深度闸(C2 封顶 4 层)—— 超了就不挂
-    if (wouldExceedDepth(db, a, b)) continue;
+  // **合并之后必须重取快照。** 覆盖数据、父边、名字全变了。
+  // 不重取的话第二段拿着合并前的集合判"该挂哪",而上面刚合并掉的两个词
+  // 还在集合里 —— 计划初稿宣称的"先合并再挂父"就成了一句做不到的话。
+  if (changes.length > 0) ({ sets, cov, nameOf, parentOf } = take());
 
-    setTagParent(db, a, b);
-    parentOf.set(a, b);
+  // ── ② 挂父:单向外包 ≥cover,且样本够 ────────────────
+  for (const [a, b] of pairs(sets)) {
+    // 只动**根**:已经有父的那是质检给的判断,数据只纠正"没有父"的。
+    // 两个都得是根 —— 一个已经有父的节点不该被数据再挪一次
+    if (parentOf.get(a) !== null || parentOf.get(b) !== null) continue;
+    if (sets.get(a)!.size < minSample || sets.get(b)!.size < minSample) continue;
+
+    // **方向要两边都看**:`pairs` 是无序对,a 可能是子也可能是父。
+    // 只看 `k(a,b)` 的话,谁先建谁就永远是"父",挂父整天不触发
+    const fwd = cov.get(k(a, b)) ?? 0;
+    const back = cov.get(k(b, a)) ?? 0;
+    const child = fwd >= cover ? a : back >= cover ? b : null;
+    if (child === null) continue;
+    const parent = child === a ? b : a;
+    const ratio = child === a ? fwd : back;
+
+    // 闸在 setTagParent 里(防环 + 深度):false = 这次不合法 → 留原位
+    if (!setTagParent(db, child, parent)) continue;
+    parentOf.set(child, parent);
     changes.push({
       kind: 'reparent',
-      from: nameOf.get(a) ?? String(a),
-      to: nameOf.get(b) ?? String(b),
-      detail: `${Math.round(ratio * 100)}% 的视频也挂着「${nameOf.get(b) ?? b}」`,
+      from: nameOf.get(child) ?? String(child),
+      to: nameOf.get(parent) ?? String(parent),
+      detail: `${Math.round(ratio * 100)}% 的视频也挂着「${nameOf.get(parent) ?? parent}」`,
     });
   }
 
   return changes;
-}
-
-/** node 是不是 anc 的后代 —— 防环 */
-function isAncestor(parentOf: ReadonlyMap<number, number | null>, node: number, anc: number): boolean {
-  let cur: number | null | undefined = node;
-  const seen = new Set<number>();
-  while (cur != null && !seen.has(cur)) {
-    if (cur === anc) return true;
-    seen.add(cur);
-    cur = parentOf.get(cur) ?? null;
-  }
-  return false;
 }
 ```
 
@@ -1624,7 +1979,7 @@ export function tagSets(db: Database.Database): Map<number, Set<string>> {
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `cd server && npx vitest run src/curator/tagtree.test.ts`
-Expected: PASS(6 条)
+Expected: PASS(7 条)
 
 - [ ] **Step 6: 提交**
 
@@ -1650,7 +2005,16 @@ git commit -m "feat(tags): 集合判据 —— 覆盖/合并/挂父,替掉拍的
   - `POST /api/tags/run?scope=missing|all` —— 跑完自动接质检 + `reconcile`,`done` 帧加 `changes` 与 `newWords`
   - `GET /api/tags/changes` → 最近一轮的变化清单(存在 settings 键 `tags.lastChanges`)
 
-- [ ] **Step 1: 写失败测试**(追加到 `tagRoutes.test.ts`)
+- [ ] **Step 1: 先修既有断言,再写新测试**
+
+`tagRoutes.test.ts` **有两处既有断言会红** —— 它们读的是被停用的 `ai_tags` 列:
+
+- `:82-83` —— `JSON.parse(row.ai_tags).kind === '娱乐'`
+- `:123` —— `COUNT(*) WHERE ai_tags IS NOT NULL` 断言 `> 0`
+
+改成读新表 / 新列:`items.ai_kind` 与 `item_tags` 的计数(`SELECT COUNT(*) FROM item_tags`)。
+
+然后追加下面这些新用例:
 
 ```ts
 import { itemTagIds, ensureTag, linkItemTag, listTagTree } from '../db/repo/tags.js';
@@ -1725,7 +2089,10 @@ Expected: FAIL —— 404(路由不存在)
     if (!tagsExist(db, [fromId, toId])) {
       return reply.code(404).send({ ok: false, reason: '词库里没有这个标签' });
     }
-    mergeTags(db, fromId, toId);
+    // 闸在 mergeTags 里(防环 + 超深)—— false 是"这两个词不能并",不是故障
+    if (!mergeTags(db, fromId, toId)) {
+      return reply.code(400).send({ ok: false, reason: '这两个词不能合并(会成环或超出 4 层)' });
+    }
     log.event({ level: 'info', category: 'llm', message: `标签合并:${fromId} → ${toId}` });
     return { ok: true };
   });
@@ -1740,10 +2107,14 @@ Expected: FAIL —— 404(路由不存在)
       renameTag(db, id, body.name);
     }
     if (body.parentId !== undefined) {
-      if (body.parentId !== null && (!tagsExist(db, [body.parentId]) || body.parentId === id)) {
-        return reply.code(400).send({ ok: false, reason: '父节点不合法' });
+      if (body.parentId !== null && !tagsExist(db, [body.parentId])) {
+        return reply.code(400).send({ ok: false, reason: '父节点不存在' });
       }
-      setTagParent(db, id, body.parentId);
+      // 闸在 setTagParent 里(自己挂自己 / 挂到自己的后代 / 超 4 层):
+      // false 就是"这次不合法",不是故障
+      if (!setTagParent(db, id, body.parentId)) {
+        return reply.code(400).send({ ok: false, reason: '不能挂到这个位置(会成环或超出 4 层)' });
+      }
     }
     return { ok: true };
   });
@@ -1813,6 +2184,14 @@ Promise<{ tagged: number; failedBatches: {…}[]; newWords: string[] }>
 
 内部维护 `const newWords = new Set<string>()`,`askOnce` 里 `for (const n of applied.created) newWords.add(n)`,返回值带上 `newWords: [...newWords]`。
 
+**`onBatch` 的实参也要跟着加** —— 它是逐批回调,漏了这个字段 TS 直接报错:
+
+```ts
+          opts.onBatch?.({ done, total, tagged, failedBatches, newWords: [...newWords] });
+```
+
+路由那侧不用改:`tagRoutes.ts` 的 progress 帧只取 `b.done/b.total/b.tagged`,多出来的字段它不看。
+
 - [ ] **Step 5: `run` 路由末尾接上质检 + 判据**
 
 `runTagging` 返回后、写 `done` 帧前插入:
@@ -1821,37 +2200,61 @@ Promise<{ tagged: number; failedBatches: {…}[]; newWords: string[] }>
       // ── 跑完自动整理(§9F C8 + C9 + C10)────────────────
       // 顺序不能反:先质检(定新词的归宿、剔泛词),再让数据说话(合并/挂父)。
       // 反过来判据会把证据吃掉 —— 详见 tagtree.ts 开头那段。
+
+      /**
+       * **质检用的是「标签质检」那个用途的模型,不是打标那个。**
+       *
+       * 两个要求是相反的:打标要便宜、能丢给本地 4b 跑全库;质检判的是**词性**
+       * (量小,十几到几十个词),要准。共用一个槽必然二选一都不对。
+       * 所以第五个用途**必须真的被读到** —— 漏了这一行的话它在界面上是个
+       * 配置了却永远不生效的下拉,而质检会跟着打标一起跑在本地 4b 上。
+       */
+      const checker = readLlmSettings(db, 'tagcheck');
       let check = { dropped: 0, merged: 0, moved: 0 };
-      try {
-        check = await runTagCheck({
-          config: llm.config,
-          tree: listTagTree(db),
-          newNames: r.newWords,
-          db,
-        });
-      } catch (e) {
-        // 质检失败**不该**把已经标好的东西废掉 —— 下一轮还会再判一次
+      if (!checker) {
         log.event({
-          level: 'warn', category: 'llm', code: 'TAGCHECK_FAILED',
-          message: (e as Error)?.message ?? String(e),
+          level: 'info', category: 'llm',
+          message: '没配「标签质检」模型 —— 跳过质检(泛词闸门这轮没跑)',
         });
+      } else {
+        try {
+          check = await runTagCheck({
+            config: checker.config,
+            tree: listTagTree(db),
+            newNames: r.newWords,
+            db,
+          });
+        } catch (e) {
+          // 质检失败**不该**把已经标好的东西废掉 —— 下一轮还会再判一次
+          log.event({
+            level: 'warn', category: 'llm', code: 'TAGCHECK_FAILED',
+            message: (e as Error)?.message ?? String(e),
+          });
+        }
       }
 
       // 「树的变化」= 质检做的 + 判据做的。清单要**看得见**(C10),
       // 但不设审批闸 —— 用户只要求"看得见它在长什么"
       const changes: TreeChange[] = [];
-      if (check.merged > 0) {
-        changes.push({ kind: 'merge', from: '（质检）', to: '', detail: `合并了 ${check.merged} 组同义词` });
+      if (check.merged > 0 || check.moved > 0 || check.dropped > 0) {
+        changes.push({
+          kind: 'merge',
+          from: '（质检）',
+          to: '',
+          detail: `合并 ${check.merged} 组 · 挪位 ${check.moved} 个 · 剔除泛词 ${check.dropped} 个`,
+        });
       }
-      if (check.moved > 0) {
-        changes.push({ kind: 'reparent', from: '（质检）', to: '', detail: `挪了 ${check.moved} 个词的位置` });
+      // **判据单独 try** —— 它和质检一样是"锦上添花",不该把已经跑通的标注
+      // 连 done 帧一起带崩(质检那步是包着的,这里不包就是两套待遇)
+      try {
+        changes.push(...reconcile(db));
+      } catch (e) {
+        log.event({
+          level: 'warn', category: 'llm', code: 'TREE_RECONCILE_FAILED',
+          message: (e as Error)?.message ?? String(e),
+        });
       }
-      changes.push(...reconcile(db));
       setSetting(db, CHANGES_KEY, JSON.stringify(changes));
-
-      if (check.dropped > 0) {
-        log.event({ level: 'info', category: 'llm', message: `质检剔除了 ${check.dropped} 个泛词` });
-      }
 ```
 
 `done` 帧载荷改成(前端 Task 8 的 `TagRunResult` 按这个来):
@@ -1884,10 +2287,13 @@ git commit -m "feat(tags): 词库路由 + 每轮自动质检与整理"
 
 **Files:**
 - Modify: `server/src/db/repo/rules.ts`
-- Modify: `server/src/curator/rules.ts` / `rules.test.ts`
-- Modify: `server/src/curator/ruleRoutes.ts` / `ruleRoutes.test.ts`
+- Modify: `server/src/curator/rules.ts` / `rules.test.ts`(`matchItem` 加 tag 字段 + **`renderConditions` 印名字不印 id**)
+- Modify: `server/src/curator/ruleRoutes.ts` / `ruleRoutes.test.ts`(字段白名单 + 试跑传 ctx;另外 `rulesWithHits` 也要传)
 - Modify: `server/src/curator/routes.ts`(run-pass-2 的 matchAll 传子树)
 - Modify: `server/src/curator/suggestions.ts`(它自己算"规则覆盖了哪些条目",算错会把归好的又建议一遍)
+- Modify: `server/src/curator/chat.ts`(`renderConditions` 的调用点,要多传一个名字表)
+- **Modify**: `web/src/types.ts`(`RuleField` 加 `'tag'`)
+- **Modify**: `web/src/components/RulesPanel.tsx`(字段下拉加一项 + `FIELD_LABEL` 加一行)—— **漏了它 tag 规则在界面上就建不出来**,File Structure 表里原先也没有这个文件
 
 **Interfaces:**
 - Produces:
@@ -2013,6 +2419,35 @@ export function matchItem(
 
 `matchAll` 加第三个参数 `ctx` 并透传。
 
+**还有一处必须一起改:`renderConditions` 会印出 tag **id**。**
+
+`curator/rules.ts:86-92` 的实现是"FIELD_LABEL + 原样打印关键词",而按落地细节 3,
+tag 条件里存的是 id。于是模型会读到 **「标签含 42、57」** —— 这正是 C15 所说的
+"依据就是标签和规则"里的那一半,变成一串数字就全废了。
+
+改法:多收一个名字表,渲染前把 id 翻成词名(翻不到就跳过那一条,别印数字)。
+
+```ts
+export function renderConditions(
+  conditions: readonly RuleCondition[],
+  tagNameOf: ReadonlyMap<number, string> = new Map(),
+): string {
+  // …原有逻辑…
+  //   field === 'tag' 时:cond.any.map(Number).map(id => tagNameOf.get(id)).filter(Boolean)
+  //   一个都没翻出来的话这条条件渲染成空串(和"关键词还空着"一样,不占行)
+}
+```
+
+**四个调用方都要传这个名字表**(不传的会静默退化成"不渲染 tag 条件",比印数字好,
+但白丢一半依据):
+
+- `curator/chat.ts:80`(聊天给模型看的结构)
+- `curator/routes.ts:338`(Pass 2 的夹子体系)
+- `curator/suggestions.ts:117`(规则建议)
+- `curator/routes.ts` 里 Task 7 新加的那个 `rules:` 入参
+
+名字表的构造:`new Map(listTagsWithParent(db).map((r) => [r.id, r.name]))` —— 几行,不用助手。
+
 - [ ] **Step 4: 改 `ruleRoutes.ts`**
 
 `:102` 的字段白名单加 `'tag'`:
@@ -2023,12 +2458,36 @@ export function matchItem(
     }
 ```
 
-`:226` 的试跑(`/api/rules/dry-run`)建 ctx:
+**要改的是 `rulesWithHits()`,不是路由里那段。**
+
+**初稿这里指错了行**(写的是 `:226` 的 `/api/rules/dry-run`)。那一段只调
+`rulesWithHits()`,自己**没有 `items`、也没有 `matchAll`** —— 照抄会写出引用不存在
+变量的代码;而真正该加 ctx 的地方没人改,于是**tag 规则的命中数在界面上永远显示 0**
+(那正是用户调规则时唯一有用的反馈)。
+
+真正的位置是 `ruleRoutes.ts:60-86` 的 `rulesWithHits()`,`matchAll` 在 `:64`:
 
 ```ts
-    const ctx = { subtree: subtreeSets(db) };
-    const matched = matchAll(items.map(toRuleItem), rules, ctx);
+function rulesWithHits(db: Database.Database) {
+  const rules = listRules(db);
+  const items = db.prepare(`SELECT * FROM items`).all() as ItemRow[];
+  const tagsOf = itemTagIds(db);
+
+  // §9F:不传 ctx 的话 tag 条件一律不命中(缺 subtree 时实现刻意返回"没有标签"),
+  // 于是界面上"命中 N 条"恒为 0,而规则看起来是配好的
+  const matched = matchAll(
+    items.map((i) => ({
+      id: i.id, title: i.title, intro: i.intro, upperName: i.upper_name,
+      tagIds: tagsOf.get(i.id) ?? [],
+    })),
+    rules,
+    { subtree: subtreeSets(db) },
+  );
+  // …原有的形状转换不变…
+}
 ```
+
+`/api/rules/dry-run`(`:226`)只消费 `rulesWithHits()` 的结果,**不用动**。
 
 其中 `toRuleItem` 现在要带 `tagIds`:
 
@@ -2078,13 +2537,47 @@ const toRuleItemWith = (tagsOf: ReadonlyMap<string, number[]>) => (i: ItemRow): 
     );
 ```
 
-- [ ] **Step 6: 跑测试 + 提交**
+- [ ] **Step 6: 前端加这个字段 —— 不然规则在界面上建不出来**
 
-Run: `cd server && npm test`
-Expected: PASS
+后端能存 tag 条件、能匹配,但用户**配不出来**。三处(缺一处就白做):
+
+`web/src/types.ts` 的 `RuleField` 加一个值:
+
+```ts
+export type RuleField = 'title' | 'intro' | 'upper' | 'tag';
+```
+
+`web/src/components/RulesPanel.tsx` 的 `FIELD_LABEL`(它是 `Record<RuleField, string>`,
+**不加这一行类型立刻报错**):
+
+```tsx
+const FIELD_LABEL: Record<RuleField, string> = {
+  title: '标题', intro: '简介', upper: 'UP 名', tag: '标签',
+};
+```
+
+字段下拉(同一文件 `:600` 附近的 `Select options`)加一项:
+
+```tsx
+{ value: 'tag', label: '标签' },
+```
+
+**还要处理"选哪个标签"**:其他三个字段是自由输入关键词,而 tag 要**从词库里选**
+(存的是 id)。所以在 `RulesPanel` 里按 `field === 'tag'` 分支渲染一个
+`Select showSearch`(数据源 `tagApi.tree()` 摊平后的词表,`optionFilterProp="label"`),
+选中后把 `String(id)` 写进 `any`。**不要**让用户手打 id —— 那跟"填数字不填名字"
+那条纪律是两回事:那条说的是**给模型看**的时候填数字,而这里是**给人选**的时候。
+
+- [ ] **Step 7: 跑测试 + 提交**
+
+Run: `cd server && npm test` 然后 `cd web && npm run typecheck`
+Expected: 两边都过
 
 ```bash
-git add server/src/db/repo/rules.ts server/src/curator/rules.ts server/src/curator/rules.test.ts server/src/curator/ruleRoutes.ts server/src/curator/routes.ts
+git add server/src/db/repo/rules.ts server/src/curator/rules.ts server/src/curator/rules.test.ts \
+        server/src/curator/ruleRoutes.ts server/src/curator/ruleRoutes.test.ts \
+        server/src/curator/suggestions.ts server/src/curator/chat.ts server/src/curator/routes.ts \
+        web/src/types.ts web/src/components/RulesPanel.tsx
 git commit -m "feat(rules): 第四字段 tag,选中即匹配整棵子树"
 ```
 
@@ -2095,9 +2588,9 @@ git commit -m "feat(rules): 第四字段 tag,选中即匹配整棵子树"
 **Files:**
 - Create: `server/src/curator/folderProfile.ts` / `folderProfile.test.ts`
 - Modify: `server/src/curator/classifier.ts`(`buildPass1Prompt` 加画像与规则)
-- Modify: `server/src/curator/routes.ts`(run-pass-1 传画像)
-- Modify: `server/src/http/routes/items.ts`(`/api/items/:id` 带标签)
-- Modify: `server/src/curator/routes.ts`(`GET /api/workbench/folders/:id/items` 带标签)
+- Modify: `server/src/curator/routes.ts`(run-pass-1 传画像与规则;**`GET /api/workbench` 加 `profiles`**)
+- Modify: `server/src/http/routes/items.ts`(`/api/items/:id` 带 `tagNames`)
+- Modify: `web/src/components/WorkFolderTree.tsx` + `web/src/pages/curator.tsx`(夹子行的 ⚠)
 
 **Interfaces:**
 - Produces:
@@ -2255,7 +2748,12 @@ export function renderProfiles(profiles: readonly FolderProfile[]): string {
 
 - [ ] **Step 4: `buildPass1Prompt` 换输入**
 
-opts 加 `profiles?: string` 与 `rules?: string`,在拼 prompt 时插到"用户现有的收藏夹"那块**下面**(比夹子名更靠前的实况):
+opts 加 `profiles?: string` 与 **`rulesText?: string`**,插到"用户现有的收藏夹"那块下面。
+
+> ⚠️ **参数名必须是 `rulesText`,不能叫 `rules`。** `runPass1` 的 opts 里已经有一个
+> `rules?: ReadonlyMap<string, readonly string[]>`(keyword 初分用的词表,
+> `classifier.ts:461`),同一层再加一个同名的 `string` 直接**编译不过**。
+> 名字里带 `Text` 也正好说明它是"给人/给模型看的那段文本",不是数据。
 
 ```ts
   const parts = [
@@ -2265,43 +2763,111 @@ opts 加 `profiles?: string` 与 `rules?: string`,在拼 prompt 时插到"用户
   // §9F C15:画像 = "这个夹子里**实际**是什么"。没有它,模型只能看名字猜 ——
   // §9C.0 那次事故(4 条 AI 教程被归进「黑神话」)就是这个猜造成的。
   if (opts.profiles) parts.push('', '### 每个夹子里实际是什么(按标签统计)', opts.profiles);
-  if (opts.sample.length) parts.push('', `## 收藏样本(${opts.sample.length} 条,从整个收藏库里均衡抽取)`, opts.sample.map((i) => renderItem(i, 120, opts.tagNames.get(i.id))).join('\n\n'));
-  if (opts.rules) parts.push('', '### 现有的归类规则', opts.rules);
+  if (opts.sample.length) {
+    parts.push(
+      '',
+      `## 收藏样本(${opts.sample.length} 条,从整个收藏库里均衡抽取)`,
+      opts.sample
+        .map((i) => {
+          const t = opts.tagInfo.get(i.id);
+          return renderItem(i, 120, t?.names, t?.kind);
+        })
+        .join('\n\n'),
+    );
+  }
+  if (opts.rulesText) parts.push('', '### 现有的归类规则', opts.rulesText);
   // …clusterNote / userConstraint / 收尾 照旧…
 ```
 
-`runPass1` 的 opts 一并透传。`routes.ts` 的 `run-pass-1` 里:
+`runPass1` 的 opts 加 `profilesText?: string` / `rulesText?: string` 并透传
+(**别叫 `rules`** —— 那个名字已经被 keyword 词表占了)。
+
+`routes.ts` 的 `run-pass-1` 里:
 
 ```ts
-        profiles: renderProfiles(buildFolderProfiles(db)),
-        rules: listRules(db).map((r) => `${r.folderId}: ${renderConditions(r.conditions) || '(空)'}`).join('\n'),
+        profilesText: renderProfiles(buildFolderProfiles(db)),
+        // renderConditions 要拿到名字表,否则 tag 条件会印成一串 id(Task 6)
+        rulesText: listRules(db)
+          .map((r) => `${r.folderId}: ${renderConditions(r.conditions, tagNameOf) || '(空)'}`)
+          .join('\n'),
+        tagInfo: tagInfoByItem(db),
 ```
 
 - [ ] **Step 5: `/api/items/:id` 与工作台条目接口带标签**
 
-`http/routes/items.ts` 的 `shapeItem` 保持原样(注释要求"出口形状单一口径"),**标签走同级字段**:
+`http/routes/items.ts` 的 `shapeItem` 保持原样(它的注释要求"出口形状单一口径"),
+**标签走同级字段**:
 
 ```ts
-  app.get('/api/items/:id', async (req, reply) => {
-    // …原有逻辑…
+    // 在**原有返回值**上加一个字段 —— 别整段重写。
+    // 初稿给的那段抄了不存在的变量名(`row` / `favTime`),照抄编译错;
+    // 这个 handler 里的局部变量和返回值以它本来的写法为准。
+    const info = tagInfoByItem(db).get(id);
     return {
-      item: shapeItem(row, favTime),
-      folders: [...],                                  // 已有
-      tags: itemTagIds(db, [id]).get(id) ?? [],        // §9F:这条挂的标签 id
-      tagNames: tagNamesByItem(db).get(id) ?? [],      // 显示用
+      ...原有字段,                    // item: shapeItem(...) / folders: [...] 一个字都不改
+      tagNames: info?.names ?? [],   // §9F:这条挂的标签,详情栏显示用
+    };
+```
+
+`curator/routes.ts:874` 那条工作台条目接口**先别动** —— 它的出口是 `{items, total}`,
+目前没有任何前端消费方需要标签;加了就是死字段。
+
+- [ ] **Step 6: 给离群标记一个出口**
+
+C14 的离群判定算出来了,**但没地方能看到它** —— 画像只喂给了 Pass 1,离群条目
+没有任何路由暴露。只算不露的判据等于没做。
+
+出口放在 `GET /api/workbench`(`curator/routes.ts:699`):它已经在返回工作副本的
+整个视图,再加一个 `profiles` 字段最省事(不新增路由)。
+
+```ts
+  app.get('/api/workbench', async () => {
+    const view = buildWorkbenchView(db);
+    const state = getWorkState(db);
+    // …
+    return {
+      // …原有字段…
+      /**
+       * §9F C14:每个夹子的标签画像 + 离群条目。
+       *
+       * **一次算完整个数组**(几十个夹子,内存统计),不要在字段里按需算 ——
+       * 那会让这个本来一次查询的接口变成 N 次。
+       */
+      profiles: buildFolderProfiles(db),
     };
   });
 ```
 
-工作台那条(`curator/routes.ts:874`)同样加 `tagNames`,让展开夹子时能顺带显示。
+前端(`web/src/components/WorkFolderTree.tsx` 的夹子行)在有离群时加一个 ⚠:
 
-- [ ] **Step 6: 跑测试 + 提交**
+```tsx
+        {/* §9F C14:这个夹子里有几条和其余内容对不上(零参数判据 —— 它每个标签
+            在夹子里都没有同伴)。点开能看是哪几条,不自动改任何东西 */}
+        {outliers.length > 0 && (
+          <span
+            role="img"
+            aria-label={`${outliers.length} 条可能放错了`}
+            title={`${outliers.length} 条可能放错了:${outliers.slice(0, 3).join('、')}${outliers.length > 3 ? ' …' : ''}`}
+            style={{ fontSize: 11, color: 'var(--warn)', flex: 'none', cursor: 'help' }}
+          >
+            ⚠
+          </span>
+        )}
+```
 
-Run: `cd server && npm test`
-Expected: PASS
+`outliers` 由 `WorkFolderTree` 的 props 传进来(在 `curator.tsx` 里从 `/api/workbench`
+的 `profiles` 按 `folderId` 取)。**只提示、不自动移** —— 夹子本来就一半放错时画像
+也是错的,它照的是镜子不是裁判(§9F.6)。
+
+- [ ] **Step 7: 跑测试 + 提交**
+
+Run: `cd server && npm test` 然后 `cd web && npm run typecheck`
+Expected: 两边都过
 
 ```bash
-git add server/src/curator/folderProfile.ts server/src/curator/folderProfile.test.ts server/src/curator/classifier.ts server/src/curator/routes.ts server/src/http/routes/items.ts
+git add server/src/curator/folderProfile.ts server/src/curator/folderProfile.test.ts \
+        server/src/curator/classifier.ts server/src/curator/routes.ts server/src/http/routes/items.ts \
+        web/src/components/WorkFolderTree.tsx web/src/pages/curator.tsx
 git commit -m "feat(tags): 夹子画像 + 离群标记;提体系看得见夹子实况"
 ```
 
@@ -2558,7 +3124,11 @@ export default function TagPanel() {
   const { data: tree, loading, refresh: refreshTree } = useRequest(() => tagApi.tree(), {
     formatResult: rawResult,
   });
-  const { data: changes } = useRequest(() => tagApi.changes(), { formatResult: rawResult });
+  // 变化清单跟着树一起刷 —— 手动合并/删除也会改变"上一轮变化"的读法,
+  // 只挂载时拉一次的话,你改完词库回头看顶部那块,数字还是旧的
+  const { data: changes, refresh: refreshChanges } = useRequest(() => tagApi.changes(), {
+    formatResult: rawResult,
+  });
   // 静态 Modal.confirm 拿不到 ConfigProvider 的主题,必须走 App.useApp()
   const { modal } = AntApp.useApp();
 
@@ -2574,7 +3144,7 @@ export default function TagPanel() {
     setBusy(true);
     try {
       await fn();
-      await refreshTree();
+      await Promise.all([refreshTree(), refreshChanges()]);
       return true;
     } catch (e) {
       setError((e as Error).message);
@@ -2792,6 +3362,7 @@ git commit -m "feat(web): 「标签」治理页 —— 手写树 + 变化清单 
 **Files:**
 - Create: `web/src/pages/browse.tsx` / `web/src/components/BrowsePanel.tsx`
 - Modify: `web/src/api.ts` / `web/src/types.ts` / `web/src/components/ContextPane.tsx`
+- **Modify**: `web/src/pages/index.tsx` —— 它用了 `ContextPane`,多出来的 `tags` prop 要传
 - Modify: `server/src/curator/tagRoutes.ts`(加 `GET /api/tags/:id/items`)
 
 **Interfaces:**
@@ -2965,7 +3536,19 @@ import ItemGrid from './ItemGrid';
 import TagTree from './TagTree';
 
 const PAGE_SIZE = 60;
-const EMPTY = { items: [] as Item[], total: 0, foldersOf: {}, tagsOf: {} };
+/**
+ * 空结果。
+ *
+ * **四个字段都要显式类型** —— 光写 `{ foldersOf: {} }` 的话,`web/tsconfig.json` 的
+ * `strict` 会把它推成 `{}`,下面 `foldersOf[it.id]` 的索引直接报 **TS7053**,
+ * Task 9 的 typecheck 门禁过不去。(初稿就是这么写的,实测复现过。)
+ */
+const EMPTY: {
+  items: Item[];
+  total: number;
+  foldersOf: Record<string, { id: number; title: string }[]>;
+  tagsOf: Record<string, string[]>;
+} = { items: [], total: 0, foldersOf: {}, tagsOf: {} };
 
 /**
  * 按标签看收藏 —— 复用 ItemGrid(条目渲染只有一套口径),只在旁边加一层标签选择。
@@ -3135,7 +3718,10 @@ Run: `cd server && npm test`
 Expected: PASS
 
 ```bash
-git add server/src/curator/tagRoutes.ts server/src/curator/tagRoutes.test.ts web/src/pages/browse.tsx web/src/components/BrowsePanel.tsx web/src/components/TagTree.tsx web/src/components/ContextPane.tsx web/src/api.ts web/src/types.ts
+git add server/src/curator/tagRoutes.ts server/src/curator/tagRoutes.test.ts \
+        web/src/pages/browse.tsx web/src/components/BrowsePanel.tsx \
+        web/src/components/ContextPane.tsx web/src/pages/index.tsx \
+        web/src/api.ts web/src/types.ts
 git commit -m "feat(web): 「浏览」按标签看收藏(子树匹配)+ 详情栏显示标签"
 ```
 
@@ -3148,5 +3734,23 @@ git commit -m "feat(web): 「浏览」按标签看收藏(子树匹配)+ 详情�
 - [ ] `cd server && npm test` 全绿
 - [ ] `cd server && npm run typecheck` 干净
 - [ ] `cd web && npm run typecheck` 干净;`npm run build` 输出含 `Compiled successfully`
-- [ ] `grep -rn "ai_tags" server/src --include=*.ts | grep -v test` **只剩 schema.ts 的 DDL 和注释** —— 生产代码里没有任何读写
+- [ ] **`ai_tags` 在生产代码里没有任何读写。** 列本身留在 schema 和 `ItemRow` 上
+      (§9F C1:不迁移、不 DROP),所以 grep **会**命中它 —— 要核的是**没有使用**:
+
+      ```bash
+      grep -rn "ai_tags" server/src --include=*.ts | grep -v test
+      ```
+
+      Expected:只有 `db/schema.ts` 的 DDL 与注释、`db/repo/items.ts` 的 `ItemRow`
+      字段声明和那两条注释。**不该出现 `.ai_tags`、`SET ai_tags`、`SELECT *, ai_tags`。**
+      (初稿把这条门禁写成了"只剩 schema.ts",按字面永远过不了。)
+
+- [ ] **反向核水位线** —— 增量标注全靠它,而它这次换了写手:
+
+      ```bash
+      grep -rn "ai_checked_at" server/src --include=*.ts | grep -v test
+      ```
+
+      Expected:`db/repo/tagging.ts` 里有**读**(`listUntaggedItemIds` / `tagStats`)
+      也有**写**(`markItemTagged`)。只读不写 = 那个"每次全库重标"的坑又回来了。
 - [ ] 真机跑一轮:点「AI 标注」→ 看「标签」页长出树 → 检查「树的变化」清单是否合理 → 在「浏览」页点一个词能捞出视频
