@@ -102,7 +102,12 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
 
   // 词库树(§9F C11):规则里存的是 tag **id**,所以既要用它给 tag 条件做选项,
   // 也要用它把 id 翻成词名显示 —— 一次请求两个用途。
-  // 拉挂了只是选项为空、tag 规则显示成"词已不在词库里",不该顶掉规则页的红条。
+  //
+  // **这一处拉挂了必须出声**(和上面 status 那处的静默不是一回事):它喂的是
+  // **标签选择器**,而那是建 tag 规则的唯一入口。静默的话下拉是空的,同时
+  // `renderRule` 会把每条已有的 tag 条件印成「标签(词已不在词库里)」—— 用户会
+  // 得出"我的标签规则坏了"的结论,而其实只是一个请求失败了。红条一句话把两个
+  // 症状一起解释掉,比留白强。
   const [tagTree, setTagTree] = useState<{ id: number; name: string }[]>([]);
   useEffect(() => {
     tagApi.tree()
@@ -112,7 +117,7 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
         walk(t.tree);
         setTagTree(flat.map((n) => ({ id: n.id, name: n.name })));
       })
-      .catch(() => {});
+      .catch((e) => setError((e as Error).message));
   }, []);
   const tagNameOf = new Map(tagTree.map((t) => [t.id, t.name]));
 

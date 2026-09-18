@@ -231,9 +231,10 @@ export async function runSuggestions(opts: {
     validFolderIds: new Set(opts.folders.map((f) => f.folderId)),
     // 自证查**全库** —— 它可能引用一条已经归到别处的条目当证据(spec 的例子就是)
     //
-    // 这里不带 tagIds(也不带 db):自证的探针字段只能是 VALID_FIELDS 里那三个文本字段
-    // —— tag 建议根本进不来(见 VALID_FIELDS 那条注释),所以 tagIds 在这条路上
-    // 不可能被读到。要带的话得把 db 一路传进这个纯调用函数,不值。
+    // 这里不带 tagIds:自证的探针字段只能是 VALID_FIELDS 里那三个文本字段
+    // —— tag 建议根本进不来(见 VALID_FIELDS 那条注释),所以这个字段在这儿是
+    // **用不上的数据**,不是取不到(把 tagsOf 经 opts 传进来是能做到的)。
+    // 往一个纯调用函数里塞 db 只为喂一个没人读的字段,不值。
     itemsById: new Map(opts.allItems.map((i) => [i.id, toRuleItem(i)])),
   });
 
