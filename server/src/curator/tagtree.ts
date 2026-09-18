@@ -20,6 +20,16 @@ import {
   isDescendant, listTagsWithParent, mergeTags, setTagParent, tagSets, type TagRow,
 } from '../db/repo/tags.js';
 
+/**
+ * 统计下限:**少于这么多条的视频,重合率没有统计意义**,不判
+ * ("两个词各挂 1 条、恰好是同一条"说明不了任何事)。
+ *
+ * **定义放在判据模块里**,夹子画像(C14)的离群判定也从这儿 import —— §9F 说那两处是
+ * 「与 C9 同一个统计下限」,两个字面量各写一份的话那句话只在"碰巧都是 5"时成立,
+ * 改了一处就静默分叉。
+ */
+export const MIN_SAMPLE = 5;
+
 export interface TreeChange {
   kind: 'merge' | 'reparent';
   from: string;
@@ -79,7 +89,7 @@ export function reconcile(
   db: Database.Database,
   opts: { minSample?: number; cover?: number } = {},
 ): TreeChange[] {
-  const minSample = opts.minSample ?? 5;
+  const minSample = opts.minSample ?? MIN_SAMPLE;
   const cover = opts.cover ?? 0.9;
 
   const changes: TreeChange[] = [];

@@ -13,9 +13,9 @@
 import type Database from 'better-sqlite3';
 import { listWorkFolders, workItemIds } from '../db/repo/workbench.js';
 import { itemTagIds, tagNamesById } from '../db/repo/tags.js';
-
-/** 离群判定外的统计下限 —— 与 C9 同一个数,理由也一样:少于它没有统计意义 */
-export const MIN_SAMPLE = 5;
+// 离群判定的统计下限**就是 C9 那个** —— §9F 写的是「与 C9 同一个统计下限」,
+// 所以从判据模块 import,不在这儿另写一个 5(理由见 MIN_SAMPLE 那条注释)
+import { MIN_SAMPLE } from './tagtree.js';
 
 export interface FolderProfile {
   folderId: number;

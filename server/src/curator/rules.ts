@@ -183,6 +183,13 @@ export interface SuggestionCtx {
   itemsById: ReadonlyMap<string, RuleItem>;
 }
 
+/**
+ * 规则能匹配的字段。**`'tag'` 刻意不在里面**,不是漏了 —— 自证那一关是拿
+ * `matchItem(item, probe)` 跑的(见 `validateSuggestion` 末尾),而 tag 条件要查
+ * tagIds,不传 `RuleContext` 必然打不中:每条 AI 提的 tag 规则都会倒在自己的证据上、
+ * 被静默丢掉(没有错、没有红测试,只表现为"模型从来没提过 tag 规则")。
+ * 谁要把它补进来,先解决自证那条路 —— 光补枚举没有任何测试会红。
+ */
 const VALID_FIELDS: readonly RuleField[] = ['title', 'intro', 'upper'];
 /** 一条规则最多这么多词 —— 防模型塞一堆噪音把规则变垃圾 */
 const MAX_KEYWORDS = 20;
