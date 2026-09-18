@@ -1520,7 +1520,6 @@ git add server/src/db/repo/tagging.ts server/src/db/repo/tagging.test.ts server/
         server/src/curator/routes.ts server/src/curator/routes.test.ts
 git commit -m "feat(tags): 标注产出树标签,归类看得到树标签(ai_tags 停用)"
 ```
-```
 
 ---
 
