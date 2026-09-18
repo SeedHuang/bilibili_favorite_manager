@@ -136,7 +136,7 @@ export function addEntry(db: Database.Database, input: { providerId: string; mod
   const entry: ModelEntry = { id: newId('m'), providerId: input.providerId, model: input.model.trim() };
   writeJson(db, MODELS_KEY, [...listEntries(db), entry]);
 
-  // 首条条目自动全分配 —— 避免配完一个模型,四个用途全是"未配置"
+  // 首条条目自动全分配 —— 避免配完一个模型,五个用途全是"未配置"
   const assigned = getAssignments(db);
   if (PURPOSES.every((p) => assigned[p] === null)) {
     for (const p of PURPOSES) setSetting(db, purposeKey(p), entry.id);
@@ -216,7 +216,7 @@ export function readLlmSettings(db: Database.Database, purpose: LlmPurpose): Llm
 
 // ── 测试铺底(生产代码不 import)─────────────────────
 
-/** 一条命令铺好 1 凭证 + 1 条目 + 四用途全指它。只在测试里用 */
+/** 一条命令铺好 1 凭证 + 1 条目 + 五用途全指它。只在测试里用 */
 export function seedLlm(
   db: Database.Database,
   opts: { provider?: string; model?: string; baseUrl?: string; apiKey?: string } = {},

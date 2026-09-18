@@ -63,7 +63,7 @@ describe('凭证层', () => {
 });
 
 describe('条目层', () => {
-  it('添加条目:四用途全空 → 自动全分配', () => {
+  it('添加条目:五用途全空 → 自动全分配', () => {
     const db2 = fresh();
     const p = saveProvider(db2, { provider: 'ollama' });
     const e = addEntry(db2, { providerId: p.id, model: 'qwen2.5:14b' });
@@ -134,7 +134,7 @@ describe('readLlmSettings(三层查找)', () => {
     expect(s.ctx.verified).toBe(false);
   });
 
-  it('seedLlm:铺好凭证+条目+四用途(测试基建自证)', () => {
+  it('seedLlm:铺好凭证+条目+五用途(测试基建自证)', () => {
     const db = fresh();
     seedLlm(db);
     expect(listProviders(db)).toHaveLength(1);

@@ -17,7 +17,7 @@ import { complete } from '../llm/provider.js';
 import { parseJsonArray } from './parse.js';
 import type { ChatMessage } from '../llm/context.js';
 import {
-  listTagTree, mergeTags, normalizeTagName, setTagParent, deleteTag, type TagNode,
+  mergeTags, normalizeTagName, setTagParent, deleteTag, type TagNode,
 } from '../db/repo/tags.js';
 
 export const CHECK_SYSTEM = `你是标签词库的质检员。用户给你一棵标签树和一批**新出现的词**,判断每个词该怎么办。

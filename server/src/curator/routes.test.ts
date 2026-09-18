@@ -36,7 +36,7 @@ function makeApp(opts: { llm?: boolean; seed?: boolean; ollamaFetchImpl?: typeof
   const db = openDb(':memory:');
   const log = new Logger(db, { silent: true });
   if (opts.llm !== false) {
-    seedLlm(db); // 1 凭证 + 1 条目(ollama/qwen2.5:14b)+ 四用途全指它
+    seedLlm(db); // 1 凭证 + 1 条目(ollama/qwen2.5:14b)+ 五用途全指它
   }
   if (opts.seed !== false) {
     upsertFolder(db, { id: 7, title: '深度学习', mediaCount: 1 });
