@@ -204,4 +204,30 @@ describe('标签树路由', () => {
     const r = await app.inject({ method: 'PATCH', url: `/api/tags/${a}`, payload: { name: '鲁夫' } });
     expect(r.statusCode).toBe(400);
   });
+
+  // 一个请求里同时改名 + 挂父是本文件上面那条用例就在用的形状。两条腿必须一起成
+  // 或一起不成 —— 只改名成功、挂父失败,调用方拿到 400 却已经被改了名
+  it('PATCH 改名合法但挂父非法 → 400,且改名一起回滚(不留半套)', async () => {
+    const { app, db } = makeApp();
+    const sport = ensureTag(db, '体育', null);
+    const league = ensureTag(db, '篮球', sport);
+    // league 是 sport 的后代 → 把 sport 挂到 league 下会成环,setTagParent 必拒
+    const r = await app.inject({
+      method: 'PATCH', url: `/api/tags/${sport}`,
+      payload: { name: '体育运动', parentId: league },
+    });
+    expect(r.statusCode).toBe(400);
+    // 名字必须**原样**在库里 —— 这正是"半套"的落点
+    const row = db.prepare(`SELECT name FROM tags WHERE id = ?`).get(sport) as { name: string };
+    expect(row.name).toBe('体育');
+  });
+
+  // 标点组成的名字 trim 后非空、归一化后是空串:状态码本来就是 400,别让文案变成谎话
+  it('PATCH 名字只有标点 → 400,理由不是"被占了"', async () => {
+    const { app, db } = makeApp();
+    const a = ensureTag(db, '路飞', null);
+    const r = await app.inject({ method: 'PATCH', url: `/api/tags/${a}`, payload: { name: '——' } });
+    expect(r.statusCode).toBe(400);
+    expect(r.json().reason).toBe('名字里没有可用的字符');
+  });
 });

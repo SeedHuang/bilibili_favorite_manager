@@ -11,7 +11,7 @@ import { listUntaggedItemIds, tagStats } from '../db/repo/tagging.js';
 import type { ItemRow } from '../db/repo/items.js';
 import { runTagging } from './tagger.js';
 import {
-  listTagTree, mergeTags, setTagParent, renameTag, deleteTag, type TagNode,
+  listTagTree, mergeTags, setTagParent, renameTag, deleteTag, normalizeTagName, type TagNode,
 } from '../db/repo/tags.js';
 import { runTagCheck } from './tagcheck.js';
 import { reconcile, type TreeChange } from './tagtree.js';
@@ -235,24 +235,42 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
     const id = Number((req.params as { id: string }).id);
     const body = (req.body ?? {}) as { name?: string; parentId?: number | null };
     if (!tagsExist(db, [id])) return reply.code(404).send({ ok: false, reason: '词库里没有这个标签' });
-    if (body.name !== undefined) {
-      if (!body.name.trim()) return reply.code(400).send({ ok: false, reason: '名字不能为空' });
-      // renameTag 返回 false = 这个名字已经被别的节点占了(全局唯一,撞了改不动)。
-      // **撞名不自动合并** —— 那是「合并」按钮的事;这里必须报出去,回 ok:true
-      // 而库里没变,等于对唯一能处理它的调用方撒谎
-      if (!renameTag(db, id, body.name)) {
-        return reply.code(400).send({ ok: false, reason: '这个名字已经被别的标签占了' });
-      }
-    }
-    if (body.parentId !== undefined) {
-      if (body.parentId !== null && !tagsExist(db, [body.parentId])) {
-        return reply.code(400).send({ ok: false, reason: '父节点不存在' });
-      }
-      // 闸在 setTagParent 里(自己挂自己 / 挂到自己的后代 / 超 4 层):
-      // false 就是"这次不合法",不是故障
-      if (!setTagParent(db, id, body.parentId)) {
-        return reply.code(400).send({ ok: false, reason: '不能挂到这个位置(会成环或超出 4 层)' });
-      }
+
+    /**
+     * **两条腿要么一起成,要么一起不成。**
+     *
+     * 一个请求里同时给 `name` 和 `parentId` 是正常用法(本文件自己的用例就这么发)。
+     * 分开写的话,改名已经提交、挂父那步才失败 —— 调用方拿到 400,名字却已经改了,
+     * 刷新一下才发现。手动路由是**自动整理搞错时用户唯一的逃生口**,一个报"失败"
+     * 却已经动过手的逃生口比没有更糟。
+     *
+     * 失败靠**抛**来中止:事务正常返回才提交。`renameTag` / `setTagParent` 内部
+     * 各自的 transaction 会被 savepoint 嵌套进来一起回滚,不用动那两个函数。
+     */
+    const reject = (reason: string): never => {
+      throw new Error(reason);
+    };
+    try {
+      db.transaction(() => {
+        if (body.name !== undefined) {
+          if (!body.name.trim()) reject('名字不能为空');
+          // 标点/空白组成的名字 trim 后非空、归一化后却是空串,`renameTag` 会返回 false。
+          // 不单独认出来的话用户会被告知"这个名字已经被别的标签占了" —— 那是句假话
+          if (!normalizeTagName(body.name)) reject('名字里没有可用的字符');
+          // renameTag 返回 false = 这个名字已经被别的节点占了(全局唯一,撞了改不动)。
+          // **撞名不自动合并** —— 那是「合并」按钮的事;这里必须报出去,回 ok:true
+          // 而库里没变,等于对唯一能处理它的调用方撒谎
+          if (!renameTag(db, id, body.name)) reject('这个名字已经被别的标签占了');
+        }
+        if (body.parentId !== undefined) {
+          if (body.parentId !== null && !tagsExist(db, [body.parentId])) reject('父节点不存在');
+          // 闸在 setTagParent 里(自己挂自己 / 挂到自己的后代 / 超 4 层):
+          // false 就是"这次不合法",不是故障
+          if (!setTagParent(db, id, body.parentId)) reject('不能挂到这个位置(会成环或超出 4 层)');
+        }
+      })();
+    } catch (e) {
+      return reply.code(400).send({ ok: false, reason: (e as Error).message });
     }
     return { ok: true };
   });
