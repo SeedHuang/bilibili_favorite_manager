@@ -37,7 +37,13 @@ export default function BrowsePanel() {
   const [selected, setSelected] = useState<Item | null>(null);
   const [error, setError] = useState('');
 
-  const { data: tree } = useRequest(() => tagApi.tree(), { formatResult: rawResult });
+  // **拉挂了必须出声** —— 少了 onError,一次失败渲染出来的是左边那句"词库还是空的,
+  // 先去点一次「AI 标注」",而那是句谎话,照它做还会白跑一次全库 LLM。
+  // (「规则」页那棵同源的树也是这么取的。)
+  const { data: tree, error: treeError } = useRequest(() => tagApi.tree(), {
+    formatResult: rawResult,
+    onError: (e) => setError(e.message),
+  });
   const { data, loading } = useRequest(
     () => (tagId ? tagApi.items(tagId, page).catch((e: Error) => { setError(e.message); return EMPTY; }) : Promise.resolve(EMPTY)),
     { refreshDeps: [tagId, page], formatResult: rawResult },
@@ -82,7 +88,7 @@ export default function BrowsePanel() {
         </div>
         {(tree?.tree ?? []).length === 0 ? (
           <div style={{ color: 'var(--text-dim)', fontSize: 'var(--fs-12)', padding: '12px 0' }}>
-            词库还是空的 —— 先去「规则」页点一次「AI 标注」
+            {treeError ? '词库没拉下来 —— 看红条' : '词库还是空的 —— 先去「规则」页点一次「AI 标注」'}
           </div>
         ) : (
           <TagTree

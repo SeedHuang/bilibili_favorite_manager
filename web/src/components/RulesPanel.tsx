@@ -229,8 +229,12 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
         },
         { signal: controller.signal },
       );
+      // `newWordCount` 是**质检的可见性**:质检只对本轮新词开口,所以"新增 900 个词、
+      // 而「标签」页的上一轮变化是空的"就是它没干活(输出被截断是一条真路,服务端会记
+      // TAGCHECK_EMPTY)。不显示的话这个信号在界面上根本不存在 —— 这个数服务端一直在
+      // 发、注释还写着"界面上要的是这轮长了多少新词",而界面从来没读过它。
       setTagNote(
-        `本轮标注完成:${r.tagged.toLocaleString()} 条` +
+        `本轮标注完成:${r.tagged.toLocaleString()} 条 · 新增词 ${r.newWordCount.toLocaleString()} 个` +
           // 失败的批次**会留在 ai_checked_at IS NULL 里** —— 下次增量自然再试一遍,
           // 所以说清楚而不是把它当错误(§9D B4 同款语气)
           (r.failedBatches.length ? ` · ${r.failedBatches.length} 批失败(没标上的下次会再试)` : '') +
