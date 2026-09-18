@@ -67,6 +67,8 @@ export async function runTagging(opts: {
     const raw = await complete({
       config: opts.config,
       messages,
+      // 标注是批量:一整批的输入本就大,再开着思考模式就是每条都多吐一长串推理
+      thinking: false,
       ...(opts.signal ? { abortSignal: opts.signal } : {}),
     });
     const list = parseJsonArray(raw) ?? [];

@@ -123,12 +123,25 @@ export async function complete(opts: {
   messages: ChatMessage[];
   /** 调用方断开(用户点了停止)时中断生成 —— §9D B2。不传 = 不可中断(和旧行为一致) */
   abortSignal?: AbortSignal;
+  /**
+   * 要不要走思考模式。**缺省 = 不传**,交给厂商默认(聊天要它,下面 §9D.5 的思考流靠它)。
+   *
+   * 批量调用必须传 `false`:标注/归类/质检要的是"照格式吐 JSON",不是"想清楚" ——
+   * 每批吐一长串推理,输出 token 涨数倍、整体变慢(spec §3 末)。
+   */
+  thinking?: boolean;
 }): Promise<string> {
   const { instructions, rest } = splitPrompt(opts.messages);
   const { text } = await generateText({
     model: languageModel(opts.config),
     ...(instructions ? { instructions } : {}),
     messages: rest,
+    // `@ai-sdk/deepseek` 原生认这个键(3.0.44:`providerOptions.deepseek.thinking.type`,
+    // 缺省 `enabled`)。**判 undefined,而不是给个默认值** —— 缺省的语义是
+    // "这个参数一个字都不出现",聊天那条路的请求因此和加开关之前逐字一致
+    ...(opts.thinking === undefined
+      ? {}
+      : { providerOptions: { deepseek: { thinking: { type: opts.thinking ? 'enabled' : 'disabled' } } } }),
     // **省了这行,用户点停止就只是浏览器断开,provider 照样把 token 生成完** ——
     // "钱花了、结果没人接"。AI SDK 原生接受 signal,透传即可
     ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
@@ -148,6 +161,8 @@ export async function stream(opts: {
   onReasoning?: (delta: string) => void;
   /** 同 complete:用户点停止时让 SDK 真的停下来,而不是我们这边不再读流 */
   abortSignal?: AbortSignal;
+  /** 同 complete。**聊天不传** —— 要的正是思考流(§9D.5),关掉就没得看了 */
+  thinking?: boolean;
 }): Promise<string> {
   let streamError: unknown;
   const { instructions, rest } = splitPrompt(opts.messages);
@@ -155,6 +170,10 @@ export async function stream(opts: {
     model: languageModel(opts.config),
     ...(instructions ? { instructions } : {}),
     messages: rest,
+    // 同 complete:不传就是厂商默认,不塞空对象
+    ...(opts.thinking === undefined
+      ? {}
+      : { providerOptions: { deepseek: { thinking: { type: opts.thinking ? 'enabled' : 'disabled' } } } }),
     // 不传 signal 的话,我们只是不再读流,上游还在为这条请求烧 token
     ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
     // streamText **不抛错** —— 参数校验失败、上游报错都只进 onError,

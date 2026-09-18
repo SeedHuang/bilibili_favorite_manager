@@ -1079,6 +1079,8 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
           model: body.model,
         },
         messages: [{ role: 'user', content: '回复两个字:可以' }],
+        // 这条只问"通不通",开着思考模式用户要白等十几秒,还以为连不上
+        thinking: false,
       });
 
       log.event({

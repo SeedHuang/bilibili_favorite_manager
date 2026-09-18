@@ -170,6 +170,8 @@ export async function compact(opts: {
         content: prev ? `已有摘要:\n${prev.text}\n\n新对话:\n${transcript}` : transcript,
       },
     ],
+    // 滚动摘要同属批量:喂进去一整段对话,输出只是几行摘要 —— 开着思考纯属白烧 token
+    thinking: false,
   });
   // 兼容坏响应(空串 / undefined / 非字符串):拿不到有效摘要就不推进水位线,
   // 绝不把那段对话凭空吃掉。trimToContext 是永远在的兜底。

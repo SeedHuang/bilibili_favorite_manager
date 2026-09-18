@@ -185,6 +185,24 @@ describe('complete', () => {
     const args = mocks.generateText.mock.calls[0]![0] as { abortSignal?: unknown };
     expect(args.abortSignal).toBeUndefined();
   });
+
+  it('thinking=false → providerOptions 里关了思考', async () => {
+    mocks.createDeepSeek.mockReturnValue(() => fakeModel());
+    await complete({
+      config: deepseekCfg,
+      messages: [{ role: 'user', content: '嗨' }],
+      thinking: false,
+    });
+    const arg = mocks.generateText.mock.calls.at(-1)![0] as { providerOptions?: unknown };
+    expect(JSON.stringify(arg.providerOptions)).toContain('disabled');
+  });
+
+  it('不传 thinking → providerOptions 里没有这个字段(聊天那条路一行不变)', async () => {
+    mocks.createDeepSeek.mockReturnValue(() => fakeModel());
+    await complete({ config: deepseekCfg, messages: [{ role: 'user', content: '嗨' }] });
+    const arg = mocks.generateText.mock.calls.at(-1)![0] as { providerOptions?: unknown };
+    expect(JSON.stringify(arg.providerOptions ?? {})).not.toContain('thinking');
+  });
 });
 
 describe('provider 选择', () => {

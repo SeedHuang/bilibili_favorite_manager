@@ -503,7 +503,7 @@ export async function runPass1(opts: {
       }),
     },
   ];
-  const raw = await complete({ config: opts.config, messages });
+  const raw = await complete({ config: opts.config, messages, thinking: false });
   const taxonomy = coerceProposal(raw);
   if (!taxonomy) {
     throw new Error('Pass 1 没吐出可用的体系 JSON —— 重跑一次,或换个模型');
@@ -606,6 +606,8 @@ export async function runPass2(opts: {
             }),
           },
         ],
+        // 归类也是批量:一次发几十条,要的是"照格式吐 JSON"不是"想清楚"
+        thinking: false,
         // 批内中断:用户点停止时让 provider 立刻收手,别把 token 生成完再说(§9D B2)
         ...(opts.signal ? { abortSignal: opts.signal } : {}),
       });
