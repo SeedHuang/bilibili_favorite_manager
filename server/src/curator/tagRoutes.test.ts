@@ -143,7 +143,11 @@ describe('标注路由', () => {
     const tagged = (db.prepare(`SELECT COUNT(*) AS n FROM items WHERE ai_checked_at IS NOT NULL`).get() as { n: number }).n;
     expect(tagged).toBeGreaterThan(0); // 已完成的批次保留
     expect(tagged).toBeLessThan(40); // 没跑的批次没被补成"结果"
-    // 中止真的让后面**一次调用都没再发**:40 条 / 批上限 32 = 2 批,第 2 批撞上中止
+    // 中止真的让后面**一次调用都没再发**:40 条 / 批上限 16 = **3 批**(16+16+8),
+    // 而调用停在 2 次 —— 少的正是"中止之后的那一次"。断在第 2 批:call 2 抛 AbortError 之后
+    // 补轮那道守卫(tagger.ts:226 `if (signal.aborted) break`)让这批不再补轮,外层每批
+    // 开工前的同一道守卫(:210)接着挡住第 3 批。所以落库的 16 条是**第 1 批整批**,
+    // 第 2 批一条没落 —— 上面两个 `>`/`<` 断言量出来的就是这件事。
     expect(mocks.complete).toHaveBeenCalledTimes(2);
 
     // 中止记 warn 不是 error(用户改主意不是故障)。silent 只关 stdout,events 表照写。
