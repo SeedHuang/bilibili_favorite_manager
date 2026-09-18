@@ -237,7 +237,7 @@ export interface OperationEntry {
 
 // ── M4c:规则 ────────────────────────────────────────────
 
-export type RuleField = 'title' | 'intro' | 'upper';
+export type RuleField = 'title' | 'intro' | 'upper' | 'tag';
 
 /** 一条条件 = "某字段里命中任一关键词"。条件之间 OR */
 export interface RuleCondition {
@@ -302,4 +302,22 @@ export interface TagProgressPayload {
   done: number;
   total: number;
   tagged: number;
+}
+
+// ── M4g:标签体系(词库树)──────────────────────────────
+// 这里先只落「规则选择标签」用得着的那两个 —— 规则面板要从词库里挑标签,
+// 而存的又是 id(见 RuleCondition.any),没有树就既选不了、也显示不出名字。
+
+export interface TagNode {
+  id: number;
+  name: string;
+  parentId: number | null;
+  /** 直达这个节点的条目数,不含子孙 */
+  count: number;
+  children: TagNode[];
+}
+
+export interface TagTreeView {
+  tree: TagNode[];
+  total: number;
 }

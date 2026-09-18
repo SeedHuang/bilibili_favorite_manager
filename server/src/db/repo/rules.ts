@@ -6,9 +6,10 @@ import type Database from 'better-sqlite3';
  * **结构化可执行**,不是一段自由文本:能执行才叫资产,否则它只是 prompt。
  * 而且只有能执行才算得出「命中几条」—— 那是调规则时唯一有用的反馈。
  *
- * 字段只留三个(不加正则、不加与或非、不加权重):表达力换"你一眼看懂它在干什么"。
+ * 字段只留四个(不加正则、不加与或非、不加权重):表达力换"你一眼看懂它在干什么"。
+ * 前三个是**文本**,`tag` 是唯一的结构化字段 —— 选中一个词就匹配它**整棵子树**(§9F C11)。
  */
-export type RuleField = 'title' | 'intro' | 'upper';
+export type RuleField = 'title' | 'intro' | 'upper' | 'tag';
 
 /** 一条条件 = "某字段里命中任一关键词"。条件之间 OR */
 export interface RuleCondition {
@@ -122,9 +123,7 @@ export function rewriteRuleTagIds(
     let touched = false;
     const next: RuleCondition[] = [];
     for (const c of conds) {
-      // 比字符串而不是比联合类型:`RuleField` 要到 Task 6 才加 'tag'
-      // (那一步会把这里的 cast 去掉),而库里此刻就可能已经存在 tag 条件
-      if ((c.field as string) !== 'tag') {
+      if (c.field !== 'tag') {
         next.push(c);
         continue;
       }

@@ -21,6 +21,7 @@ import type {
   SessionSummary,
   TagProgressPayload,
   TagRunStatus,
+  TagTreeView,
   WorkbenchView,
 } from './types';
 
@@ -371,6 +372,9 @@ export const rulesApi = {
 
 export const tagApi = {
   status: () => api<TagRunStatus>('/api/tags/status'),
+
+  /** 词库树 —— 规则里选标签(§9F C11)和「标签」页都用它 */
+  tree: () => api<TagTreeView>('/api/tags/tree'),
 
   /**
    * 跑一遍标注(SSE,照 classifyStream 的骨架)。

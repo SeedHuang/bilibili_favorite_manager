@@ -5,6 +5,7 @@ import { Logger } from '../logger/index.js';
 import { createServer } from '../http/index.js';
 import { upsertFolder } from '../db/repo/folders.js';
 import { upsertItem, linkFolderItem } from '../db/repo/items.js';
+import { ensureTag, linkItemTag } from '../db/repo/tags.js';
 import { seedLlm } from '../llm/config.js';
 import type { BiliClient } from '../bilibili/client.js';
 
@@ -76,7 +77,7 @@ describe('规则路由', () => {
     await app.close();
   });
 
-  it('PUT 校验:conditions 必须是数组、field 必须是三个之一', async () => {
+  it('PUT 校验:conditions 必须是数组、field 必须是四个之一', async () => {
     const { app } = makeApp();
     const id = await workcopy(app);
 
@@ -96,6 +97,29 @@ describe('规则路由', () => {
         payload: { conditions: [{ field: 'title', any: 'not-an-array' }] },
       })).statusCode,
     ).toBe(400);
+    await app.close();
+  });
+
+  // §9F C11:tag 条件存的是 id,命中算的是**整棵子树** —— 而且要在 rulesWithHits()
+  // 里传 ctx 才算得出来(不传的话界面上的"命中 N 条"恒为 0,而规则看起来是配好的)
+  it('PUT 接受 tag 条件;命中数按子树算 —— 选父命中只挂子标签的那条', async () => {
+    const { app, db } = makeApp();
+    const id = await workcopy(app);
+
+    const sport = ensureTag(db, '体育', null);
+    const basket = ensureTag(db, '篮球', sport);
+    linkItemTag(db, 'BV1', basket, 'ai'); // BV1 只挂子节点,标题里没有"体育"
+
+    const put = await app.inject({
+      method: 'PUT', url: `/api/rules/${id}`,
+      payload: { conditions: [{ field: 'tag', any: [String(sport)] }] },
+    });
+    expect(put.statusCode).toBe(200);
+
+    const mine = (await app.inject({ url: '/api/rules' }))
+      .json()
+      .rules.find((r: { folderId: number }) => r.folderId === id);
+    expect(mine.hit).toBe(1);
     await app.close();
   });
 

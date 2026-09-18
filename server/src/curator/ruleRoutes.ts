@@ -16,6 +16,7 @@ import {
 import { listWorkFolders } from '../db/repo/workbench.js';
 import { listFolders, isLockedFolder } from '../db/repo/folders.js';
 import type { ItemRow } from '../db/repo/items.js';
+import { itemTagIds, subtreeSets } from '../db/repo/tags.js';
 import { readLlmSettings } from '../llm/config.js';
 import { batchSize } from '../llm/context.js';
 import { matchAll, validateSuggestion, type RuleItem } from './rules.js';
@@ -61,7 +62,18 @@ export function registerRuleRoutes(app: FastifyInstance, deps: RuleDeps): void {
     const rules = listRules(db);
     const ruleOf = new Map(rules.map((r) => [r.folderId, r]));
     const items = db.prepare(`SELECT * FROM items`).all() as ItemRow[];
-    const matched = matchAll(items.map(toRuleItem), rules);
+    const tagsOf = itemTagIds(db);
+
+    // §9F:不传 ctx 的话 tag 条件一律不命中(缺 subtree 时实现刻意返回"没有标签"),
+    // 于是界面上"命中 N 条"恒为 0,而规则看起来是配好的
+    const matched = matchAll(
+      items.map((i) => ({
+        id: i.id, title: i.title, intro: i.intro, upperName: i.upper_name,
+        tagIds: tagsOf.get(i.id) ?? [],
+      })),
+      rules,
+      { subtree: subtreeSets(db) },
+    );
 
     const hits = new Map<number, number>();
     for (const itemHits of matched.values()) {
@@ -99,8 +111,8 @@ export function registerRuleRoutes(app: FastifyInstance, deps: RuleDeps): void {
   const badCondition = (c: unknown): string | null => {
     if (!c || typeof c !== 'object') return '条件必须是对象';
     const o = c as { field?: unknown; any?: unknown };
-    if (o.field !== 'title' && o.field !== 'intro' && o.field !== 'upper') {
-      return 'field 只能是 title / intro / upper';
+    if (o.field !== 'title' && o.field !== 'intro' && o.field !== 'upper' && o.field !== 'tag') {
+      return 'field 只能是 title / intro / upper / tag';
     }
     if (!Array.isArray(o.any) || o.any.some((k) => typeof k !== 'string')) {
       return 'any 必须是字符串数组';

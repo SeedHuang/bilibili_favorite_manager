@@ -3,7 +3,8 @@ import { App as AntApp, Button, Select, Tooltip } from 'antd';
 import { Bot, Check, ChevronDown, ChevronRight, Pencil, Plus, Square, Tag, Trash2, X, Zap } from 'lucide-react';
 import { rulesApi, tagApi } from '../api';
 import type {
-  DryRun, RuleCondition, RuleField, RuleSuggestion, RuleView, TagProgressPayload, TagRunStatus,
+  DryRun, RuleCondition, RuleField, RuleSuggestion, RuleView, TagNode, TagProgressPayload,
+  TagRunStatus,
 } from '../types';
 import { useAssistant } from './assistant';
 
@@ -13,7 +14,12 @@ import { useAssistant } from './assistant';
  * 规则是这产品**唯一比 B站 多的东西** —— bilibili 有夹子但没有逻辑,
  * 谁进谁出全靠手。规则就是那个判据,而且它只存在本地。
  */
-const FIELD_LABEL: Record<RuleField, string> = { title: '标题', intro: '简介', upper: 'UP 名' };
+const FIELD_LABEL: Record<RuleField, string> = {
+  title: '标题', intro: '简介', upper: 'UP 名', tag: '标签',
+};
+
+/** tag 条件存的是 id,不是关键词 —— 判断"这个字段是不是从词库里选"只有这一处口径 */
+const isTagField = (f: RuleField): boolean => f === 'tag';
 
 /**
  * 半写的规则 = **没有规则** —— 和服务端 `renderConditions` 同一个判据。
@@ -23,10 +29,16 @@ const FIELD_LABEL: Record<RuleField, string> = { title: '标题', intro: '简介
 const hasRule = (r: RuleView): boolean => r.conditions.some((c) => c.any.some((k) => k));
 
 /** 列表里那一行的一句话 —— 表头 + 行都要用它,分两处写迟早分叉 */
-const renderRule = (conditions: RuleCondition[]): string =>
+const renderRule = (conditions: RuleCondition[], tagNameOf: ReadonlyMap<number, string>): string =>
   conditions
     .filter((c) => c.any.some((k) => k))
-    .map((c) => `${FIELD_LABEL[c.field]}含 ${c.any.filter((k) => k).join('·')}`)
+    .map((c) => {
+      if (!isTagField(c.field)) return `${FIELD_LABEL[c.field]}含 ${c.any.filter((k) => k).join('·')}`;
+      // 服务端 renderConditions 只解决"给模型看的那份" —— 这份是给人看的,得一起翻
+      const names = c.any.map(Number).map((id) => tagNameOf.get(id)).filter((x): x is string => !!x);
+      // 翻不到名字也别印 id —— 印一串数字比留白更让人困惑
+      return names.length ? `标签含 ${names.join('·')}` : '标签(词已不在词库里)';
+    })
     .join('  ·  ');
 
 /** 「2 分钟前」这种说法 —— 这一列回答的是"这条什么时候动过",不是精确时刻 */
@@ -87,6 +99,22 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
   useEffect(() => {
     tagApi.status().then(setTagStatus).catch(() => {});
   }, []);
+
+  // 词库树(§9F C11):规则里存的是 tag **id**,所以既要用它给 tag 条件做选项,
+  // 也要用它把 id 翻成词名显示 —— 一次请求两个用途。
+  // 拉挂了只是选项为空、tag 规则显示成"词已不在词库里",不该顶掉规则页的红条。
+  const [tagTree, setTagTree] = useState<{ id: number; name: string }[]>([]);
+  useEffect(() => {
+    tagApi.tree()
+      .then((t) => {
+        const flat: TagNode[] = [];
+        const walk = (nodes: TagNode[]) => { for (const n of nodes) { flat.push(n); walk(n.children); } };
+        walk(t.tree);
+        setTagTree(flat.map((n) => ({ id: n.id, name: n.name })));
+      })
+      .catch(() => {});
+  }, []);
+  const tagNameOf = new Map(tagTree.map((t) => [t.id, t.name]));
 
   // 卸载时中止在跑的那轮标注。不作清理的话:人离开页面,SSE 还在后台排干,
   // 而按钮已经回到空闲态 —— 再点一次就会在**同一个池子上**开出第二轮同跑。
@@ -497,11 +525,11 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
                   {/* 锁定的夹子**可能有**规则(先写规则后锁定)—— 不能一口咬定它没有 */}
                   {r.locked
                     ? hasRule(r)
-                      ? `${renderRule(r.conditions)}(锁定的夹子只能删,不能改)`
+                      ? `${renderRule(r.conditions, tagNameOf)}(锁定的夹子只能删,不能改)`
                       : '—— 锁定的夹子不加规则'
                     : !hasRule(r)
                       ? '—— 还没写规则,归类时靠 AI'
-                      : renderRule(r.conditions)}
+                      : renderRule(r.conditions, tagNameOf)}
                 </span>
 
                 <span
@@ -558,6 +586,7 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
                   <ConditionsEditor
                     conditions={r.conditions}
                     busy={busy}
+                    tagTree={tagTree}
                     onChange={(next) => setConditions(r.folderId, next)}
                     onDelete={confirmDelete}
                   />
@@ -581,10 +610,12 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
  * 加个词 → 看命中数跳 → 删掉重来,这个来回就是调规则的全部体验(§9C.4 规矩 1)。
  */
 function ConditionsEditor({
-  conditions, busy, onChange, onDelete,
+  conditions, busy, tagTree, onChange, onDelete,
 }: {
   conditions: RuleCondition[];
   busy: boolean;
+  /** 词库摊平后的词表(id + 名字)—— tag 条件只从这里选,不让手打 id */
+  tagTree: { id: number; name: string }[];
   onChange: (next: RuleCondition[]) => void;
   onDelete: () => void;
 }) {
@@ -598,7 +629,10 @@ function ConditionsEditor({
           <Select
             size="small"
             value={c.field}
-            onChange={(v: RuleField) => patch(i, { field: v })}
+            // 关键词和 tag id 不是同一种值 —— 换过去还留着旧的,就会存下一条
+            // 永远匹配不上的规则(半写的规则至少还看得见,这条是**看不出来**的)
+            onChange={(v: RuleField) =>
+              patch(i, { field: v, ...(isTagField(v) === isTagField(c.field) ? {} : { any: [] }) })}
             style={{ width: 92 }}
             options={(Object.keys(FIELD_LABEL) as RuleField[]).map((f) => ({
               value: f,
@@ -606,15 +640,31 @@ function ConditionsEditor({
             }))}
           />
           <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>含</span>
-          <Select
-            size="small"
-            mode="tags"
-            value={c.any}
-            onChange={(v: string[]) => patch(i, { any: v })}
-            placeholder="打下关键词,回车确认"
-            style={{ flex: 1, minWidth: 240 }}
-            tokenSeparators={[',', '、', ' ']}
-          />
+          {isTagField(c.field) ? (
+            // 标签**从词库里选**(存的是 id)。这和"给模型看的时候印词名不印数字"
+            // 是两件事:那条说的是喂给模型的东西,这里说的是给人挑的接口
+            <Select
+              size="small"
+              mode="multiple"
+              showSearch
+              optionFilterProp="label"
+              value={c.any}
+              onChange={(v: string[]) => patch(i, { any: v })}
+              placeholder="从词库里选标签(选中即匹配它整棵子树)"
+              style={{ flex: 1, minWidth: 240 }}
+              options={tagTree.map((t) => ({ value: String(t.id), label: t.name }))}
+            />
+          ) : (
+            <Select
+              size="small"
+              mode="tags"
+              value={c.any}
+              onChange={(v: string[]) => patch(i, { any: v })}
+              placeholder="打下关键词,回车确认"
+              style={{ flex: 1, minWidth: 240 }}
+              tokenSeparators={[',', '、', ' ']}
+            />
+          )}
           <Button
             size="small"
             type="text"

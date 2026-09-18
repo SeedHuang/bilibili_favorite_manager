@@ -11,6 +11,7 @@ import { getItem, type ItemRow } from '../db/repo/items.js';
 import { listFolders, isLockedFolder } from '../db/repo/folders.js';
 import { listRules } from '../db/repo/rules.js';
 import { listWorkFolders, workItemIds } from '../db/repo/workbench.js';
+import { itemTagIds, listTagsWithParent, subtreeSets } from '../db/repo/tags.js';
 import { complete, type ModelConfig } from '../llm/provider.js';
 import { parseJsonArray } from './parse.js';
 import {
@@ -81,6 +82,12 @@ const toRuleItem = (i: ItemRow): RuleItem => ({
   id: i.id, title: i.title, intro: i.intro, upperName: i.upper_name,
 });
 
+/** 建一次 itemId → tagIds 的表,闭包给下面用 —— 别在 toRuleItem 里逐条查 */
+const toRuleItemWith = (tagsOf: ReadonlyMap<string, number[]>) => (i: ItemRow): RuleItem => ({
+  ...toRuleItem(i),
+  tagIds: tagsOf.get(i.id) ?? [],
+});
+
 /**
  * 攒一次建议调用的**全部输入**。
  *
@@ -101,6 +108,8 @@ export function suggestionInput(db: Database.Database): {
   const rules = listRules(db);
   const ruleOf = new Map(rules.map((r) => [r.folderId, r]));
   const all = db.prepare(`SELECT * FROM items`).all() as ItemRow[];
+  // 规则里的 tag 条件存的是 id —— 给模型看的那份必须翻成词名(见 renderConditions)
+  const tagNameOf = new Map(listTagsWithParent(db).map((r) => [r.id, r.name]));
 
   // **锁定的夹子(默认收藏夹)不能加规则**(spec §9C.6 约束 4)—— 那就别让模型给它提建议。
   //
@@ -114,7 +123,7 @@ export function suggestionInput(db: Database.Database): {
   });
 
   const folders: SuggestionFolder[] = usable.map((w) => {
-    const rule = renderConditions(ruleOf.get(w.id)?.conditions ?? []);
+    const rule = renderConditions(ruleOf.get(w.id)?.conditions ?? [], tagNameOf);
     // 有规则的夹子不用带样本(规则已经说清它是放什么的);没规则的才要 ——
     // 只看名字模型会自信地猜错,这是 §9C.0 那次真机事故的教训
     const samples = rule
@@ -126,7 +135,12 @@ export function suggestionInput(db: Database.Database): {
     return { folderId: w.id, name: w.name, rule, ...(samples.length ? { samples } : {}) };
   });
 
-  const covered = matchAll(all.map(toRuleItem), rules);
+  // 口径必须和归类那条路一致 —— 算错"规则覆盖了哪些条目",就会把已经归好的又建议一遍
+  const covered = matchAll(
+    all.map(toRuleItemWith(itemTagIds(db))),
+    rules,
+    { subtree: subtreeSets(db) },
+  );
   return { folders, pool: all.filter((i) => !covered.has(i.id)), allItems: all };
 }
 
@@ -216,6 +230,10 @@ export async function runSuggestions(opts: {
   const valid = validateSuggestions(list, {
     validFolderIds: new Set(opts.folders.map((f) => f.folderId)),
     // 自证查**全库** —— 它可能引用一条已经归到别处的条目当证据(spec 的例子就是)
+    //
+    // 这里不带 tagIds(也不带 db):自证的探针字段只能是 VALID_FIELDS 里那三个文本字段
+    // —— tag 建议根本进不来(见 VALID_FIELDS 那条注释),所以 tagIds 在这条路上
+    // 不可能被读到。要带的话得把 db 一路传进这个纯调用函数,不值。
     itemsById: new Map(opts.allItems.map((i) => [i.id, toRuleItem(i)])),
   });
 

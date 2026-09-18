@@ -15,6 +15,16 @@ export interface RuleItem {
   title: string;
   intro?: string | null;
   upperName?: string | null;
+  /** 条目挂的标签 id。规则 field='tag' 时用它(C11) */
+  tagIds?: readonly number[];
+}
+
+export interface RuleContext {
+  /**
+   * tagId → 它的子树(含自己)。**必传才能用 tag 条件** ——
+   * 缺了就当没有标签,而不是"命中一切"。
+   */
+  subtree?: ReadonlyMap<number, ReadonlySet<number>>;
 }
 
 export interface RuleHitToken {
@@ -28,11 +38,18 @@ export interface RuleHit {
   tokens: RuleHitToken[];
 }
 
-const FIELD_LABEL: Record<RuleField, string> = { title: '标题', intro: '简介', upper: 'UP 名' };
+const FIELD_LABEL: Record<RuleField, string> = {
+  title: '标题', intro: '简介', upper: 'UP 名', tag: '标签',
+};
 
 /** 一条条目命中哪些夹子的规则。**可多个** —— 命中即成员 */
-export function matchItem(item: RuleItem, rules: readonly FolderRule[]): RuleHit[] {
-  const text: Record<RuleField, string> = {
+export function matchItem(
+  item: RuleItem,
+  rules: readonly FolderRule[],
+  ctx: RuleContext = {},
+): RuleHit[] {
+  // tag 不是文本字段,没有可查的干草堆 —— 它单独一条分支处理(它在 ctx 里查子树)
+  const text: Record<'title' | 'intro' | 'upper', string> = {
     title: (item.title ?? '').toLowerCase(),
     intro: (item.intro ?? '').toLowerCase(),
     upper: (item.upperName ?? '').toLowerCase(),
@@ -43,6 +60,23 @@ export function matchItem(item: RuleItem, rules: readonly FolderRule[]): RuleHit
   for (const rule of rules) {
     const tokens: RuleHitToken[] = [];
     for (const cond of rule.conditions) {
+      if (cond.field === 'tag') {
+        // 选中任何一个标签 = 匹配它**整棵子树**(§9F C11):选「体育」命中
+        // 所有体育下的条目,选「NBA」只命 NBA 那条线。条件里存的是 tag id 的
+        // 字符串形式(存名字的话,改一次词名就悄悄改掉了规则语义)。
+        const ids = item.tagIds ?? [];
+        const sub = ctx.subtree;
+        if (!sub || ids.length === 0) continue;
+        for (const kw of cond.any) {
+          if (!kw) continue;
+          const root = Number(kw);
+          if (!Number.isInteger(root)) continue;
+          const want = sub.get(root);
+          if (!want) continue;                       // 词库里没有这个词 → 不命中(不是命中一切)
+          if (ids.some((t) => want.has(t))) tokens.push({ field: 'tag', token: kw });
+        }
+        continue;
+      }
       const hay = text[cond.field];
       if (!hay) continue;
       for (const kw of cond.any) {
@@ -65,10 +99,11 @@ export function matchItem(item: RuleItem, rules: readonly FolderRule[]): RuleHit
 export function matchAll(
   items: readonly RuleItem[],
   rules: readonly FolderRule[],
+  ctx: RuleContext = {},
 ): Map<string, RuleHit[]> {
   const out = new Map<string, RuleHit[]>();
   for (const item of items) {
-    const hits = matchItem(item, rules);
+    const hits = matchItem(item, rules, ctx);
     if (hits.length > 0) out.set(item.id, hits);
   }
   return out;
@@ -82,9 +117,25 @@ export function matchAll(
  * (`标题含 `)喂给模型比不喂更糟:那正是 §9C.0 里"模型拿到残缺信息于是瞎猜"的老毛病。
  * 这里用的判空条件和 `matchItem` 里那句 `if (!kw) continue` **完全一致** ——
  * 两处对"半写的规则"必须给出同一个答案。
+ *
+ * **tag 条件里存的是 id,这里得翻成词名再印。** 印 id 的话模型读到的是
+ * 「标签含 42、57」—— 而 C15 说的"依据就是标签和规则"里的那一半,变成一串
+ * 数字就全废了。翻不到名字的 id 直接跳过:一个都翻不出来时这条渲染成空串,
+ * 和"关键词还空着"同款(它本来也就匹配不到东西)。
+ *
+ * **`tagNameOf` 是必填的,不给默认值。** 给 `= new Map()` 的话,漏传的那个调用方
+ * 不报错 —— 只是 tag 条件静默渲染成空串,模型看不到这一半依据,而没有任何测试
+ * 会发现。这和 C6 里"闸放唯一收口、不放在各调用点"是同一条道理:
+ * **默认值会把"漏了"变成"静默降级"**。
  */
-export function renderConditions(conditions: readonly RuleCondition[]): string {
-  const written = (c: RuleCondition): string[] => c.any.filter((k) => k);
+export function renderConditions(
+  conditions: readonly RuleCondition[],
+  tagNameOf: ReadonlyMap<number, string>,
+): string {
+  const written = (c: RuleCondition): string[] =>
+    c.field === 'tag'
+      ? c.any.map(Number).map((id) => tagNameOf.get(id)).filter((x): x is string => !!x)
+      : c.any.filter((k) => k);
   return conditions
     .filter((c) => written(c).length > 0)
     .map((c) => `${FIELD_LABEL[c.field]}含 ${written(c).join('/')}`)

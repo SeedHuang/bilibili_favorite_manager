@@ -26,7 +26,7 @@ import {
 import { listFolders, isLockedFolder } from '../db/repo/folders.js';
 import { listRules } from '../db/repo/rules.js';
 import { getItem, type ItemRow } from '../db/repo/items.js';
-import { tagInfoByItem } from '../db/repo/tags.js';
+import { itemTagIds, listTagsWithParent, subtreeSets, tagInfoByItem } from '../db/repo/tags.js';
 // 条目出口形状与 /api/folders/:id/items 共用同一份 —— 前端用同一套渲染,
 // 分两份写迟早会分叉
 import { shapeItem } from '../http/routes/items.js';
@@ -333,13 +333,16 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
     const rules = listRules(db);
     const ruleOf = new Map(rules.map((r) => [r.folderId, r]));
 
+    // 规则里的 tag 条件存的是 id —— 给模型看的那份必须翻成词名(见 renderConditions)
+    const tagNameOf = new Map(listTagsWithParent(db).map((r) => [r.id, r.name]));
+
     const folders: FolderSpec[] = work.map((w) => ({
       tempId: String(w.id),
       name: w.name,
       description: '',
       // **规则终于用在了它该用的地方** —— 这个字段从 spec §9.1 起就写着
       // "判定规则,必须可执行",而 m4b 之后一直是空串,于是模型只能看名字瞎猜。
-      rule: renderConditions(ruleOf.get(w.id)?.conditions ?? []),
+      rule: renderConditions(ruleOf.get(w.id)?.conditions ?? [], tagNameOf),
       estCount: workItemIds(db, w.id).length,
       // 不带 reuseFolderId:buildPass2Prompt 只读 tempId/name/rule,这个字段到不了模型
     }));
@@ -365,9 +368,15 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
 
     // ── ① 规则先跑:0 token、确定性 ───────────────────────
     // 匹配置信度给 1 —— 规则命中是"确定"不是"猜",和 AI 的 0.9 不是同一种东西
+    const tagsOf = itemTagIds(db);
     const matched = matchAll(
-      items.map((i) => ({ id: i.id, title: i.title, intro: i.intro, upperName: i.upper_name })),
+      items.map((i) => ({
+        id: i.id, title: i.title, intro: i.intro, upperName: i.upper_name,
+        tagIds: tagsOf.get(i.id) ?? [],
+      })),
       rules,
+      // §9F:缺 subtree 时 tag 条件一律不命中 —— 规则先跑这一段就白跑了
+      { subtree: subtreeSets(db) },
     );
     const ruleAssignments: Assignment[] = [];
     for (const [itemId, hits] of matched) {
