@@ -62,6 +62,7 @@
 | `web/src/layouts/index.tsx` | 改 | 导航加两个 tab |
 | `web/src/pages/tag.tsx` | **新建** | 「标签」页壳 |
 | `web/src/pages/browse.tsx` | **新建** | 「浏览」页壳 |
+| `web/src/components/TagTree.tsx` | **新建** | 词库树(手写)—— 两页共用 |
 | `web/src/components/TagPanel.tsx` | **新建** | 词库治理实体 |
 | `web/src/components/BrowsePanel.tsx` | **新建** | 按标签筛条目 |
 | `web/src/components/ContextPane.tsx` | 改 | 详情栏显示标签 |
@@ -2411,45 +2412,365 @@ export default function TagPage() {
 }
 ```
 
-- [ ] **Step 5: `components/TagPanel.tsx`**
-
-要点(照 `WorkFolderTree.tsx` 手写树 + `RulesPanel.tsx` 的状态处理):
+- [ ] **Step 5: `components/TagTree.tsx`(两页共用的手写树)**
 
 ```tsx
-/**
- * 词库治理 —— 三层:顶上的"树的变化"清单、中间的树、底下的手动操作。
- *
- * 树是**手写**的(照 WorkFolderTree),不用 antd `Tree`:仓库里它零使用,
- * 而且现有树形 UI 自成一套样式(缩进 + 展开三角 + hover 操作),混用会打架。
- *
- * 这一页**不做自动整理** —— 整理在标注跑完时自动发生(§9F C10)。这里只有
- * "看它变成了什么"和"手动纠正"。
- */
-export default function TagPanel() {
-  const { data: tree, refresh: refreshTree } = useRequest(() => tagApi.tree(), { formatResult: rawResult });
-  const { data: changes } = useRequest(() => tagApi.changes(), { formatResult: rawResult });
-  const { modal } = AntApp.useApp();
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [expanded, setExpanded] = useState<Set<number>>(new Set());
-  const [selected, setSelected] = useState<number | null>(null);
-  // …改名 inline input、合并目标选择、父节点选择…
+import { ChevronRight, ChevronDown } from 'lucide-react';
+import type { TagNode } from '../types';
 
-  const act = async (fn: () => Promise<unknown>): Promise<boolean> => {
-    setError('');
-    setBusy(true);
-    try { await fn(); await refreshTree(); return true; }
-    catch (e) { setError((e as Error).message); return false; }
-    finally { setBusy(false); }
-  };
-  // …渲染:error 走 <Alert type="error" showIcon closable>…
-  // …删除/合并走 modal.confirm,content 说清"会发生什么"…
+/**
+ * 词库树 —— **手写**的,不用 antd `Tree`。
+ *
+ * 为什么手写:仓库里夹子/条目那棵树就是手写的(WorkFolderTree.tsx),它自成
+ * 一套样式(缩进 + 展开三角 + 操作按钮 + 计数贴右)。antd Tree 一次没用过,
+ * 混进来会多一套要调的样式和一套要学的 API,换不到任何东西。
+ *
+ * 这个组件**只管显示和展开/选中**,操作按钮由调用方经 `renderActions` 注入
+ * ——「标签」页要改名/合并/删除,「浏览」页只选中,两边共用同一棵树。
+ * 分两份写迟早分叉(和 shapeItem 注释里那条同理)。
+ */
+export default function TagTree({
+  nodes,
+  expanded,
+  selectedId,
+  onToggleExpand,
+  onSelect,
+  renderActions,
+  depth = 0,
+}: {
+  nodes: TagNode[];
+  expanded: Set<number>;
+  selectedId?: number | null;
+  onToggleExpand: (id: number) => void;
+  /** 不传 = 只读(「浏览」页选了才有意义) */
+  onSelect?: (id: number) => void;
+  renderActions?: (node: TagNode) => React.ReactNode;
+  depth?: number;
+}) {
+  return (
+    <>
+      {nodes.map((n) => {
+        const open = expanded.has(n.id);
+        const hasKids = n.children.length > 0;
+        return (
+          <div key={n.id}>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '5px 4px',
+                paddingLeft: 4 + depth * 16,
+                borderBottom: '1px solid var(--rule)',
+                background: n.id === selectedId ? 'var(--surface-2)' : 'none',
+              }}
+            >
+              {hasKids ? (
+                <button
+                  type="button"
+                  aria-label={open ? '收起' : '展开'}
+                  aria-expanded={open}
+                  onClick={() => onToggleExpand(n.id)}
+                  style={{
+                    flex: 'none', border: 'none', background: 'none', padding: 0,
+                    cursor: 'pointer', color: 'var(--text-dim)', lineHeight: 0,
+                  }}
+                >
+                  {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                </button>
+              ) : (
+                // 没有孩子也占同样的位置,否则同级节点名字对不齐
+                <span style={{ width: 14, flex: 'none' }} aria-hidden />
+              )}
+
+              {onSelect ? (
+                <button
+                  type="button"
+                  onClick={() => onSelect(n.id)}
+                  style={{
+                    border: 'none', background: 'none', padding: 0, cursor: 'pointer',
+                    font: 'inherit', fontSize: 'var(--fs-13)', textAlign: 'left',
+                    color: n.id === selectedId ? 'var(--accent)' : 'var(--text)',
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}
+                >
+                  {n.name}
+                </button>
+              ) : (
+                <span
+                  style={{
+                    fontSize: 'var(--fs-13)', overflow: 'hidden',
+                    textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}
+                >
+                  {n.name}
+                </span>
+              )}
+
+              {renderActions?.(n)}
+
+              <span
+                className="num"
+                style={{ marginLeft: 'auto', fontSize: 'var(--fs-12)', color: 'var(--text-dim)', flex: 'none' }}
+              >
+                {n.count}
+              </span>
+            </div>
+
+            {open && (
+              <TagTree
+                nodes={n.children}
+                expanded={expanded}
+                selectedId={selectedId ?? null}
+                onToggleExpand={onToggleExpand}
+                {...(onSelect ? { onSelect } : {})}
+                {...(renderActions ? { renderActions } : {})}
+                depth={depth + 1}
+              />
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
 }
 ```
 
-节点的行内结构照 `WorkFolderTree.tsx:413-428` 的 `label + checkbox` 骨架改造成 `div + 展开三角 + 名字 + count + hover 操作`。**count 用 `<span className="num">`**。
+- [ ] **Step 6: `components/TagPanel.tsx`**
 
-- [ ] **Step 6: typecheck + build 门禁**
+```tsx
+import { useState } from 'react';
+import { Alert, App as AntApp, Select, Spin } from 'antd';
+import { Combine, Pencil, Check, X, Trash2 } from 'lucide-react';
+import { useRequest } from '@umijs/max';
+import { rawResult, tagApi } from '../api';
+import type { TagNode } from '../types';
+import TagTree from './TagTree';
+
+/**
+ * 词库治理 —— 三层:顶上「树的变化」清单、中间那棵树、行内操作。
+ *
+ * **这一页不做自动整理** —— 整理在标注跑完时自动发生(§9F C10)。这里只有
+ * "看它变成了什么"和"手动纠正"。用户的原话是"我不想管",所以不设审批闸;
+ * 但结构必须**看得见**在长什么,这一页就是那个"看得见"。
+ */
+export default function TagPanel() {
+  const { data: tree, loading, refresh: refreshTree } = useRequest(() => tagApi.tree(), {
+    formatResult: rawResult,
+  });
+  const { data: changes } = useRequest(() => tagApi.changes(), { formatResult: rawResult });
+  // 静态 Modal.confirm 拿不到 ConfigProvider 的主题,必须走 App.useApp()
+  const { modal } = AntApp.useApp();
+
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [editing, setEditing] = useState<number | null>(null);
+  const [draft, setDraft] = useState('');
+
+  /** 写操作的统一外壳:清错误 → 忙 → 执行 → 重拉 → 失败报错。返回成功与否 */
+  const act = async (fn: () => Promise<unknown>): Promise<boolean> => {
+    setError('');
+    setBusy(true);
+    try {
+      await fn();
+      await refreshTree();
+      return true;
+    } catch (e) {
+      setError((e as Error).message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggle = (id: number) =>
+    setExpanded((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  /**
+   * **没有"新建词"入口** —— 这是刻意的。
+   *
+   * 词库靠标注自己长(§9F C5),用户说过"我不想管标注 tag 的事情"。手动建的词
+   * 没有视频挂它,在树上就是一个 count=0 的孤点,只会让画面变脏。真要加一个领域,
+   * 正确做法是去「规则」页加一条规则把它喂出来。
+   *
+   * 手动操作只留三件**纠正**的事:改名(模型的写法不对)、合并(重复了)、
+   * 删除(那是个泛词)。它们都是"把已经长歪的掰回来"。
+   */
+
+  /**
+   * 合并 —— 目标用 Select 现选,选之前「合并」是禁着的。
+   * 少了这一步,用户点确定会毫无反应,而"点了没反应"比报错更难查。
+   */
+  const confirmMerge = (node: TagNode, flat: TagNode[]) => {
+    let targetId: number | null = null;
+    const others = flat.filter((n) => n.id !== node.id);
+    const inst = modal.confirm({
+      title: `把「${node.name}」并进哪个词?`,
+      content: (
+        <div>
+          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 6 }}>
+            挂着它的 {node.count} 条视频会一起改挂过去,之后这个词就不在了。
+            它的旧名字会记进别名表 —— 下次模型再吐「{node.name}」也认得出。
+          </div>
+          <Select
+            autoFocus
+            showSearch
+            optionFilterProp="label"
+            placeholder="并进哪个词(打字可以搜)"
+            style={{ width: '100%' }}
+            options={others.map((n) => ({ value: n.id, label: `${n.name}(${n.count} 条)` }))}
+            onChange={(v: number) => {
+              targetId = v;
+              inst.update({ okButtonProps: { disabled: false } });
+            }}
+          />
+        </div>
+      ),
+      okText: '合并',
+      cancelText: '算了',
+      okButtonProps: { disabled: true },
+      onOk: () => {
+        if (targetId !== null) act(() => tagApi.merge(node.id, targetId));
+      },
+    });
+  };
+
+  const confirmDelete = (node: TagNode) =>
+    modal.confirm({
+      title: `从词库里删掉「${node.name}」?`,
+      content:
+        node.children.length > 0
+          ? `它下面还有 ${node.children.length} 个词,那些词会提到上一级,不会被删。`
+          : `挂着它的 ${node.count} 条视频会失去这个标签,视频本身不会动。`,
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '算了',
+      onOk: () => act(() => tagApi.remove(node.id)),
+    });
+
+  // 把树摊平 —— 合并的目标选择要跨层级搜,不能只在同级里挑
+  const flat: TagNode[] = [];
+  const walk = (nodes: TagNode[]) => { for (const n of nodes) { flat.push(n); walk(n.children); } };
+  walk(tree?.tree ?? []);
+
+  const actions = (node: TagNode) =>
+    editing === node.id ? (
+      <>
+        <input
+          autoFocus
+          aria-label={`重命名「${node.name}」`}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') { setEditing(null); if (draft.trim()) void act(() => tagApi.update(node.id, { name: draft.trim() })); }
+            if (e.key === 'Escape') setEditing(null);
+          }}
+          style={{
+            flex: 1, minWidth: 0, font: 'inherit', fontSize: 'var(--fs-13)',
+            background: 'var(--surface-2)', color: 'var(--text)',
+            border: '1px solid var(--accent)', padding: '1px 5px',
+          }}
+        />
+        <button type="button" aria-label="确认"
+          onClick={() => { setEditing(null); if (draft.trim()) void act(() => tagApi.update(node.id, { name: draft.trim() })); }}
+          style={{ border: 'none', background: 'none', cursor: 'pointer', color: 'var(--ok)', lineHeight: 0 }}>
+          <Check size={13} />
+        </button>
+        <button type="button" aria-label="取消" onClick={() => setEditing(null)}
+          style={{ border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-dim)', lineHeight: 0 }}>
+          <X size={13} />
+        </button>
+      </>
+    ) : (
+      <>
+        <button type="button" aria-label={`重命名「${node.name}」`}
+          onClick={() => { setEditing(node.id); setDraft(node.name); }}
+          style={{ border: 'none', background: 'none', padding: 0, cursor: 'pointer', color: 'var(--text-dim)', opacity: 0.5, lineHeight: 0 }}>
+          <Pencil size={11} />
+        </button>
+        {flat.length > 1 && (
+          <button type="button" aria-label={`把「${node.name}」并进别的词`}
+            title="并进别的词(挂着它的视频会一起改挂过去)"
+            onClick={() => confirmMerge(node, flat)}
+            style={{ border: 'none', background: 'none', padding: 0, cursor: 'pointer', color: 'var(--text-dim)', opacity: 0.5, lineHeight: 0 }}>
+            <Combine size={11} />
+          </button>
+        )}
+        <button type="button" aria-label={`删除「${node.name}」`}
+          title={node.children.length > 0 ? '它下面的词会提到上一级' : '从词库里删掉这个词'}
+          onClick={() => confirmDelete(node)}
+          style={{ border: 'none', background: 'none', padding: 0, cursor: 'pointer', color: 'var(--text-dim)', opacity: 0.5, lineHeight: 0 }}>
+          <Trash2 size={11} />
+        </button>
+      </>
+    );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {error && <Alert type="error" showIcon closable message={error} onClose={() => setError('')} />}
+
+      <div className="hud-panel" style={{ padding: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+          <span className="hud-label">上一轮变化</span>
+          <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
+            每轮标注跑完自动整理一次,结果是这些 —— 不需要你确认
+          </span>
+        </div>
+        {(changes?.changes ?? []).length === 0 ? (
+          <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
+            还没有跑过标注,或者上一轮什么都没变
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 'var(--fs-12)' }}>
+            {changes!.changes.map((c, i) => (
+              <div key={i} style={{ display: 'flex', gap: 8 }}>
+                <span style={{ color: c.kind === 'merge' ? 'var(--ok)' : 'var(--accent)', flex: 'none' }}>
+                  {c.kind === 'merge' ? '→' : '↑'}
+                </span>
+                <span>{c.from}{c.to ? ` → ${c.to}` : ''}</span>
+                <span style={{ color: 'var(--text-dim)' }}>{c.detail}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="hud-panel" style={{ padding: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+          <span className="hud-label">词库</span>
+          <span className="num" style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
+            {tree?.total ?? 0} 个词
+          </span>
+          {busy && <Spin size="small" />}
+        </div>
+
+        {loading ? (
+          <div style={{ padding: 20, textAlign: 'center' }}><Spin /></div>
+        ) : (tree?.tree ?? []).length === 0 ? (
+          <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-dim)', fontSize: 'var(--fs-13)' }}>
+            词库还是空的。去「规则」页点一次「AI 标注」,它会自己长出来
+          </div>
+        ) : (
+          <TagTree
+            nodes={tree!.tree}
+            expanded={expanded}
+            onToggleExpand={toggle}
+            renderActions={actions}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+```
+
+- [ ] **Step 7: typecheck + build 门禁**
 
 Run: `cd web && npm run typecheck`
 Expected: 无输出(通过)
@@ -2457,10 +2778,10 @@ Expected: 无输出(通过)
 Run: `cd web && npm run build 2>&1 | tail -3`
 Expected:输出含 `Compiled successfully`(**退出码恒为 1,不是失败**)
 
-- [ ] **Step 7: 提交**
+- [ ] **Step 8: 提交**
 
 ```bash
-git add web/.umirc.ts web/src/layouts/index.tsx web/src/pages/tag.tsx web/src/components/TagPanel.tsx web/src/api.ts web/src/types.ts
+git add web/.umirc.ts web/src/layouts/index.tsx web/src/pages/tag.tsx web/src/components/TagTree.tsx web/src/components/TagPanel.tsx web/src/api.ts web/src/types.ts
 git commit -m "feat(web): 「标签」治理页 —— 手写树 + 变化清单 + 手动合并/改名/删"
 ```
 
@@ -2482,7 +2803,14 @@ git commit -m "feat(web): 「标签」治理页 —— 手写树 + 变化清单 
   it('GET /api/tags/:id/items 回条目 + 每条散在哪些夹子', async () => {
     const { app, db } = makeApp();
     const t = ensureTag(db, '露营', null);
-    // …塞 2 条条目 + 关联 + 工作副本归属…
+    // 两条挂「露营」的视频,都在工作副本的同一个夹子里 —— 归属要跟着回来
+    db.prepare(`INSERT INTO work_folders (id, origin_id, name, created_at) VALUES (1, NULL, '露营', 0)`).run();
+    for (const id of ['BV1', 'BV2']) {
+      upsertItem(db, { id, type: 2, title: `露营 ${id}` });
+      linkItemTag(db, id, t, 'ai');
+      db.prepare(`INSERT INTO work_folder_items (folder_id, item_id) VALUES (1, ?)`).run(id);
+    }
+
     const r = await app.inject({ method: 'GET', url: `/api/tags/${t}/items` });
     const body = r.json();
     expect(body.total).toBe(2);
@@ -2563,67 +2891,238 @@ import { shapeItem } from '../http/routes/items.js';
         .map((x) => shapeItem(x, null)),
       total,
       foldersOf,
+      // 详情栏要显示"这条挂的**全部**标签" —— 只显示当前筛的那个词会让人
+      // 以为它没有别的标签。和 foldersOf 同一批查完,不多一次往返
+      tagsOf,
     };
   });
 ```
 
+`tagsOf` 的算法和 `foldersOf` 并列,放在它**后面**:
+
+```ts
+    const tagsOf: Record<string, string[]> = {};
+    if (slice.length) {
+      const rows = db
+        .prepare(
+          `SELECT it.item_id, t.name FROM item_tags it JOIN tags t ON t.id = it.tag_id
+            WHERE it.item_id IN (${slice.map(() => '?').join(',')})
+            ORDER BY it.item_id, t.name`,
+        )
+        .all(...slice) as { item_id: string; name: string }[];
+      for (const r of rows) (tagsOf[r.item_id] ??= []).push(r.name);
+    }
+```
+
+前端 `api.ts` 加一个方法(**Task 8 的 `tagApi` 里追加**):
+
+```ts
+  items: (id: number, page = 1) =>
+    api<{ items: Item[]; total: number; foldersOf: Record<string, { id: number; title: string }[]>; tagsOf: Record<string, string[]> }>(
+      `/api/tags/${id}/items?page=${page}&pageSize=60`,
+    ),
+```
+
 - [ ] **Step 4: 前端页 + 面板 + 详情栏显示标签**
 
-`pages/browse.tsx` 照 `pages/tag.tsx` 的壳。`BrowsePanel.tsx` 的要点:
+`pages/browse.tsx`:
 
 ```tsx
+import BrowsePanel from '../components/BrowsePanel';
+
 /**
- * 按标签看收藏 —— 复用 ItemGrid(条目渲染只有一套口径),只在上面加一层
- * 标签选择 + 归属提示。
+ * /browse 浏览 —— 按标签看收藏。
  *
- * 选中的标签用 `useSearchParams` 存,这样"从「标签」页点一个词跳过来"是同一个路径。
+ * 和「标签」页分开的理由:那一页是**治理**(改词库),这一页是**使用**(挑视频)。
+ * 混在一页会让人以为点标签就改了词。用户明确要了两个页面。
+ */
+export default function BrowsePage() {
+  return (
+    <div style={{ height: '100%', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span className="hud-label" style={{ color: 'var(--accent)' }}>浏览</span>
+        <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
+          按标签看收藏 —— 选一个词,它**连同下面所有的词**一起捞出来
+        </span>
+      </div>
+      <BrowsePanel />
+      <div style={{ height: 56, flex: 'none' }} aria-hidden />
+    </div>
+  );
+}
+```
+
+`components/BrowsePanel.tsx`:
+
+```tsx
+import { useState } from 'react';
+import { Alert, Spin } from 'antd';
+import { useRequest, useSearchParams } from '@umijs/max';
+import { rawResult, tagApi } from '../api';
+import type { Item } from '../types';
+import ContextPane from './ContextPane';
+import ItemGrid from './ItemGrid';
+import TagTree from './TagTree';
+
+const PAGE_SIZE = 60;
+const EMPTY = { items: [] as Item[], total: 0, foldersOf: {}, tagsOf: {} };
+
+/**
+ * 按标签看收藏 —— 复用 ItemGrid(条目渲染只有一套口径),只在旁边加一层标签选择。
+ *
+ * 选中的标签存在 URL 上(`?tag=`),不放在 state 里 —— 这样"从「标签」页点一个词
+ * 跳过来"和"在这一页点"走的是同一条路,而且刷新/后退都还在原地。
  */
 export default function BrowsePanel() {
   const [params, setParams] = useSearchParams();
   const tagId = Number(params.get('tag')) || null;
   const [page, setPage] = useState(1);
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [selected, setSelected] = useState<Item | null>(null);
+  const [error, setError] = useState('');
+
   const { data: tree } = useRequest(() => tagApi.tree(), { formatResult: rawResult });
-  const { data } = useRequest(
-    () => (tagId ? tagApi.items(tagId, page) : Promise.resolve({ items: [], total: 0, foldersOf: {} })),
+  const { data, loading } = useRequest(
+    () => (tagId ? tagApi.items(tagId, page).catch((e: Error) => { setError(e.message); return EMPTY; }) : Promise.resolve(EMPTY)),
     { refreshDeps: [tagId, page], formatResult: rawResult },
   );
-  // 左:词库树(复用 TagPanel 的树渲染,抽成 components/TagTree.tsx 两页共用)
-  // 右:ItemGrid + 每张卡片下的归属 chips(foldersOf[item.id])
+
+  /**
+   * 选词。**页码必须归零** —— 不归的话从"有 5 页的词"跳到"只有 1 页的词",
+   * 画面是空的,而用户会以为那个词没视频。
+   */
+  const pick = (id: number) => {
+    setPage(1);
+    setSelected(null);
+    setParams({ tag: String(id) });
+  };
+
+  const icon = (id: number) =>
+    setExpanded((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const foldersOf = data?.foldersOf ?? {};
+  const tagsOf = data?.tagsOf ?? {};
+  const current = tree?.tree ? findName(tree.tree, tagId) : null;
+
+  return (
+    <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+      <div className="hud-panel" style={{ width: 300, flex: 'none', padding: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+          <span className="hud-label">词库</span>
+          {tagId !== null && (
+            <button
+              type="button"
+              onClick={() => { setPage(1); setSelected(null); setParams({}); }}
+              style={{ marginLeft: 'auto', border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-dim)', fontSize: 'var(--fs-12)' }}
+            >
+              清除
+            </button>
+          )}
+        </div>
+        {(tree?.tree ?? []).length === 0 ? (
+          <div style={{ color: 'var(--text-dim)', fontSize: 'var(--fs-12)', padding: '12px 0' }}>
+            词库还是空的 —— 先去「规则」页点一次「AI 标注」
+          </div>
+        ) : (
+          <TagTree
+            nodes={tree!.tree}
+            expanded={expanded}
+            selectedId={tagId}
+            onToggleExpand={icon}
+            onSelect={pick}
+          />
+        )}
+      </div>
+
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {error && <Alert type="error" showIcon closable message={error} onClose={() => setError('')} />}
+
+        {tagId === null ? (
+          <div className="hud-panel" style={{ padding: '48px 20px', textAlign: 'center', color: 'var(--text-dim)', fontSize: 'var(--fs-13)' }}>
+            左边选一个词
+          </div>
+        ) : loading ? (
+          <div style={{ padding: 40, textAlign: 'center' }}><Spin /></div>
+        ) : (
+          <>
+            <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
+              「{current ?? tagId}」连同它下面的词,一共{' '}
+              <span className="num" style={{ color: 'var(--accent)' }}>{data?.total ?? 0}</span> 条
+            </div>
+
+            {/* 归属 chips —— 一条视频散在哪些夹子里。这正是标签存在的理由:
+                夹子分不干净,标签能跨着看 */}
+            {(data?.items ?? []).some((it) => (foldersOf[it.id] ?? []).length > 0) && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {(data?.items ?? []).map((it) => {
+                  const fs = foldersOf[it.id] ?? [];
+                  if (fs.length === 0) return null;
+                  return (
+                    <div key={it.id} style={{ display: 'flex', gap: 8, fontSize: 'var(--fs-12)', alignItems: 'baseline' }}>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 360 }}>
+                        {it.title}
+                      </span>
+                      <span style={{ color: 'var(--text-dim)' }}>
+                        在 {fs.map((f) => `「${f.title}」`).join(' ')}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <ItemGrid
+              items={data?.items ?? []}
+              total={data?.total ?? 0}
+              page={page}
+              pageSize={PAGE_SIZE}
+              onPage={setPage}
+              selectedId={selected?.id ?? null}
+              onSelect={setSelected}
+            />
+          </>
+        )}
+      </div>
+
+      {/* tags 从筛选结果里带下来 —— 详情栏自己发请求会让每选一条都打一次接口 */}
+      <ContextPane item={selected} tags={selected ? tagsOf[selected.id] ?? [] : []} />
+    </div>
+  );
+}
+
+/** 树里按 id 找名字(只用于顶部那句「选了谁」) */
+function findName(nodes: { id: number; name: string; children: any[] }[], id: number | null): string | null {
+  if (id === null) return null;
+  for (const n of nodes) {
+    if (n.id === id) return n.name;
+    const hit = findName(n.children, id);
+    if (hit) return hit;
+  }
+  return null;
 }
 ```
 
-**`TagPanel` 与 `BrowsePanel` 共用的树渲染抽成 `components/TagTree.tsx`** —— 两页都要树,分两份写迟早分叉(和 `shapeItem` 注释里那条同理)。
-
-`ContextPane.tsx` 的 `dl` 表格加一行。**props 加一个 `tags`,不由组件自己请求** —— 在 `ContextPane` 里发请求会让详情栏每选一条都打一次接口:
+`components/ContextPane.tsx` —— **加一个 `tags` prop,组件自己不发请求**:
 
 ```tsx
-export default function ContextPane({ item, tags }: { item: Item | null; tags: string[] }) {
-  // …原有渲染…
-  // <dl> 里插:
-  //   <dt>标签</dt><dd>{tags.length ? tags.join(' · ') : '—'}</dd>
+export default function ContextPane({ item, tags = [] }: { item: Item | null; tags?: string[] }) {
 ```
 
-`tags` 的值:**从筛选结果里拿**。`BrowsePanel` 调 `tagApi.items(tagId)` 时已经知道当前标签集合,但一条视频可能还挂着别的词 —— 这正是"看它散在哪些夹子"的同类需求。所以 Task 9 Step 3 的服务端接口**再加一个同级字段 `tagsOf: Record<string, string[]>`**,和 `foldersOf` 一次查完:
+`<dl>` 里「状态」之后插一行:
 
-```ts
-      // 和 foldersOf 同一批查完 —— 详情栏要显示"这条挂的全部标签",
-      // 只显示当前筛的那个词会让人以为它没有别的标签
-      const tagsOf: Record<string, string[]> = {};
-      if (slice.length) {
-        const rows = db
-          .prepare(
-            `SELECT it.item_id, t.name FROM item_tags it JOIN tags t ON t.id = it.tag_id
-              WHERE it.item_id IN (${slice.map(() => '?').join(',')})
-              ORDER BY it.item_id, t.name`,
-          )
-          .all(...slice) as { item_id: string; name: string }[];
-        for (const r of rows) (tagsOf[r.item_id] ??= []).push(r.name);
-      }
+```tsx
+            <dt className="hud-label" style={{ margin: 0 }}>标签</dt>
+            <dd style={{ margin: 0, color: 'var(--text)' }}>
+              {tags.length ? tags.join(' · ') : '—'}
+            </dd>
 ```
 
-返回值加 `tagsOf`;`GET /api/items/:id`(Task 7 已改)那条路上,`Index` 页的 `ContextPane` 用它自己的 `GET /api/items/:id` 结果里的 `tagNames`。
-
-> **index.tsx 也要传 `tags`** —— 它用了 `ContextPane`。给它一个默认 `tags={item?.tagNames ?? []}`;`Item` 类型加一个可选 `tagNames?: string[]`,由 `GET /api/items/:id` 填(列表接口不带,那里不需要)。
+`pages/index.tsx` 用了 `ContextPane`,**也要传**:它选中条目时带一个 `tagNames`(由 `GET /api/items/:id` 返回,Task 7 已改)。给 `Item` 类型加可选 `tagNames?: string[]`,列表接口不带(那里不需要),详情接口带。
 
 - [ ] **Step 5: typecheck + build 门禁**
 
