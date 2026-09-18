@@ -14,6 +14,14 @@ import TagTree from './TagTree';
  * 但结构必须**看得见**在长什么,这一页就是那个"看得见"。
  */
 export default function TagPanel() {
+  // state 全放在取数前面 —— 下面那个 `onError` 要写 `setError`,把它写在声明上面
+  // 读起来像"用了一个还没声明的变量"(其实不会:回调只在渲染之后跑,没有 TDZ)
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [editing, setEditing] = useState<number | null>(null);
+  const [draft, setDraft] = useState('');
+
   // **拉挂了必须出声**(和「规则」页那棵树的取法一致)。少了 onError,一次 500
   // 或后端没起来渲染出来的就是下面那句"词库还是空的。去「规则」页点一次「AI 标注」"
   // —— 建议的补救是一次**全库 LLM 跑**,而库根本没坏。空词库和"没拉到"长得一样,
@@ -29,12 +37,6 @@ export default function TagPanel() {
   });
   // 静态 Modal.confirm 拿不到 ConfigProvider 的主题,必须走 App.useApp()
   const { modal } = AntApp.useApp();
-
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [expanded, setExpanded] = useState<Set<number>>(new Set());
-  const [editing, setEditing] = useState<number | null>(null);
-  const [draft, setDraft] = useState('');
 
   /** 写操作的统一外壳:清错误 → 忙 → 执行 → 重拉 → 失败报错。返回成功与否 */
   const act = async (fn: () => Promise<unknown>): Promise<boolean> => {
@@ -119,16 +121,20 @@ export default function TagPanel() {
    *    "提到上一级"(后者只在删根的时候碰巧成立)。原来的文案说的是一句代码没做的事。
    * ② 它自己的视频会掉标签这件事,和有没有子节点**无关** —— 原来写成三元的
    *    else 分支,于是"有子节点 且 有其他视频挂着它"时用户从未被告知后半句。
+   *
+   * 两句都不适用时(既没子词、自己也没挂着视频)给一句兜底 —— 那种词删掉**什么都不影响**,
+   * 而一个空白的对话框会让人以为"是不是没加载出来"。
    */
   const confirmDelete = (node: TagNode) =>
     modal.confirm({
       title: `从词库里删掉「${node.name}」?`,
-      content: [
-        node.children.length > 0
-          ? `它下面还有 ${node.children.length} 个词,那些词会回到顶层(不是它的上一级),不会被删。`
-          : '',
-        node.count > 0 ? `挂着它的 ${node.count} 条视频会失去这个标签,视频本身不会动。` : '',
-      ].join(''),
+      content:
+        [
+          node.children.length > 0
+            ? `它下面还有 ${node.children.length} 个词,那些词会回到顶层(不是它的上一级),不会被删。`
+            : '',
+          node.count > 0 ? `挂着它的 ${node.count} 条视频会失去这个标签,视频本身不会动。` : '',
+        ].join('') || '这个词没有挂着任何视频,删掉不影响别的东西。',
       okText: '删除',
       okButtonProps: { danger: true },
       cancelText: '算了',

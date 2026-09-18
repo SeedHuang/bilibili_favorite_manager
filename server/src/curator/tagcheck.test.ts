@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { openDb } from '../db/index.js';
 import { upsertItem } from '../db/repo/items.js';
-import { Logger } from '../logger/index.js';import {
+import { Logger } from '../logger/index.js';
+import {
   addAlias, ensureTag, itemTagIds, linkItemTag, listTagTree, normalizeTagName, findTag,
 } from '../db/repo/tags.js';
 
