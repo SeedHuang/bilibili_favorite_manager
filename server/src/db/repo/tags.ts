@@ -170,6 +170,32 @@ export function listTagTree(db: Database.Database): TagNode[] {
   return roots;
 }
 
+/** 只要 id / name / parent_id,不要 count 和 children —— 判据用它做轻量遍历 */
+export function listTagsWithParent(db: Database.Database): TagRow[] {
+  return (db.prepare(`SELECT id, name, parent_id FROM tags`).all() as
+    { id: number; name: string; parent_id: number | null }[])
+    .map((r) => ({ id: r.id, name: r.name, parentId: r.parent_id }));
+}
+
+/**
+ * tagId → 挂它的**视频 id 集合**。集合判据的原料。
+ *
+ * 用 Set<string> 而不是 bitset:3250 条 × 几千个词的规模下,内存和速度都够,
+ * 可读性值这个差价。真到几万条再说。
+ * ponytail: 全量集合,几万条视频时再考虑 bitset 或 minhash。
+ */
+export function tagSets(db: Database.Database): Map<number, Set<string>> {
+  const rows = db.prepare(`SELECT tag_id, item_id FROM item_tags`).all() as
+    { tag_id: number; item_id: string }[];
+  const out = new Map<number, Set<string>>();
+  for (const r of rows) {
+    const s = out.get(r.tag_id);
+    if (s) s.add(r.item_id);
+    else out.set(r.tag_id, new Set([r.item_id]));
+  }
+  return out;
+}
+
 /**
  * tagId → 它的子树(含自己)。规则匹配(C11 选父命中所有后代)和集合判据都靠它。
  *
