@@ -1,11 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { App as AntApp, Button, Select, Tooltip } from 'antd';
-import { Bot, Check, ChevronDown, ChevronRight, Pencil, Plus, Square, Tag, Trash2, X, Zap } from 'lucide-react';
+import { Bot, Check, ChevronDown, ChevronRight, Pencil, Plus, Trash2, X, Zap } from 'lucide-react';
 import { rulesApi, tagApi } from '../api';
-import type {
-  DryRun, RuleCondition, RuleField, RuleSuggestion, RuleView, TagNode, TagProgressPayload,
-  TagRunStatus,
-} from '../types';
+import type { DryRun, RuleCondition, RuleField, RuleSuggestion, RuleView, TagNode } from '../types';
 import { useAssistant } from './assistant';
 
 /**
@@ -68,20 +65,6 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
   /** 调用**成功但没建议**时的一句话 —— 不然面板整个消失,看着像按钮没反应 */
   const [suggestNote, setSuggestNote] = useState('');
 
-  // ── AI 标注(spec §9E C8)── 照 `suggesting` 那套:**自己的开关,不碰 `busy`**。
-  // 共用 busy 会让"标注跑着"把读规则/看建议/试跑全锁死,反过来也一样 —— §9D.5 已经踩过一次。
-  // 标注服务于归类质量,和规则/试跑是同一件事的三面,所以按钮就摆在试跑旁边。
-  const [tagging, setTagging] = useState(false);
-  const [tagProgress, setTagProgress] = useState<TagProgressPayload | null>(null);
-  /** 常显那行的两个数:打开页面取一次,每跑完一轮(成功或中断)再刷一次 */
-  const [tagStatus, setTagStatus] = useState<TagRunStatus | null>(null);
-  /** 中断/完成的一句话 —— warn 色,不走顶上那个红条(§9D B4) */
-  const [tagNote, setTagNote] = useState('');
-  /** 停止按钮要拿到**这次跑**的那个 controller */
-  const tagAbort = useRef<AbortController | null>(null);
-  /** 中断文案里要报"已标了多少" —— finally 会把 state 清掉,所以单独留一份(照 ChatDrawer) */
-  const lastTagProgress = useRef<TagProgressPayload | null>(null);
-
   const reload = useCallback(async () => {
     setRules(await rulesApi.list());
   }, []);
@@ -93,12 +76,6 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
       })
       .catch((e) => setError((e as Error).message));
   }, [reload, focusFolderId]);
-
-  // 标注状态和规则无关,单独取一次。**拉挂了就不显示那行**:少一行,比谎报一个
-  // "已标注 0 条"强 —— 也不能让它把整页的 error 条顶起来(那不是规则出的错)。
-  useEffect(() => {
-    tagApi.status().then(setTagStatus).catch(() => {});
-  }, []);
 
   // 词库树(§9F C11):规则里存的是 tag **id**,所以既要用它给 tag 条件做选项,
   // 也要用它把 id 翻成词名显示 —— 一次请求两个用途。
@@ -120,16 +97,6 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
       .catch((e) => setError((e as Error).message));
   }, []);
   const tagNameOf = new Map(tagTree.map((t) => [t.id, t.name]));
-
-  // 卸载时中止在跑的那轮标注。不作清理的话:人离开页面,SSE 还在后台排干,
-  // 而按钮已经回到空闲态 —— 再点一次就会在**同一个池子上**开出第二轮同跑。
-  // 只中止,不 setState(卸载后的 state 写无所谓,但没必要)
-  useEffect(
-    () => () => {
-      tagAbort.current?.abort();
-    },
-    [],
-  );
 
   /** 返回**这次动作成功没有** —— 失败时调用方不能当它做过了(比如把一条建议当成已处理丢掉) */
   const act = async (fn: () => Promise<unknown>): Promise<boolean> => {
@@ -206,86 +173,10 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
     if (andEdit) setOpen(folderId);
   };
 
-  /**
-   * 跑一遍标注。**不走 `act()`** —— 它不碰规则,也不该清掉试跑结果(照 runDryRun 的道理)。
-   * 开关是自己的 `tagging`,不是 `busy`:标注跑着的时候,读规则/看建议/试跑照常能用(§9D.5)。
-   *
-   * `scope='missing'` 只标没标过的(增量,默认),`'all'` 全量重标(「重新标注全部」走它)。
-   */
-  const runTag = async (scope: 'missing' | 'all') => {
-    setError('');
-    setTagNote('');
-    setTagging(true);
-    setTagProgress(null);
-    lastTagProgress.current = null;
-    const controller = new AbortController();
-    tagAbort.current = controller;
-    try {
-      const r = await tagApi.run(
-        scope,
-        (p) => {
-          setTagProgress(p);
-          lastTagProgress.current = p;
-        },
-        { signal: controller.signal },
-      );
-      // `newWordCount` 是**质检的可见性**:质检只对本轮新词开口,所以"新增 900 个词、
-      // 而「标签」页的上一轮变化是空的"就是它没干活(输出被截断是一条真路,服务端会记
-      // TAGCHECK_EMPTY)。不显示的话这个信号在界面上根本不存在 —— 这个数服务端一直在
-      // 发、注释还写着"界面上要的是这轮长了多少新词",而界面从来没读过它。
-      setTagNote(
-        `本轮标注完成:${r.tagged.toLocaleString()} 条 · 新增词 ${r.newWordCount.toLocaleString()} 个` +
-          // 失败的批次**会留在 ai_checked_at IS NULL 里** —— 下次增量自然再试一遍,
-          // 所以说清楚而不是把它当错误(§9D B4 同款语气)
-          (r.failedBatches.length ? ` · ${r.failedBatches.length} 批失败(没标上的下次会再试)` : '') +
-          // 一条都没标上时,只报"N 批失败"等于没说(模型都没连上,用户完全不知道
-          // 为什么)—— 原因才是他唯一能照着改的东西,带上第一条的
-          (r.tagged === 0 && r.failedBatches.length ? `:${r.failedBatches[0]!.reason}` : ''),
-      );
-    } catch (e) {
-      // **停止不是错误(§9D B5)**:标注是逐批落库的,已完成的那些已经在库里了 ——
-      // 说清"留了什么、再点会怎样"就够了,不用红条吓人。
-      // 两处都认:用户点停止(fetch 自己抛 AbortError),以及服务端回 `aborted` 帧
-      // (tagApi 抛 DOMException('已中止','AbortError'))。
-      if (controller.signal.aborted || (e as Error)?.name === 'AbortError') {
-        // 起跑时把它置过 null,TS 的收窄会一路带到这儿 —— 显式写回类型(照 ChatDrawer)
-        const last = lastTagProgress.current as TagProgressPayload | null;
-        setTagNote(`已中断:已标 ${(last?.done ?? 0).toLocaleString()} 条 · 已完成的保留在库里,再点会接着标`);
-      } else {
-        setError((e as Error).message);
-      }
-    } finally {
-      tagAbort.current = null;
-      setTagging(false);
-      setTagProgress(null);
-      // 落库是**逐批**的,所以成功和中断都得刷新状态行;拉挂了也不能顶掉上面那句话
-      await tagApi.status().then(setTagStatus).catch(() => {});
-    }
-  };
-
-  /** 「重新标注全部」= 全量重标,**会覆盖旧标注**(spec §9E.4),所以先问一句 */
-  const retagAll = () =>
-    modal.confirm({
-      title: '把所有条目重新标一遍?',
-      content: '已有的标注会被覆盖(标签和类别都重写)。只想补没标过的,点「AI 标注」就行。',
-      okText: '全部重标', cancelText: '算了',
-      onOk: () => void runTag('all'),
-    });
-
   const current = rules.find((r) => r.folderId === open);
   const withRules = rules.filter((r) => !r.locked && hasRule(r)).length;
   /** 有哪个夹子还没真正写规则 —— 没有的话「新增规则」就没地方可加,按钮该是灰的 */
   const canAddRule = rules.some((r) => !r.locked && !hasRule(r));
-
-  /**
-   * 这轮会拿哪个模型打标 —— status 专门报 `source` 就是为了这一句(tagRoutes 的注释原话):
-   * 不说的话用户以为在烧本地 4b,实际每批都在打贵的主模型。两个模型都没配就没有提示。
-   */
-  const tagModelHint = !tagStatus?.model
-    ? ''
-    : tagStatus.model.source === 'tag'
-      ? `用 ${tagStatus.model.provider}/${tagStatus.model.model}`
-      : '当前用主模型打标 —— 想省成本可在授权页配本地小模型';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -417,58 +308,8 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
             >
               试跑:规则 vs AI
             </Button>
-            {/* 两态(§9D B1):空闲 = 开始增量,运行中 = 停止。**不绑 busy** ——
-                它自己在跑的时候,旁边三个按钮照样能点(§9D.5) */}
-            <Button
-              size="small"
-              danger={tagging}
-              icon={tagging ? <Square size={13} /> : <Tag size={13} />}
-              onClick={() => (tagging ? tagAbort.current?.abort() : void runTag('missing'))}
-            >
-              {tagging ? '停止' : 'AI 标注'}
-            </Button>
           </span>
         </div>
-
-        {/* ── 标注状态行(spec §9E C8)── 常显:标注服务于归类质量,首屏就该看到
-            "标了多少、这轮用哪个模型"。跑起来换成进度行(§9D.2:数字走 num 等宽,位数不抖) ── */}
-        {(tagStatus || tagging) && (
-          <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)', marginBottom: 8 }}>
-            {tagging ? (
-              <>
-                标注中:已标{' '}
-                <span className="num" style={{ color: 'var(--accent)' }}>
-                  {(tagProgress?.done ?? 0).toLocaleString()}
-                </span>
-                {/* 第一帧还没到时不知道本轮的分母 —— 增量跑的是"缺的那些",不等于全库总数,
-                    硬报一个会紧跟着跳一下。所以先不报,不是省事 */}
-                {(tagProgress?.total ?? 0) > 0 && (
-                  <>/<span className="num">{(tagProgress?.total ?? 0).toLocaleString()}</span></>
-                )}{' '}
-                条
-              </>
-            ) : (
-              <>
-                已标注 <span className="num">{(tagStatus?.tagged ?? 0).toLocaleString()}</span>
-                /<span className="num">{(tagStatus?.total ?? 0).toLocaleString()}</span> 条
-                {' · '}
-                <Button
-                  type="link" size="small"
-                  style={{ padding: 0, fontSize: 'var(--fs-12)' }}
-                  onClick={retagAll}
-                >
-                  重新标注全部
-                </Button>
-              </>
-            )}
-            {tagModelHint && <> · {tagModelHint}</>}
-          </div>
-        )}
-
-        {/* 中断/完成的话 —— warn 色,不用顶上那个红条(§9D B4) */}
-        {tagNote && (
-          <div style={{ fontSize: 'var(--fs-12)', color: 'var(--warn)', marginBottom: 8 }}>{tagNote}</div>
-        )}
 
         {dry && (
           <div

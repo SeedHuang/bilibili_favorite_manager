@@ -88,7 +88,7 @@ export default function BrowsePanel() {
         </div>
         {(tree?.tree ?? []).length === 0 ? (
           <div style={{ color: 'var(--text-dim)', fontSize: 'var(--fs-12)', padding: '12px 0' }}>
-            {treeError ? '词库没拉下来 —— 看红条' : '词库还是空的 —— 先去「规则」页点一次「AI 标注」'}
+            {treeError ? '词库没拉下来 —— 看红条' : '词库还是空的 —— 先去「标签」页点一次「AI 标注」'}
           </div>
         ) : (
           <TagTree
