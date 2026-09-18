@@ -1036,6 +1036,7 @@ describe('模型管理', () => {
       const a = (await app.inject({ method: 'GET', url: '/api/settings/assignments' })).json();
       expect(a.assignments).toEqual({
         chat: list.entries[0].id, classify: list.entries[0].id, rules: list.entries[0].id, tag: list.entries[0].id,
+        tagcheck: list.entries[0].id,
       });
       await app.close();
     });

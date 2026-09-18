@@ -539,7 +539,7 @@ function EntryCard({
     setBusy('add');
     try {
       await llmApi.addEntry({ providerId, model });
-      setNotice('条目已添加。首条会自动指给四个用途,可在下面那张卡改。');
+      setNotice('条目已添加。首条会自动指给五个用途,可在下面那张卡改。');
       setModel('');
       await onDone();
     } catch (e) {
@@ -668,6 +668,7 @@ const PURPOSE_LABELS: Record<LlmPurpose, string> = {
   classify: '归类',
   rules: '规则建议',
   tag: '打标',
+  tagcheck: '标签质检',
 };
 
 function AssignCard({
@@ -688,7 +689,7 @@ function AssignCard({
       <Card
         icon={<SlidersHorizontal size={16} style={{ color: 'var(--accent)' }} />}
         title="用途分配"
-        hint="四个用途平级,各自指一个条目;没配 = 未配置,不回落"
+        hint="五个用途平级,各自指一个条目;没配 = 未配置,不回落"
       >
         <p className="hud-label">加载中…</p>
       </Card>
@@ -717,7 +718,7 @@ function AssignCard({
     <Card
       icon={<SlidersHorizontal size={16} style={{ color: 'var(--accent)' }} />}
       title="用途分配"
-      hint="四个用途平级,各自指一个条目;没配 = 未配置,不回落"
+      hint="五个用途平级,各自指一个条目;没配 = 未配置,不回落"
     >
       {(Object.keys(PURPOSE_LABELS) as LlmPurpose[]).map((p) => (
         <Field key={p} label={PURPOSE_LABELS[p]}>

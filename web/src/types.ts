@@ -137,7 +137,7 @@ export interface EntryView {
   note?: string;
 }
 
-export type LlmPurpose = 'chat' | 'classify' | 'rules' | 'tag';
+export type LlmPurpose = 'chat' | 'classify' | 'rules' | 'tag' | 'tagcheck';
 
 export interface AssignmentsView {
   assignments: Record<LlmPurpose, string | null>;

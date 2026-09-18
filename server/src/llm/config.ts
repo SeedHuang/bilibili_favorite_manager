@@ -18,14 +18,16 @@ import { getModelMeta, type ModelMeta } from './registry.js';
 import type { ModelConfig } from './provider.js';
 import { assertUsableBaseUrl } from './provider.js';
 
-export type LlmPurpose = 'chat' | 'classify' | 'rules' | 'tag';
-export const PURPOSES: readonly LlmPurpose[] = ['chat', 'classify', 'rules', 'tag'];
+export type LlmPurpose = 'chat' | 'classify' | 'rules' | 'tag' | 'tagcheck';
+export const PURPOSES: readonly LlmPurpose[] = ['chat', 'classify', 'rules', 'tag', 'tagcheck'];
 /** 面向用户展示的用途名 —— 报错里别漏内部 key */
 const PURPOSE_LABELS: Record<LlmPurpose, string> = {
   chat: '聊天',
   classify: '归类',
   rules: '规则建议',
   tag: '打标',
+  // 质检只对新词开口,判的是"这个词在树里该站哪" —— 量小但要准,和打标的要求相反
+  tagcheck: '标签质检',
 };
 
 const PROVIDERS_KEY = 'llm.providers';
