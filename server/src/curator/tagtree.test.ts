@@ -96,4 +96,24 @@ describe('reconcile', () => {
     expect(reconcile(db)).toEqual([]);
     expect(listTagTree(db)[0]!.children.map((n) => n.name)).toEqual(['篮球']);
   });
+
+  it('同一轮里已经合并掉的词,不能再参与后面的对', () => {
+    const db = openDb(':memory:');
+    const jia = ensureTag(db, '甲', null);
+    const yi = ensureTag(db, '乙', null);
+    const bing = ensureTag(db, '丙', yi);  // 丙 本来挂在 乙 下
+    seed(db, 10, [jia, yi, bing]);         // 三个词挂的完全是同一批视频
+
+    // 配对顺序 (甲,乙) → (甲,丙) → (乙,丙)。第一对把 乙 并进 甲(丙 的父
+    // 在库里变成 甲)。第三对里 乙 **已经不存在了** —— 而 isDescendant 查库,
+    // 查一个不在 tags 里的 id 恒为 false,闸门拦不住。不跳过已删的词,丙 就会
+    // 被"并进"一个死 id:item_tags 的 FK 挡住 → 抛错 → 这一轮半途而废
+    // (前面那对已经各自提交了)。查一遍 tree 也要崩。
+    const changes = reconcile(db);
+    expect(changes).toHaveLength(1);                       // 只该有 (甲,乙) 那一笔
+    expect(changes[0]).toMatchObject({ kind: 'merge', to: '甲' });
+    // 丙 还在,且父亲已经从 乙 变成 甲
+    expect(listTagTree(db).map((n) => [n.name, n.children.map((c) => c.name)]))
+      .toEqual([['甲', ['丙']]]);
+  });
 });

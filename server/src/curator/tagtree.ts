@@ -97,7 +97,18 @@ export function reconcile(
   let { sets, cov, nameOf, parentOf } = take();
 
   // ── ① 合并:双向都 ≥cover 且都够样本 ──────────────────
+  // `gone` 记这一轮**已经动过**的词。`pairs` / `cov` 是循环前算的一次性快照,
+  // 里面还留着快照当时存在的 id;而闸门 `isDescendant` 是查库的 —— 查一个已经被
+  // 删掉的 id 恒为 false(它沿已经不存在的父边走,走到 null 就停了)。所以只有这里
+  // 能拦:不跳过的话,已删的词落在 `drop` 位时 `mergeTags` 空跑一遍**仍返回 true**
+  // → 变化清单里多一条点名的两个词都已不在的假记录;落在 `keep` 位时 item_tags 的
+  // UPDATE 撞 FK(openDb 开了 foreign_keys)→ 抛错,而本轮先前成功的合并已经各自
+  // 提交 → 整轮半途而废。
+  // 连 `keep` 一起记:它还在,但并进东西之后**视频集变了**,而 `cov` 还是旧的 ——
+  // 拿过期覆盖率继续判就是又踩一次同一个坑。剩下的留到下一轮(reconcile 每轮都跑)。
+  const gone = new Set<number>();
   for (const [a, b] of pairs(sets)) {
+    if (gone.has(a) || gone.has(b)) continue;
     const sizeA = sets.get(a)!.size;
     const sizeB = sets.get(b)!.size;
     if (sizeA < minSample || sizeB < minSample) continue;
@@ -120,6 +131,8 @@ export function reconcile(
     // 保留挂得多的那个(信息更全),把另一个并进来
     const [keep, drop] = sizeA >= sizeB ? [a, b] : [b, a];
     if (!mergeTags(db, drop, keep)) continue; // 防环 + 深度闸(mergeTags 内置)
+    gone.add(drop);
+    gone.add(keep);
     changes.push({
       kind: 'merge',
       from: nameOf.get(drop) ?? String(drop),
