@@ -81,6 +81,26 @@ describe('runTagging', () => {
     expect(findTag(db, normalizeTagName('露营'))).not.toBeNull();
   });
 
+  it('报出本轮新建的词;onBatch 同步带着同一份名单', async () => {
+    const db = openDb(':memory:');
+    upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
+    mocks.complete.mockResolvedValue(
+      JSON.stringify([{ id: 'BV1', kind: '娱乐', domains: ['美食'], tags: ['露营', '烤羊肉'] }]),
+    );
+
+    // **这份名单是质检那道闸门唯一的上游。** 空掉的话 `runTagCheck` 会在
+    // `newNames.length === 0` 处直接早退 —— 剔泛词(§9F.6 说它是判据唯一的软肋)
+    // 从此永久静默失效,而**所有测试照绿**。所以这里必须断言真名。
+    // onBatch 那份也要断:progress 帧读的就是它,两条路不能只对一条。
+    const seen: string[][] = [];
+    const r = await runTagging({
+      config, ctx, items: [item('BV1', 'a')], db,
+      onBatch: (b) => seen.push(b.newWords),
+    });
+    expect([...r.newWords].sort()).toEqual(['烤羊肉', '美食', '露营'].sort());
+    expect(seen.at(-1)).toEqual(r.newWords);
+  });
+
   it('跑第二遍同样的输入不新建节点(别名表的用处)', async () => {
     const db = openDb(':memory:');
     upsertItem(db, { id: 'BV1', type: 2, title: 'a' });

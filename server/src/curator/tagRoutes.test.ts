@@ -178,6 +178,15 @@ describe('标签树路由', () => {
     expect(r.statusCode).toBe(400);
   });
 
+  // tagsExist 那一句就是为这个分支存在的:不查的话「词库里没有这个标签」会变成
+  // 静默无操作 —— 用户点了合并,界面回 ok,库里什么都没发生
+  it('merge 的 id 不在词库里 → 404', async () => {
+    const { app, db } = makeApp();
+    const a = ensureTag(db, '路飞', null);
+    const r = await app.inject({ method: 'POST', url: '/api/tags/merge', payload: { fromId: a, toId: 9999 } });
+    expect(r.statusCode).toBe(404);
+  });
+
   it('PATCH 改名 + 换父;DELETE 删词', async () => {
     const { app, db } = makeApp();
     const sport = ensureTag(db, '体育', null);
@@ -185,5 +194,14 @@ describe('标签树路由', () => {
     expect((await app.inject({ method: 'PATCH', url: `/api/tags/${camp}`, payload: { name: '野外露营', parentId: sport } })).statusCode).toBe(200);
     expect(listTagTree(db)[0]!.children[0]!.name).toBe('野外露营');
     expect((await app.inject({ method: 'DELETE', url: `/api/tags/${sport}` })).statusCode).toBe(200);
+  });
+
+  // 撞名不自动合并(renameTag 的契约)—— 回 ok:true 而库里没变就是对调用方撒谎
+  it('PATCH 改名撞上已有词 → 400', async () => {
+    const { app, db } = makeApp();
+    const a = ensureTag(db, '路飞', null);
+    ensureTag(db, '鲁夫', null);
+    const r = await app.inject({ method: 'PATCH', url: `/api/tags/${a}`, payload: { name: '鲁夫' } });
+    expect(r.statusCode).toBe(400);
   });
 });

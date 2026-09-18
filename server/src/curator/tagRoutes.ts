@@ -169,6 +169,11 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
       }
       setSetting(db, CHANGES_KEY, JSON.stringify(changes));
 
+      // 上面两步是网络往返(质检一次 LLM 调用 + 判据一遍全表),可能是**秒级** ——
+      // 客户端在这段里走了很正常。和前面那道守卫同理:发不出去的帧不写。
+      // (变化清单已经落库了:树是真的动了,跟客户端在不在没关系)
+      if (closed()) return;
+
       log.event({
         level: 'info',
         category: 'llm',
@@ -232,7 +237,12 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
     if (!tagsExist(db, [id])) return reply.code(404).send({ ok: false, reason: '词库里没有这个标签' });
     if (body.name !== undefined) {
       if (!body.name.trim()) return reply.code(400).send({ ok: false, reason: '名字不能为空' });
-      renameTag(db, id, body.name);
+      // renameTag 返回 false = 这个名字已经被别的节点占了(全局唯一,撞了改不动)。
+      // **撞名不自动合并** —— 那是「合并」按钮的事;这里必须报出去,回 ok:true
+      // 而库里没变,等于对唯一能处理它的调用方撒谎
+      if (!renameTag(db, id, body.name)) {
+        return reply.code(400).send({ ok: false, reason: '这个名字已经被别的标签占了' });
+      }
     }
     if (body.parentId !== undefined) {
       if (body.parentId !== null && !tagsExist(db, [body.parentId])) {
