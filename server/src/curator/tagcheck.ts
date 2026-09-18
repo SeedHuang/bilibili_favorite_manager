@@ -103,7 +103,13 @@ export async function runTagCheck(opts: {
 }): Promise<{ dropped: number; merged: number; moved: number }> {
   const { db } = opts;
   // 闸门:**没有新词就一次 LLM 都不调** —— 所以放在每轮末尾是免费的
-  if (opts.newNames.length === 0) return { dropped: 0, merged: 0, moved: 0 };
+  if (opts.newNames.length === 0) {
+    // 早退也得出声(§9D.7)—— **info 不是 warn**:这一轮没长出任何新词,本来就该
+    // 无事发生,这不是岔子。但 check 的 phase 帧已经发出去了(路由先发 phase 再调本函数),
+    // 一个「质检」块头底下挂零行,不解释就是"它跑了吗?判了啥?" —— 一句"没有可判的"补上
+    opts.onNote?.('info', '本轮没有新词可判 —— 质检无事发生');
+    return { dropped: 0, merged: 0, moved: 0 };
+  }
 
   const known = new Set<string>();
   const collect = (nodes: readonly TagNode[]) => {

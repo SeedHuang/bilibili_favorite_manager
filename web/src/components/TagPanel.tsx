@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, App as AntApp, Button, Progress, Select, Spin } from 'antd';
 import { Combine, Pencil, Check, Square, Tag, X, Trash2, ScrollText } from 'lucide-react';
 import { useRequest } from '@umijs/max';
@@ -50,6 +50,12 @@ export default function TagPanel() {
   const [logOpen, setLogOpen] = useState(false);
   /** 按钮角标要报的 warn 数 —— 失败不打开抽屉也要看得见 */
   const logWarn = logLines.filter((l) => l.type === 'note' && l.level === 'warn').length;
+  // **合并写**:日志帧是每条/每词一发,全库一轮几千帧 —— 一帧一 `setLogLines`
+  // 就是几千次整页重渲染,而这恰恰发生在用户**正盯着这一页**看的那段时间。
+  // 新行先攒进 ref,按固定节奏一次性倒进 state(见 runTag 里 onLog 那段)。
+  // **只推迟渲染,不丢行**:ref 攒着,后台跑完切回来也全在
+  const logPending = useRef<TagLogLine[]>([]);
+  const logFlushScheduled = useRef(false);
 
   // **拉挂了必须出声**(和「规则」页那棵树的取法一致)。少了 onError,一次 500
   // 或后端没起来渲染出来的就是下面那句"词库还是空的。点上面的「AI 标注」"
@@ -109,13 +115,31 @@ export default function TagPanel() {
    *
    * `scope='missing'` 只标没标过的(增量,默认),`'all'` 全量重标(「重新标注全部」走它)。
    */
+  /**
+   * 把攒着的日志行倒进 state —— **计时器里唯一的动作**。
+   *
+   * 为什么不在 onLog 里直接 setLogLines:那样一帧一次整页重渲染(见上面那段)。
+   * 这个函数只干"清空待写 + 追加"两件事,留给 setTimeout 一个稳定的闭包
+   */
+  const flushLog = useCallback(() => {
+    logFlushScheduled.current = false;
+    if (logPending.current.length === 0) return; // 空批别碰 state
+    const batch = logPending.current;
+    logPending.current = [];
+    setLogLines((ls) => [...ls, ...batch]);
+  }, []);
+
   const runTag = async (scope: 'missing' | 'all') => {
     setError('');
     setTagNote('');
     setTagging(true);
     setTagProgress(null);
-    // 新的一轮,日志从零开始(§9D.7)—— 上一轮的留在缓冲区里会把两轮混成一团
+    // 新的一轮,日志从零开始(§9D.7)—— 上一轮的留在缓冲区里会把两轮混成一团。
+    // **ref 里的残批也一起清** —— 上一轮末尾 100ms 内可能还攒着没倒完的行,
+    // 不清的话它们会在新轮开跑后跟着第一轮 flush 冒出来,污染新日志
     setLogLines([]);
+    logPending.current = [];
+    logFlushScheduled.current = false;
     lastTagProgress.current = null;
     const controller = new AbortController();
     tagAbort.current = controller;
@@ -129,8 +153,18 @@ export default function TagPanel() {
         {
           signal: controller.signal,
           // 日志四种帧全进同一个缓冲区(§9D.7)。**先清空再开跑** —— 上一轮的日志
-          // 是上一轮的,留着会和这一轮混成一片分不清
-          onLog: (l) => setLogLines((ls) => [...ls, l]),
+          // 是上一轮的,留着会和这一轮混成一片分不清。
+          // 帧先进 ref,按 100ms 节奏整批倒进 state —— 一帧一 setState 的话,
+          // 全库几千帧 = 几千次整页重渲染(合并写,见上面那段注释)
+          onLog: (l) => {
+            logPending.current.push(l);
+            if (logFlushScheduled.current) return; // 已在排队,别堆计时器
+            logFlushScheduled.current = true;
+            // **固定节奏而不是 rAF**:rAF 在标签页切后台时不触发,行会一直攒到用户
+            // 切回来 —— 那正是他"回来看看跑完没"的时刻,不该让日志在那之后才挤出来。
+            // 100ms:行跟着跑动刷新不粘手,又不至于为省几次渲染把人晾着
+            setTimeout(flushLog, 100);
+          },
         },
       );
       // `newWordCount` 是**质检的可见性**:质检只对本轮新词开口,所以"新增 900 个词、

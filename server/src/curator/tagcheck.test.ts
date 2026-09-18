@@ -128,6 +128,16 @@ describe('runTagCheck', () => {
     expect(mocks.complete).not.toHaveBeenCalled();
   });
 
+  // §9D.7:check 的 phase 帧先于本函数发出,「质检」块头已经挂上了 —— 闸门早退若不出声,
+  // 用户看到的就是一个"跑了吗?判了啥?"的裸块头。**info 不是 warn**:无新词本来就该无事发生
+  it('newNames 为空 → 发一条 info 的 note(块头不能裸着)', async () => {
+    const db = openDb(':memory:');
+    ensureTag(db, '美食', null);
+    const notes: { level: 'info' | 'warn'; text: string }[] = [];
+    await runTagCheck({ config, tree: listTagTree(db), newNames: [], db, onNote: (level, text) => notes.push({ level, text }) });
+    expect(notes).toEqual([{ level: 'info', text: '本轮没有新词可判 —— 质检无事发生' }]);
+  });
+
   it('**只动本轮新词** —— 判到树里的老词也一个字不动', async () => {
     const db = openDb(':memory:');
     // 美食 = 上一轮建的**老词**(有视频挂着);露营 = 本轮的新词
