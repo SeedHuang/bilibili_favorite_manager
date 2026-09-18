@@ -140,6 +140,8 @@ export interface TagBatchProgress {
   total: number;
   tagged: number;
   failedBatches: { firstItemId: string; size: number; reason: string }[];
+  /** 本轮新建的词 —— 质检(C8)只对它们开口 */
+  newWords: string[];
 }
 
 export async function runTagging(opts: {
@@ -149,8 +151,15 @@ export async function runTagging(opts: {
   onBatch?: (b: TagBatchProgress) => void;
   signal?: AbortSignal;
   db: Database.Database;
-}): Promise<{ tagged: number; failedBatches: { firstItemId: string; size: number; reason: string }[] }> {
+}): Promise<{
+  tagged: number;
+  failedBatches: { firstItemId: string; size: number; reason: string }[];
+  /** 本轮新建的词 —— 质检(§9F C8)只对它们开口,所以这份名单必须报出来 */
+  newWords: string[];
+}> {
   const failedBatches: { firstItemId: string; size: number; reason: string }[] = [];
+  // 本轮建出来的词。`applyTagOutput` 用"建之前有哪些节点"的差集算,不猜
+  const newWords = new Set<string>();
   let tagged = 0;
   const total = opts.items.length;
   let done = 0;
@@ -177,7 +186,8 @@ export async function runTagging(opts: {
     const got = coerceTagOutput(raw, new Set(batch.map((i) => i.id)));
     const out = new Set<string>();
     for (const o of got) {
-      applyTagOutput(opts.db, o);
+      const applied = applyTagOutput(opts.db, o);
+      for (const n of applied.created) newWords.add(n);
       out.add(o.id);
     }
     return out;
@@ -203,7 +213,7 @@ export async function runTagging(opts: {
         if (got.size > 0) {
           tagged += got.size;
           done += got.size;
-          opts.onBatch?.({ done, total, tagged, failedBatches });
+          opts.onBatch?.({ done, total, tagged, failedBatches, newWords: [...newWords] });
         }
       } catch (e) {
         if (opts.signal?.aborted) break; // 中止不记失败(§9D B5)
@@ -219,5 +229,5 @@ export async function runTagging(opts: {
     }
   }
 
-  return { tagged, failedBatches };
+  return { tagged, failedBatches, newWords: [...newWords] };
 }

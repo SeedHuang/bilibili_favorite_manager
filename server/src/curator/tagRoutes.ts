@@ -10,11 +10,29 @@ import { readLlmSettings } from '../llm/config.js';
 import { listUntaggedItemIds, tagStats } from '../db/repo/tagging.js';
 import type { ItemRow } from '../db/repo/items.js';
 import { runTagging } from './tagger.js';
+import {
+  listTagTree, mergeTags, setTagParent, renameTag, deleteTag, type TagNode,
+} from '../db/repo/tags.js';
+import { runTagCheck } from './tagcheck.js';
+import { reconcile, type TreeChange } from './tagtree.js';
+import { getSetting, setSetting } from '../db/repo/state.js';
 
 export interface TagDeps {
   db: Database.Database;
   log: Logger;
 }
+
+/** 最近一轮「树的变化」清单存这个键 —— 刷新页面还在(§9F C10 要"看得见") */
+const CHANGES_KEY = 'tags.lastChanges';
+
+/** 这些 id 是不是全都在词库里 —— 手动操作都要先过这一句,否则 404 变成静默无操作 */
+const tagsExist = (db: Database.Database, ids: number[]): boolean => {
+  const uniq = [...new Set(ids)];
+  const n = (db
+    .prepare(`SELECT COUNT(*) n FROM tags WHERE id IN (${uniq.map(() => '?').join(',')})`)
+    .get(...uniq) as { n: number }).n;
+  return n === uniq.length;
+};
 
 export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
   const { db, log } = deps;
@@ -92,12 +110,79 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
       if (controller.signal.aborted) return finishAborted();
       if (closed()) return;
 
+      // ── 跑完自动整理(§9F C8 + C9 + C10)────────────────
+      // 顺序不能反:先质检(定新词的归宿、剔泛词),再让数据说话(合并/挂父)。
+      // 反过来判据会把证据吃掉 —— 详见 tagtree.ts 开头那段。
+
+      /**
+       * **质检用的是「标签质检」那个用途的模型,不是打标那个。**
+       *
+       * 两个要求是相反的:打标要便宜、能丢给本地 4b 跑全库;质检判的是**词性**
+       * (量小,十几到几十个词),要准。共用一个槽必然二选一都不对。
+       * 所以第五个用途**必须真的被读到** —— 漏了这一行的话它在界面上是个
+       * 配置了却永远不生效的下拉,而质检会跟着打标一起跑在本地 4b 上。
+       */
+      const checker = readLlmSettings(db, 'tagcheck');
+      let check = { dropped: 0, merged: 0, moved: 0 };
+      if (!checker) {
+        log.event({
+          level: 'info', category: 'llm',
+          message: '没配「标签质检」模型 —— 跳过质检(泛词闸门这轮没跑)',
+        });
+      } else {
+        try {
+          check = await runTagCheck({
+            config: checker.config,
+            tree: listTagTree(db),
+            newNames: r.newWords,
+            db,
+          });
+        } catch (e) {
+          // 质检失败**不该**把已经标好的东西废掉 —— 下一轮还会再判一次
+          log.event({
+            level: 'warn', category: 'llm', code: 'TAGCHECK_FAILED',
+            message: (e as Error)?.message ?? String(e),
+          });
+        }
+      }
+
+      // 「树的变化」= 质检做的 + 判据做的。清单要**看得见**(C10),
+      // 但不设审批闸 —— 用户只要求"看得见它在长什么"
+      const changes: TreeChange[] = [];
+      if (check.merged > 0 || check.moved > 0 || check.dropped > 0) {
+        changes.push({
+          kind: 'merge',
+          from: '（质检）',
+          to: '',
+          detail: `合并 ${check.merged} 组 · 挪位 ${check.moved} 个 · 剔除泛词 ${check.dropped} 个`,
+        });
+      }
+      // **判据单独 try** —— 它和质检一样是"锦上添花",不该把已经跑通的标注
+      // 连 done 帧一起带崩(质检那步是包着的,这里不包就是两套待遇)
+      try {
+        changes.push(...reconcile(db));
+      } catch (e) {
+        log.event({
+          level: 'warn', category: 'llm', code: 'TREE_RECONCILE_FAILED',
+          message: (e as Error)?.message ?? String(e),
+        });
+      }
+      setSetting(db, CHANGES_KEY, JSON.stringify(changes));
+
       log.event({
         level: 'info',
         category: 'llm',
         message: `标注完成:${r.tagged} 条,${r.failedBatches.length} 批失败`,
       });
-      reply.raw.write(`event: done\ndata: ${JSON.stringify({ tagged: r.tagged, failedBatches: r.failedBatches })}\n\n`);
+      reply.raw.write(`event: done\ndata: ${JSON.stringify({
+        tagged: r.tagged,
+        failedBatches: r.failedBatches,
+        check,
+        changes,
+        // 只报**个数**不报名单:界面上要的是"这轮长了多少新词",名单没人看,
+        // 而它可能上千条 —— 塞进 SSE 帧是白占带宽
+        newWordCount: r.newWords.length,
+      })}\n\n`);
     } catch (e) {
       if (controller.signal.aborted) {
         finishAborted();
@@ -109,5 +194,68 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
     } finally {
       reply.raw.end();
     }
+  });
+
+  // ── 词库树(§9F)────────────────────────────────────
+  app.get('/api/tags/tree', async () => {
+    const tree = listTagTree(db);
+    const count = (nodes: TagNode[]): number =>
+      nodes.reduce((n, x) => n + 1 + count(x.children), 0);
+    return { tree, total: count(tree) };
+  });
+
+  /**
+   * 手动合并。**要校验 fromId !== toId** —— 自己并自己没有意义,而且会让
+   * mergeTags 里那条 DELETE 把节点删掉。
+   */
+  app.post('/api/tags/merge', async (req, reply) => {
+    const { fromId, toId } = (req.body ?? {}) as { fromId?: number; toId?: number };
+    if (typeof fromId !== 'number' || typeof toId !== 'number') {
+      return reply.code(400).send({ ok: false, reason: '要给出 fromId 和 toId' });
+    }
+    if (fromId === toId) return reply.code(400).send({ ok: false, reason: '不能并到自己身上' });
+    if (!tagsExist(db, [fromId, toId])) {
+      return reply.code(404).send({ ok: false, reason: '词库里没有这个标签' });
+    }
+    // 闸在 mergeTags 里(防环 + 超深)—— false 是"这两个词不能并",不是故障
+    if (!mergeTags(db, fromId, toId)) {
+      return reply.code(400).send({ ok: false, reason: '这两个词不能合并(会成环或超出 4 层)' });
+    }
+    log.event({ level: 'info', category: 'llm', message: `标签合并:${fromId} → ${toId}` });
+    return { ok: true };
+  });
+
+  /** 改名 / 换父。两个都可选,给哪个改哪个 */
+  app.patch('/api/tags/:id', async (req, reply) => {
+    const id = Number((req.params as { id: string }).id);
+    const body = (req.body ?? {}) as { name?: string; parentId?: number | null };
+    if (!tagsExist(db, [id])) return reply.code(404).send({ ok: false, reason: '词库里没有这个标签' });
+    if (body.name !== undefined) {
+      if (!body.name.trim()) return reply.code(400).send({ ok: false, reason: '名字不能为空' });
+      renameTag(db, id, body.name);
+    }
+    if (body.parentId !== undefined) {
+      if (body.parentId !== null && !tagsExist(db, [body.parentId])) {
+        return reply.code(400).send({ ok: false, reason: '父节点不存在' });
+      }
+      // 闸在 setTagParent 里(自己挂自己 / 挂到自己的后代 / 超 4 层):
+      // false 就是"这次不合法",不是故障
+      if (!setTagParent(db, id, body.parentId)) {
+        return reply.code(400).send({ ok: false, reason: '不能挂到这个位置(会成环或超出 4 层)' });
+      }
+    }
+    return { ok: true };
+  });
+
+  app.delete('/api/tags/:id', async (req, reply) => {
+    const id = Number((req.params as { id: string }).id);
+    if (!tagsExist(db, [id])) return reply.code(404).send({ ok: false, reason: '词库里没有这个标签' });
+    deleteTag(db, id);
+    return { ok: true };
+  });
+
+  app.get('/api/tags/changes', async () => {
+    const raw = getSetting(db, CHANGES_KEY);
+    return { changes: raw ? (JSON.parse(raw) as TreeChange[]) : [] };
   });
 }

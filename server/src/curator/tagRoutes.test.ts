@@ -4,6 +4,7 @@ import { Logger } from '../logger/index.js';
 import { createServer } from '../http/index.js';
 import { upsertItem } from '../db/repo/items.js';
 import { seedLlm, setAssignment } from '../llm/config.js';
+import { itemTagIds, ensureTag, linkItemTag, listTagTree } from '../db/repo/tags.js';
 import type { BiliClient } from '../bilibili/client.js';
 
 // LLM 全 mock —— 路由测试绝不打真实 API(和 routes.test.ts 同一套:importOriginal
@@ -146,5 +147,43 @@ describe('标注路由', () => {
     expect(res.statusCode).toBe(400);
     expect(res.headers['content-type']).not.toContain('text/event-stream');
     await app.close();
+  });
+});
+
+describe('标签树路由', () => {
+  it('GET /api/tags/tree 回整棵树 + 总数', async () => {
+    const { app, db } = makeApp();
+    const food = ensureTag(db, '美食', null);
+    ensureTag(db, '烤羊肉', food);
+    const r = await app.inject({ method: 'GET', url: '/api/tags/tree' });
+    const body = r.json();
+    expect(body.total).toBe(2);
+    expect(body.tree[0].name).toBe('美食');
+    expect(body.tree[0].children[0].name).toBe('烤羊肉');
+  });
+
+  it('POST /api/tags/merge 把 from 并进 to', async () => {
+    const { app, db } = makeApp();
+    const a = ensureTag(db, '路飞', null);
+    const b = ensureTag(db, '鲁夫', null);
+    const r = await app.inject({ method: 'POST', url: '/api/tags/merge', payload: { fromId: b, toId: a } });
+    expect(r.statusCode).toBe(200);
+    expect(listTagTree(db).map((n) => n.name)).toEqual(['路飞']);
+  });
+
+  it('merge 的 fromId === toId → 400', async () => {
+    const { app, db } = makeApp();
+    const a = ensureTag(db, 'x', null);
+    const r = await app.inject({ method: 'POST', url: '/api/tags/merge', payload: { fromId: a, toId: a } });
+    expect(r.statusCode).toBe(400);
+  });
+
+  it('PATCH 改名 + 换父;DELETE 删词', async () => {
+    const { app, db } = makeApp();
+    const sport = ensureTag(db, '体育', null);
+    const camp = ensureTag(db, '露营', null);
+    expect((await app.inject({ method: 'PATCH', url: `/api/tags/${camp}`, payload: { name: '野外露营', parentId: sport } })).statusCode).toBe(200);
+    expect(listTagTree(db)[0]!.children[0]!.name).toBe('野外露营');
+    expect((await app.inject({ method: 'DELETE', url: `/api/tags/${sport}` })).statusCode).toBe(200);
   });
 });
