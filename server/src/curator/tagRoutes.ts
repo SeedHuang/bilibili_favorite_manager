@@ -82,6 +82,20 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
 
     /** 客户端还在吗 —— 断了就别再写了(连接没了,写了也是丢) */
     const closed = () => reply.raw.writableEnded || reply.raw.destroyed;
+
+    /**
+     * 日志四种帧的唯一出口(§9D.7):`phase` / `item` / `verdict` / `note`。
+     *
+     * **帧只从路由发**,tagger/tagcheck 只把"什么时候发生了什么"回调出来 —— 两个模型
+     * 的元信息(provider/model)都在这一层读,回调里再传一遍等于让下游多背一份它
+     * 不该知道的配置。守卫和别的帧同一个:连接没了,写了也是丢。
+     */
+    const frame = (event: 'phase' | 'item' | 'verdict' | 'note', data: unknown) => {
+      if (closed()) return;
+      reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+    /** note 帧的两个字段就这么两个,包一层省得每个调用点都写一遍对象字面量 */
+    const note = (level: 'info' | 'warn', text: string) => frame('note', { level, text });
     // **不能听 req.raw 的 'close'** —— Node ≥16 里它表示"请求体读完了",不是"客户端走了":
     // JSON body 会被 Fastify 在进 handler 之前消费掉,那条 close 在第一个 tick 就触发,
     // 把刚建好的 controller 直接 abort 掉 —— 每跑一条都当场自尽。断开要看**响应**:
@@ -93,12 +107,12 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
 
     /** 中断收尾:记 warn(用户改主意不是故障,§9D B5)+ 尽力回一帧(连接在就回) */
     const finishAborted = () => {
-      log.event({
-        level: 'warn',
-        category: 'llm',
-        code: 'TAGGING_ABORTED',
-        message: '用户中止了标注 —— 已完成的条目已保留',
-      });
+      const message = '用户中止了标注 —— 已完成的条目已保留';
+      log.event({ level: 'warn', category: 'llm', code: 'TAGGING_ABORTED', message });
+      // 中止也要在日志里留一行(§9D.7)。**尽力发**:中止的触发源就是客户端自己断开
+      // (见上面那段 close 的说明),所以这帧多半发不出去 —— 发得出去才有,和下面
+      // 那帧 aborted 一个待遇。真正兜住"它停了"的是界面自己那条 warn 文案(§9D B4)
+      note('warn', message);
       if (!closed()) reply.raw.write(`event: aborted\ndata: {"reason":"已中止"}\n\n`);
     };
 
@@ -117,6 +131,12 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
       );
     }
 
+    /**
+     * **打标阶段的开场**(§9D.7)。放在那帧 progress **之后** —— "第一帧必须是
+     * progress"是 §9D.6 钉死的契约(界面靠它把分母画出来),日志不该去挤那个位置。
+     */
+    frame('phase', { phase: 'tag', provider: llm.config.provider, model: llm.config.model });
+
     try {
       const r = await runTagging({
         config: llm.config,
@@ -131,6 +151,8 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
             `event: progress\ndata: ${JSON.stringify({ done: b.done, total: b.total, tagged: b.tagged })}\n\n`,
           );
         },
+        onItem: (i) => frame('item', i),
+        onNote: note,
       });
 
       // runTagging 中止时**不抛**而是带着已完成的批次原样返回 —— 这里也要认一次,
@@ -157,8 +179,13 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
           level: 'info', category: 'llm',
           message: '没配「标签质检」模型 —— 跳过质检(泛词闸门这轮没跑)',
         });
+        // **跳过质检只发 note、不发 phase 帧**:phase 是"这一阶段开跑了、用哪个模型",
+        // 而这里根本没跑 —— 发一个 phase 会让人以为跑过一遍。它也不是故障(用户
+        // 就是没配那个用途),但它是**这一轮少了半件事**,所以仍走 warn 色
+        note('warn', '没配「标签质检」模型 —— 跳过质检,这轮泛词闸门没跑');
       } else {
         try {
+          frame('phase', { phase: 'check', provider: checker.config.provider, model: checker.config.model });
           check = await runTagCheck({
             config: checker.config,
             tree: listTagTree(db),
@@ -166,13 +193,18 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
             db,
             // 质检"一个词都没判回来"要出声 —— 那个失败看起来和"什么都没变"一模一样
             log,
+            onVerdict: (v) => frame('verdict', v),
+            onNote: note,
           });
         } catch (e) {
           // 质检失败**不该**把已经标好的东西废掉 —— 下一轮还会再判一次
+          const message = (e as Error)?.message ?? String(e);
           log.event({
             level: 'warn', category: 'llm', code: 'TAGCHECK_FAILED',
-            message: (e as Error)?.message ?? String(e),
+            message,
           });
+          // 整段质检挂了比"一个词都没判回来"更重(那是调用成功但输出空),必须进日志
+          note('warn', `标签质检整段失败(${message})—— 已标好的照旧保留,下一轮会再判`);
         }
       }
 

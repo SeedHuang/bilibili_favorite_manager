@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { Alert, App as AntApp, Button, Progress, Select, Spin } from 'antd';
-import { Combine, Pencil, Check, Square, Tag, X, Trash2 } from 'lucide-react';
+import { Combine, Pencil, Check, Square, Tag, X, Trash2, ScrollText } from 'lucide-react';
 import { useRequest } from '@umijs/max';
 import { rawResult, tagApi } from '../api';
-import type { TagNode, TagProgressPayload, TagRunStatus } from '../types';
+import type { TagLogLine, TagNode, TagProgressPayload, TagRunStatus } from '../types';
 import TagTree from './TagTree';
+import TagLogDrawer from './TagLogDrawer';
 
 /**
  * 词库治理 —— 四层:顶上「AI 标注」(这一跑长出下面的一切)、「树的变化」清单、
@@ -40,6 +41,15 @@ export default function TagPanel() {
   const tagAbort = useRef<AbortController | null>(null);
   /** 中断文案里要报"已标了多少" —— finally 会把 state 清掉,所以单独留一份(照 ChatDrawer) */
   const lastTagProgress = useRef<TagProgressPayload | null>(null);
+
+  // ── 标注日志(§9D.7)──────────────────────────────────
+  // **缓冲区放在这一页,不在抽屉里**:关掉抽屉不能丢,而"关掉就没了"正是用户两次
+  // 报过的那个错("跑完了,我不知道刚才发生了什么")的另一种形态。跑完仍可读,
+  // 直到页面刷新。
+  const [logLines, setLogLines] = useState<TagLogLine[]>([]);
+  const [logOpen, setLogOpen] = useState(false);
+  /** 按钮角标要报的 warn 数 —— 失败不打开抽屉也要看得见 */
+  const logWarn = logLines.filter((l) => l.type === 'note' && l.level === 'warn').length;
 
   // **拉挂了必须出声**(和「规则」页那棵树的取法一致)。少了 onError,一次 500
   // 或后端没起来渲染出来的就是下面那句"词库还是空的。点上面的「AI 标注」"
@@ -104,6 +114,8 @@ export default function TagPanel() {
     setTagNote('');
     setTagging(true);
     setTagProgress(null);
+    // 新的一轮,日志从零开始(§9D.7)—— 上一轮的留在缓冲区里会把两轮混成一团
+    setLogLines([]);
     lastTagProgress.current = null;
     const controller = new AbortController();
     tagAbort.current = controller;
@@ -114,7 +126,12 @@ export default function TagPanel() {
           setTagProgress(p);
           lastTagProgress.current = p;
         },
-        { signal: controller.signal },
+        {
+          signal: controller.signal,
+          // 日志四种帧全进同一个缓冲区(§9D.7)。**先清空再开跑** —— 上一轮的日志
+          // 是上一轮的,留着会和这一轮混成一片分不清
+          onLog: (l) => setLogLines((ls) => [...ls, l]),
+        },
       );
       // `newWordCount` 是**质检的可见性**:质检只对本轮新词开口,所以"新增 900 个词、
       // 而「标签」页的上一轮变化是空的"就是它没干活(输出被截断是一条真路,服务端会记
@@ -351,6 +368,21 @@ export default function TagPanel() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span className="hud-label">AI 标注</span>
           <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+            {/* 日志按钮**永远可点**(§9D.7)—— 跑着能看当下,跑完能看这一轮。
+                角标带 warn 数:失败不打开抽屉也看得见。icon 只在"有内容"时才出现,
+                否则一枚空按钮加一个假数字,比"看起来没事"更绕 */}
+            <Button
+              size="small"
+              icon={<ScrollText size={13} />}
+              onClick={() => setLogOpen(true)}
+            >
+              日志
+              {logWarn > 0 && (
+                <span className="num" style={{ color: 'var(--warn)', marginLeft: 4 }}>
+                  {logWarn}
+                </span>
+              )}
+            </Button>
             <Button
               size="small"
               danger={tagging}
@@ -471,6 +503,15 @@ export default function TagPanel() {
           />
         )}
       </div>
+
+      {/* 日志抽屉(§9D.7)。**开/关由这一页管** —— 按钮在这里,抽屉自己开就跟它脱节了。
+          缓冲区和清空也在这里:`onClear` 清的是这一页手里的 state,关抽屉再开不丢 */}
+      <TagLogDrawer
+        open={logOpen}
+        onClose={() => setLogOpen(false)}
+        lines={logLines}
+        onClear={() => setLogLines([])}
+      />
     </div>
   );
 }

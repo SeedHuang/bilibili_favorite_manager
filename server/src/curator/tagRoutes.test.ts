@@ -180,6 +180,60 @@ describe('标注路由', () => {
     expect(res.headers['content-type']).not.toContain('text/event-stream');
     await app.close();
   });
+
+  // §9D.7:日志四种帧。**item 帧**是"什么视频标了什么词"的唯一来源 —— 不带标题的话
+  // 用户对着一个 BV 号根本认不出是哪条
+  it('run:每条视频标完发一帧 item,带着标题和标签', async () => {
+    const { app, db } = makeApp();
+    upsertItem(db, { id: 'BV1', type: 2, title: '在新疆野外烤羊肉' });
+    mocks.complete.mockResolvedValue(
+      JSON.stringify([{ id: 'BV1', kind: '娱乐', domains: ['美食'], tags: ['烤羊肉'] }]),
+    );
+
+    const res = await app.inject({ method: 'POST', url: '/api/tags/run' });
+    const items = sse(res.body).filter((e) => e.event === 'item');
+    expect(items).toHaveLength(1);
+    expect(items[0]!.data).toEqual({
+      id: 'BV1', title: '在新疆野外烤羊肉', kind: '娱乐', domains: ['美食'], tags: ['烤羊肉'],
+    });
+    await app.close();
+  });
+
+  // §9D.7:**verdict 帧**是"质检每个词判成了什么"的唯一来源。drop 和 keep 都要报 ——
+  // 用户问的是"每个词怎么判的",只报动手的那些是半份日志
+  it('run:质检每判一个词发一帧 verdict', async () => {
+    const { app, db } = makeApp();
+    upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
+    mocks.complete
+      // 第一次调用是打标(模型给这条标出 AI / 美食),第二次是质检 —— 两种形状的返回
+      .mockResolvedValueOnce(JSON.stringify([{ id: 'BV1', kind: '娱乐', domains: ['美食'], tags: ['AI'] }]))
+      .mockResolvedValueOnce(JSON.stringify([
+        { name: 'AI', action: 'drop' },
+        { name: '美食', action: 'keep' },
+      ]));
+
+    const res = await app.inject({ method: 'POST', url: '/api/tags/run' });
+    const verdicts = sse(res.body).filter((e) => e.event === 'verdict');
+    expect(verdicts.map((v) => v.data)).toEqual([
+      { name: 'AI', action: 'drop' },
+      { name: '美食', action: 'keep' },
+    ]);
+    await app.close();
+  });
+
+  // §9D.7:**note 帧**是失败唯一会在过程里出声的地方 —— 整批失败此前只出现在
+  // done 帧的计数里,而用户两次报的都是"它跑过了,我不知道刚才发生了什么"
+  it('run:整批失败时发一帧 warn 的 note(不能只在 done 的计数里)', async () => {
+    const { app, db } = makeApp();
+    upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
+    mocks.complete.mockRejectedValue(new Error('连接被拒'));
+
+    const res = await app.inject({ method: 'POST', url: '/api/tags/run' });
+    const notes = sse(res.body).filter((e) => e.event === 'note');
+    expect(notes.length).toBeGreaterThan(0);
+    expect(notes.some((n) => n.data.level === 'warn' && String(n.data.text).includes('没标上'))).toBe(true);
+    await app.close();
+  });
 });
 
 describe('标签树路由', () => {

@@ -18,6 +18,7 @@ import type {
   RuleView,
   SessionDetail,
   SessionSummary,
+  TagLogLine,
   TagProgressPayload,
   TagRunResult,
   TagRunStatus,
@@ -408,7 +409,11 @@ export const tagApi = {
   run: async (
     scope: 'missing' | 'all',
     onProgress: (p: TagProgressPayload) => void,
-    opts: { signal?: AbortSignal } = {},
+    opts: {
+      signal?: AbortSignal;
+      /** 日志四种帧(§9D.7)走**同一个**回调 —— 受控联合,一判 type 就整行落地 */
+      onLog?: (l: TagLogLine) => void;
+    } = {},
   ): Promise<TagRunResult> => {
     const res = await fetch(`/api/tags/run?scope=${scope}`, {
       method: 'POST',
@@ -444,6 +449,12 @@ export const tagApi = {
         else if (event === 'done') done = JSON.parse(data) as TagRunResult;
         else if (event === 'aborted') throw new DOMException('已中止', 'AbortError');
         else if (event === 'error') failure = (JSON.parse(data) as { reason?: string }).reason ?? '标注失败';
+        else if (event === 'phase' || event === 'item' || event === 'verdict' || event === 'note') {
+          // 服务端帧载荷里没有 type —— 受控联合的判别字段在这里补上(展开顺序:
+          // 先 type 后 data,data 里没有同名键,type 不会被盖掉)
+          const log = JSON.parse(data) as Record<string, unknown>;
+          opts.onLog?.({ type: event, ...log } as TagLogLine);
+        }
       }
     }
 

@@ -306,6 +306,45 @@ export interface TagProgressPayload {
   tagged: number;
 }
 
+// ── M4g 追加:标注日志(§9D.7)─────────────────────────────
+// 四种帧只在 SSE 流里活,不落库(和进度一个待遇 —— §9D 定的"进度只活在 SSE 里")。
+// 一个受控联合而不是四个接口:抽屉只关心"哪一行是什么形状",按 type 一判就能整行落地。
+
+/** phase 帧:某一阶段开跑 + 用哪个模型 */
+export interface TagLogPhase {
+  type: 'phase';
+  phase: 'tag' | 'check';
+  provider: string;
+  model: string;
+}
+
+/** item 帧:一条视频标完了,标签落库之后报 */
+export interface TagLogItem {
+  type: 'item';
+  id: string;
+  title: string;
+  kind: string;
+  domains: string[];
+  tags: string[];
+}
+
+/** verdict 帧:质检判了一个词(keep / drop / merge / move) */
+export interface TagLogVerdict {
+  type: 'verdict';
+  name: string;
+  action: 'keep' | 'drop' | 'merge' | 'move';
+  target?: string;
+}
+
+/** note 帧:过程中的一句话 —— info 是顺带说明,warn 是要看的岔子 */
+export interface TagLogNote {
+  type: 'note';
+  level: 'info' | 'warn';
+  text: string;
+}
+
+export type TagLogLine = TagLogPhase | TagLogItem | TagLogVerdict | TagLogNote;
+
 // ── M4g:标签体系(词库树)──────────────────────────────
 // 树这个形状是必须的:规则存的标签是 id(见 RuleCondition.any),而人挑的时候
 // 挑的是词名 —— 没有树就既选不了、也显示不出名字。

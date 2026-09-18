@@ -156,6 +156,21 @@ export async function runTagging(opts: {
   ctx: ModelMeta;
   items: readonly ItemRow[];
   onBatch?: (b: TagBatchProgress) => void;
+  /**
+   * 标完一条报一条(§9D.7)—— 路由拿它发 `item` 帧。
+   *
+   * **带上 title**:用户问的是"什么视频",而 `id` 认不出是哪条 —— 标题只有这里有
+   * (`ItemRow` 就在 `askOnce` 手上),出了这个函数就只剩一个 id 了。
+   */
+  onItem?: (item: { id: string; title: string; kind: string; domains: string[]; tags: string[] }) => void;
+  /**
+   * 过程中的岔子(补轮 / 整批失败)—— 路由拿它发 `note` 帧。
+   *
+   * 为什么这件事非得由这里报:**只有这里知道发生了什么**。"这一批失败了"在
+   * `failedBatches` 里看得到,但那份名单是**累积**的、而且是跑完才交出去的;
+   * 补轮更是外面连痕迹都没有 —— 一次静悄悄的重试和"模型就是慢"长得一模一样。
+   */
+  onNote?: (level: 'info' | 'warn', text: string) => void;
   signal?: AbortSignal;
   db: Database.Database;
 }): Promise<{
@@ -191,10 +206,22 @@ export async function runTagging(opts: {
     });
     // **只收本批的 id** —— 模型编别的条目无效(和归类同款纪律)
     const got = coerceTagOutput(raw, new Set(batch.map((i) => i.id)));
+    // 标题只有手上这份 ItemRow 里有 —— 日志要的是"什么视频",光一个 id 认不出来
+    const byId = new Map(batch.map((i) => [i.id, i]));
     const out = new Set<string>();
     for (const o of got) {
       const applied = applyTagOutput(opts.db, o);
       for (const n of applied.created) newWords.add(n);
+      // **落库之后**才报(§9D.7):先报后落的话,一条落库炸了会留下一行
+      // "它标上了"而库里没有 —— 日志存在的意义正是"发生了什么",不是"打算做什么"
+      opts.onItem?.({
+        id: o.id,
+        title: byId.get(o.id)?.title ?? o.id,
+        // kind 照**落库的口径**报:越界的在 applyTagOutput 里也按「其它」记
+        kind: o.kind || '其它',
+        domains: o.domains,
+        tags: o.tags,
+      });
       out.add(o.id);
     }
     return out;
@@ -214,6 +241,10 @@ export async function runTagging(opts: {
     // **逐条覆盖断言(C4)**:实测模型会漏条 —— 缺的单独补,最多 2 轮
     for (let round = 0; round < 3 && pending.size > 0; round++) {
       if (opts.signal?.aborted) break; // §9D B2:补轮也是一次新调用,同样先看信号
+      // 补轮要出声(§9D.7):模型漏条是**常态**(C4 就是为它写的),而它此前在界面上
+      // 完全不可见 —— 用户只看到那一批慢了一截。warn 而不是 info:它是一次重试,
+      // 用户要看的是"哪里出了岔子",颜色就是分类本身
+      if (round > 0) opts.onNote?.('warn', `模型漏了 ${pending.size} 条 —— 正在补第 ${round} 轮`);
       try {
         const got = await askOnce([...pending.values()]);
         for (const id of got) pending.delete(id);
@@ -224,7 +255,11 @@ export async function runTagging(opts: {
         }
       } catch (e) {
         if (opts.signal?.aborted) break; // 中止不记失败(§9D B5)
-        failedBatches.push({ firstItemId: [...pending.keys()][0]!, size: pending.size, reason: `请求失败:${(e as Error)?.message ?? e}` });
+        const why = `请求失败:${(e as Error)?.message ?? e}`;
+        failedBatches.push({ firstItemId: [...pending.keys()][0]!, size: pending.size, reason: why });
+        // 整批失败必须**当场**进日志(§9D.7):它此前只出现在 done 帧的计数里,
+        // 而用户两次报的都是同一件事 —— "它跑过了,我不知道刚才发生了什么"
+        opts.onNote?.('warn', `这批 ${pending.size} 条没标上(${why})`);
         pending.clear();
         break;
       }
@@ -233,6 +268,9 @@ export async function runTagging(opts: {
     // 不记失败(§9D B5);只有真标不上的才进这笔账
     if (pending.size > 0 && !opts.signal?.aborted) {
       failedBatches.push({ firstItemId: [...pending.keys()][0]!, size: pending.size, reason: '模型两轮补标后仍未覆盖这些条目' });
+      // 这一笔**只有跑完补轮才知道**,onBatch 早就不会再来了 —— 路由靠 onBatch 的
+      // 差额根本看不见它(那是它漏报的唯一一种失败)
+      opts.onNote?.('warn', `这 ${pending.size} 条补了两轮还是没标上,本轮放弃(下次增量会再试)`);
     }
   }
 
