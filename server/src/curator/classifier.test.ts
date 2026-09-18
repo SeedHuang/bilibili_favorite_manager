@@ -15,6 +15,7 @@ const {
   coerceAssignments,
   buildPass1Prompt,
   buildPass2Prompt,
+  renderItem,
   runPass1,
   runPass2,
   classifyAll,
@@ -357,36 +358,36 @@ describe('buildPass2Prompt · 规则与样本', () => {
   });
 });
 
-// ── §9E C5/C6 归类吃标签 ────────────────────────────────
-describe('buildPass2Prompt · AI 标注', () => {
-  // spec §9E C5:标注作为补充信号进入归类 prompt —— 有才写,没有不占行
-  it('带 AI 标注的条目在 prompt 里多一行 AI标签', () => {
-    const tagged = item('BV1', 'AI 动画教程', {
-      ai_tags: '{"tags":["Stable Diffusion","AI动画"],"kind":"教学"}',
-    });
-    const p = buildPass2Prompt({ folders: [folder('42', 'AI/动画')], items: [tagged] });
-    expect(p).toContain('AI标签:Stable Diffusion·AI动画 [教学]');
+// ── §9F C5/C7 归类看得到树标签 ──────────────────────────
+describe('renderItem · 标签与 kind', () => {
+  // spec §9F C5:标签作为补充信号进入归类 prompt —— 有才写,没有不占行。
+  // §9F 起标签是**树标签**(叶名),kind 仍是那个独立正交轴(C7)
+  it('有标签有 kind → 一行「标签:词·词 [kind]」', () => {
+    const p = renderItem(item('BV1', 'AI 动画教程'), 120, ['Stable Diffusion', 'AI动画'], '教学');
+    expect(p).toContain('标签:Stable Diffusion·AI动画 [教学]');
   });
 
-  it('没有标注的条目不留空行(和今天完全一样)', () => {
-    const untagged = item('BV2', '普通条目');
-    const p = buildPass2Prompt({ folders: [folder('42', 'AI/动画')], items: [untagged] });
-    expect(p).not.toContain('AI标签');
+  it('没有标签的条目不留空行(和今天完全一样)', () => {
+    expect(renderItem(item('BV2', '普通条目'))).not.toContain('标签');
   });
 
-  // kind 被标注引擎兜底成 '其它' —— 只看 kind 非空的话,这条会渲染出一行
-  // 光秃秃的「AI标签:」,违背 C5「有才写,没有不占行」
+  // kind 为「其它」跟"没有 kind"是一个意思 —— 只看 kind 非空的话,这条会渲染出
+  // 一行光秃秃的「标签:」,违背 C5「有才写,没有不占行」
   it('只有兜底的 kind「其它」、没有标签 → 整行不写', () => {
-    const bare = item('BV3', '无标注条目', { ai_tags: '{"tags":[],"kind":"其它"}' });
-    const p = buildPass2Prompt({ folders: [folder('42', 'AI/动画')], items: [bare] });
-    expect(p).not.toContain('AI标签');
+    expect(renderItem(item('BV3', '无标注条目'), 120, [], '其它')).not.toContain('标签');
   });
 
   it('有标签但 kind 是「其它」→ 写标签行,不写 kind 后缀', () => {
-    const t = item('BV4', '条目', { ai_tags: '{"tags":["随手拍"],"kind":"其它"}' });
-    const p = buildPass2Prompt({ folders: [folder('42', 'AI/动画')], items: [t] });
-    expect(p).toContain('AI标签:随手拍');
-    expect(p).not.toContain('AI标签:随手拍 [');
+    const p = renderItem(item('BV4', '条目'), 120, ['随手拍'], '其它');
+    expect(p).toContain('标签:随手拍');
+    expect(p).not.toContain('标签:随手拍 [');
+  });
+
+  // 「其它」和不写 kind 是同一种排版 —— 顺手钉住 kind 为 null(还没标上)那条
+  it('有标签但 kind 为 null → 写标签行,不写 kind 后缀', () => {
+    const p = renderItem(item('BV7', '条目'), 120, ['随手拍'], null);
+    expect(p).toContain('标签:随手拍');
+    expect(p).not.toContain('标签:随手拍 [');
   });
 
   // spec §9E C6:标签是参考,原始数据是事实 —— 提示词是这条链的防线,钉住这句
@@ -402,13 +403,12 @@ describe('buildPass2Prompt · AI 标注', () => {
     expect(PASS1_SYSTEM).toContain('原始');
   });
 
-  // {tags:[], kind:'教学'} 渲染成「AI标签: [教学]」—— 那个空格前面什么都没有。
-  // 正常格式(`AI标签:tag1·tag2 [kind]`)一个字都不动,只在缺标签时不留分隔符
+  // 有 kind 没标签渲染成「标签: [教学]」—— 那个空格前面什么都没有。
+  // 正常格式(`标签:tag1·tag2 [kind]`)一个字都不动,只在缺标签时不留分隔符
   it('有 kind 没标签 → 不留那个空出来的空格', () => {
-    const t = item('BV5', '条目', { ai_tags: '{"tags":[],"kind":"教学"}' });
-    const p = buildPass2Prompt({ folders: [folder('42', 'AI/动画')], items: [t] });
-    expect(p).toContain('AI标签:[教学]');
-    expect(p).not.toContain('AI标签: [教学]');
+    const p = renderItem(item('BV5', '条目'), 120, [], '教学');
+    expect(p).toContain('标签:[教学]');
+    expect(p).not.toContain('标签: [教学]');
   });
 });
 

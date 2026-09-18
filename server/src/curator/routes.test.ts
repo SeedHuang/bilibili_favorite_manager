@@ -8,7 +8,8 @@ import { upsertItem, linkFolderItem } from '../db/repo/items.js';
 import { getLatestDraft, getMessages, getSession } from '../db/repo/sessions.js';
 import { seedLlm, saveProvider, listProviders, listEntries, addEntry, setAssignment, readLlmSettings } from '../llm/config.js';
 import { saveClassification, getClassification } from '../db/repo/classifications.js';
-import { setItemTagging } from '../db/repo/tagging.js';
+import { markItemTagged } from '../db/repo/tagging.js';
+import { ensureTag, linkItemTag } from '../db/repo/tags.js';
 import { saveRule } from '../db/repo/rules.js';
 import { setState, stateKey } from '../db/repo/state.js';
 import { logOperation } from '../db/repo/operations.js';
@@ -373,15 +374,20 @@ describe('Pass 2', () => {
     await app.close();
   });
 
-  // I1:§9E C5 的**头号行为** —— 标注真的作为补充信号走进归类 prompt。
-  // 这条钉的是 routes.ts:352 的 `SELECT * FROM items` → renderItem 那一路:
-  // 改成窄投影(不选 ai_tags)会让整个功能静默消失,而其余测试全绿。
+  // I1:§9F C5 的**头号行为** —— 标注真的作为补充信号走进归类 prompt。
+  // 这条钉的是 routes.ts 的 `tagInfoByItem(db)` → renderItem 那一路:
+  // 漏了传 tagInfo 会让整个功能静默消失,而其余测试全绿。
   // 所以断言必须落在**模型真的收到的那条 user 消息**上,不是 renderItem 的单元测试。
   it('run-pass-2:标注进了模型收到的 prompt(C5)', async () => {
     const { app, db } = makeApp();
     const sid = await newSession(app);
     const work = await seedWorkcopy(app);
-    setItemTagging(db, 'BV1', { tags: ['Stable Diffusion', 'AI动画'], kind: '教学' });
+    // 标注现在落在真表上:两个词挂到 BV1 + 形态写 ai_kind(§9F)
+    const sd = ensureTag(db, 'Stable Diffusion', null);
+    const anim = ensureTag(db, 'AI动画', null);
+    linkItemTag(db, 'BV1', sd, 'ai');
+    linkItemTag(db, 'BV1', anim, 'ai');
+    markItemTagged(db, 'BV1', '教学');
     mocks.complete.mockResolvedValue(
       `[{"itemId":"BV1","folderTempId":"${work}","confidence":0.9,"reason":"是教程"}]`,
     );
@@ -393,7 +399,8 @@ describe('Pass 2', () => {
       .map((c) => (c[0] as { messages: { content: string }[] }).messages.map((m) => m.content).join('\n'))
       .find((p) => p.includes('## 收藏夹体系'));
     expect(prompt).toBeDefined();
-    expect(prompt).toContain('AI标签:Stable Diffusion·AI动画 [教学]');
+    // 显示名按 `tagInfoByItem` 的 `ORDER BY t.name` 排:'AI动画' 在 'Stable Diffusion' 前
+    expect(prompt).toContain('标签:AI动画·Stable Diffusion [教学]');
     await app.close();
   });
 

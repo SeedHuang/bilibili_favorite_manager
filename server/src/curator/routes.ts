@@ -26,6 +26,7 @@ import {
 import { listFolders, isLockedFolder } from '../db/repo/folders.js';
 import { listRules } from '../db/repo/rules.js';
 import { getItem, type ItemRow } from '../db/repo/items.js';
+import { tagInfoByItem } from '../db/repo/tags.js';
 // 条目出口形状与 /api/folders/:id/items 共用同一份 —— 前端用同一套渲染,
 // 分两份写迟早会分叉
 import { shapeItem } from '../http/routes/items.js';
@@ -257,10 +258,13 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
     }
 
     try {
+      // §9F:标签和 kind 一次取齐 —— 一批几百条,别在 renderItem 里逐条查(那就是 N+1)
+      const tagInfo = tagInfoByItem(db);
       const result = await runPass1({
         config: llm.config,
         existingFolders: existingFolders(db),
         items,
+        tagInfo,
         ...(constraint?.trim() ? { userConstraint: constraint.trim() } : {}),
       });
 
@@ -423,6 +427,8 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
 
       // ── ② 剩下的才给 AI ─────────────────────────────────
       const collected: Assignment[] = [];
+      // §9F:标签和 kind 一次取齐 —— 一批几百条,别在 renderItem 里逐条查(那就是 N+1)
+      const tagInfo = tagInfoByItem(db);
       const result = rest.length
         ? await runPass2({
             config: llm.config,
@@ -430,6 +436,7 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
             folders,
             items: rest,
             samples,
+            tagInfo,
             signal: controller.signal,
             onBatch: (b) => {
               collected.push(...b.assignments);

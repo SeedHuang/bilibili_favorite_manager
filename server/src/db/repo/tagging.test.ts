@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { openDb } from '../index.js';
 import { upsertItem } from './items.js';
-import { getItemTagging, setItemTagging, listUntaggedItemIds, tagStats } from './tagging.js';
+import { markItemTagged, listUntaggedItemIds, tagStats } from './tagging.js';
 
 const seed = () => {
   const db = openDb(':memory:');
@@ -9,44 +9,44 @@ const seed = () => {
   return db;
 };
 
-describe('ai_tags 专用写库(C8:同步不碰这三列,这里是唯一写手)', () => {
-  it('没标过 → null;写了能读回', () => {
-    const db = seed();
-    expect(getItemTagging(db, 'BV1')).toBeNull();
+/** 两个 AI 派生列 —— C8 红线两侧都拿它比"一个字节都没动" */
+const aiCols = (db: ReturnType<typeof seed>, id: string) =>
+  db.prepare(`SELECT ai_kind, ai_checked_at FROM items WHERE id = ?`).get(id) as {
+    ai_kind: string | null;
+    ai_checked_at: number | null;
+  };
 
-    setItemTagging(db, 'BV1', { tags: ['教学', 'Python'], kind: '教学' });
-    expect(getItemTagging(db, 'BV1')).toEqual({ tags: ['教学', 'Python'], kind: '教学' });
+describe('AI 派生列的落库口(C8:同步不碰这两列,这里是唯一写手)', () => {
+  it('markItemTagged 同时写形态与水位线', () => {
+    const db = seed();
+    expect(tagStats(db)).toEqual({ tagged: 0, total: 3 });
+
+    markItemTagged(db, 'BV1', '教学');
+    const row = aiCols(db, 'BV1');
+    expect(row.ai_kind).toBe('教学');
+    expect(row.ai_checked_at).not.toBeNull(); // 增量标注的唯一依据
   });
 
-  // ★ C8 红线:upsertItem(同步路径)写条目时**不得**碰 ai_tags。
+  // ★ C8 红线:upsertItem(同步路径)写条目时**不得**碰 ai_kind / ai_checked_at。
   //   光删掉 upsertItem 里那句不存在的写入测不出什么 —— 这条测的是:
-  //   同步重写同一条目后,标注还在(C8 的全部意义)
+  //   同步重写同一条目后,标注(含水位线)一个字节都没变(C8 的全部意义)
   it('同步重写同一条目(upsertItem)→ 标注不被洗掉', () => {
     const db = seed();
-    setItemTagging(db, 'BV1', { tags: ['教学'], kind: '教学' });
+    markItemTagged(db, 'BV1', '教学');
+    const before = aiCols(db, 'BV1');
+    expect(before.ai_kind).toBe('教学');
+    expect(before.ai_checked_at).not.toBeNull();
 
     upsertItem(db, { id: 'BV1', type: 2, title: '改名后的标题' }); // 模拟重同步
-    expect(getItemTagging(db, 'BV1')).toEqual({ tags: ['教学'], kind: '教学' });
+    expect(aiCols(db, 'BV1')).toEqual(before);
   });
 
-  it('null = 清除标注(ai_checked_at 也清)', () => {
+  // 水位线是增量的唯一依据:没写它的那些条目还在池子里,写了的不再出现
+  it('listUntaggedItemIds 只回没标注的;tagStats 数得对', () => {
     const db = seed();
-    setItemTagging(db, 'BV1', { tags: ['教学'], kind: '教学' });
-    setItemTagging(db, 'BV1', null);
-    expect(getItemTagging(db, 'BV1')).toBeNull();
-  });
-
-  it('listUntaggedItemIds 只回没标注的;listStats 数得对', () => {
-    const db = seed();
-    setItemTagging(db, 'BV2', { tags: ['娱乐'], kind: '娱乐' });
+    markItemTagged(db, 'BV2', '娱乐');
 
     expect(listUntaggedItemIds(db)).toEqual(['BV1', 'BV3']);
     expect(tagStats(db)).toEqual({ tagged: 1, total: 3 });
-  });
-
-  it('存的 JSON 坏了 → 当作没标注(返回 null),不炸', () => {
-    const db = seed();
-    db.prepare(`UPDATE items SET ai_tags = '不是JSON' WHERE id = 'BV1'`).run();
-    expect(getItemTagging(db, 'BV1')).toBeNull();
   });
 });

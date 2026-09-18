@@ -79,8 +79,9 @@ describe('标注路由', () => {
     mocks.complete.mockResolvedValue(JSON.stringify([{ id: 'BV1', tags: ['娱乐'], kind: '娱乐' }]));
     const res = await app.inject({ method: 'POST', url: '/api/tags/run?scope=all' });
     expect(sse(res.body).find((e) => e.event === 'done')!.data.tagged).toBe(1);
-    const row = db.prepare(`SELECT ai_tags FROM items WHERE id='BV1'`).get() as { ai_tags: string };
-    expect(JSON.parse(row.ai_tags).kind).toBe('娱乐');
+    // 形态是**覆盖写**的(不像 item_tags 是累加)—— 重标后 kind 变成第二次的『娱乐』
+    const row = db.prepare(`SELECT ai_kind FROM items WHERE id='BV1'`).get() as { ai_kind: string };
+    expect(row.ai_kind).toBe('娱乐');
     await app.close();
   });
 
@@ -120,7 +121,8 @@ describe('标注路由', () => {
       .inject({ method: 'POST', url: '/api/tags/run', signal: controller.signal })
       .catch(() => undefined);
 
-    const tagged = (db.prepare(`SELECT COUNT(*) AS n FROM items WHERE ai_tags IS NOT NULL`).get() as { n: number }).n;
+    // 标上了 = 水位线落了(§9F:ai_checked_at 是"标过"的唯一依据)
+    const tagged = (db.prepare(`SELECT COUNT(*) AS n FROM items WHERE ai_checked_at IS NOT NULL`).get() as { n: number }).n;
     expect(tagged).toBeGreaterThan(0); // 已完成的批次保留
     expect(tagged).toBeLessThan(40); // 没跑的批次没被补成"结果"
     // 中止真的让后面**一次调用都没再发**:40 条 / 批上限 32 = 2 批,第 2 批撞上中止

@@ -384,3 +384,37 @@ export function wouldExceedDepth(
   // 少了这一格,封顶就会漏成 5 层 —— spec C2/C6 写的是 ≤ 4
   return depthOf(db, parentId) + heightOf(id) > MAX_TAG_DEPTH;
 }
+
+/**
+ * itemId → { 标签显示名, 形态 }。**一次查完** —— 归类一批几百条,别在渲染里逐条查。
+ *
+ * 两样一起回:它们同源(都是 `items` 上的 AI 派生列)、同一批消费者
+ * (renderItem / 详情栏),分两个函数就是两次全表扫。
+ */
+export function tagInfoByItem(
+  db: Database.Database,
+): Map<string, { names: string[]; kind: string | null }> {
+  const out = new Map<string, { names: string[]; kind: string | null }>();
+  const get = (id: string) => {
+    const cur = out.get(id);
+    if (cur) return cur;
+    const fresh = { names: [] as string[], kind: null as string | null };
+    out.set(id, fresh);
+    return fresh;
+  };
+
+  const rows = db
+    .prepare(
+      `SELECT it.item_id, t.name FROM item_tags it JOIN tags t ON t.id = it.tag_id
+        ORDER BY it.item_id, t.name`,
+    )
+    .all() as { item_id: string; name: string }[];
+  for (const r of rows) get(r.item_id).names.push(r.name);
+
+  const kinds = db
+    .prepare(`SELECT id, ai_kind FROM items WHERE ai_kind IS NOT NULL`)
+    .all() as { id: string; ai_kind: string }[];
+  for (const r of kinds) get(r.id).kind = r.ai_kind;
+
+  return out;
+}
