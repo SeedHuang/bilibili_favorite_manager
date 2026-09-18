@@ -81,3 +81,69 @@ export function saveRule(
 export function deleteRule(db: Database.Database, folderId: number): void {
   db.prepare(`DELETE FROM work_folder_rules WHERE folder_id = ?`).run(folderId);
 }
+
+/**
+ * 把规则里引用的 tag id 重写一遍(spec §9F C16)。
+ *
+ * 规则存的是 tag id(落地细节 3,理由正当:改名不该改语义),而词库每轮都在
+ * 合并、偶尔删除 —— 那都是**删节点**。不重写的话:规则的 tag 条件永远匹配不上
+ * (`subtreeSets` 里没有那个 id 了),而 `renderConditions` 也翻不到名字、渲染成空串。
+ * 用户看到的是"规则还在,就是不生效"。规则是这产品唯一比 B站 多的东西(§9C),
+ * 这是整条链路上唯一会**静默吃掉它**的地方。
+ *
+ * `map` 返回 null = 那个 id 没了(节点被删)→ 从条件里去掉;某条 tag 条件被掏空
+ * 就整条丢掉(留一条"任何都不含"的空条件匹配不到任何东西,只是噪音)。
+ *
+ * **调用方必须在同一个事务里** —— 它是 `mergeTags` / `deleteTag` 的一部分,
+ * 而且要在**删节点之前**跑:反过来的话任何一步失败,规则里就留下一串死 id。
+ */
+export function rewriteRuleTagIds(
+  db: Database.Database,
+  map: (tagId: number) => number | null,
+): void {
+  const rows = db
+    .prepare(`SELECT folder_id, conditions_json FROM work_folder_rules`)
+    .all() as { folder_id: number; conditions_json: string }[];
+  const upd = db.prepare(
+    `UPDATE work_folder_rules SET conditions_json = ?, updated_at = ? WHERE folder_id = ?`,
+  );
+
+  for (const r of rows) {
+    // 坏 JSON 直接跳过 —— 静默当成"没有规则"会让归类悄悄少一层依据
+    // (和 `shape()` 里那条"坏 JSON 直接抛"同一条纪律:别猜)
+    let conds: RuleCondition[];
+    try {
+      conds = JSON.parse(r.conditions_json) as RuleCondition[];
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(conds)) continue;
+
+    let touched = false;
+    const next: RuleCondition[] = [];
+    for (const c of conds) {
+      // 比字符串而不是比联合类型:`RuleField` 要到 Task 6 才加 'tag'
+      // (那一步会把这里的 cast 去掉),而库里此刻就可能已经存在 tag 条件
+      if ((c.field as string) !== 'tag') {
+        next.push(c);
+        continue;
+      }
+      const ids: number[] = [];
+      for (const raw of c.any) {
+        const n = Number(raw);
+        if (!Number.isInteger(n)) continue; // 编不出数字的写法原样丢掉
+        const to = map(n);
+        if (to !== null && !ids.includes(to)) ids.push(to);
+      }
+      if (ids.length === 0) {
+        touched = true; // 这条条件被掏空了 → 整条丢掉
+        continue;
+      }
+      const shaped = ids.map(String);
+      if (shaped.join(',') !== c.any.join(',')) touched = true;
+      next.push({ ...c, any: shaped });
+    }
+
+    if (touched) upd.run(JSON.stringify(next), Date.now(), r.folder_id);
+  }
+}

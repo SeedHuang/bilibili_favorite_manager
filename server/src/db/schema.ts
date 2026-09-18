@@ -191,4 +191,40 @@ CREATE TABLE IF NOT EXISTS work_folder_rules (
   origin          TEXT NOT NULL,
   updated_at      INTEGER NOT NULL
 );
+
+-- ── §9F 词库树(2026-09-18)──────────────────────────────
+-- 取代 items.ai_tags 那一列(它从此不读不写)。为什么是关联表而不是一列 JSON:
+-- 「合并两个词」要能一次改掉所有挂它的视频 —— 字符串数组做不到这件事。
+--
+-- **name 是显示、norm 是身份**。分开的理由:英文名要被小写化才拦得住
+-- "NBA"/"nba" 重复,但界面上不该显示成小写。
+CREATE TABLE IF NOT EXISTS tags (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL,
+  norm       TEXT NOT NULL,
+  parent_id  INTEGER REFERENCES tags(id),
+  created_at INTEGER NOT NULL
+);
+-- **norm 全局唯一**(C4):一个名字在整棵树里只有一处。
+-- 父**不**参与唯一性 —— 允许"不同父下同名"会造出两个 \`篮球\`、两个 \`露营\`,
+-- 那正是用户要避免的重复("相同的 tag 不要重复建立")。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_norm ON tags(norm);
+CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_id);
+
+-- 见过的写法 → 它现在归哪个节点。装的是**不再是任何节点规范名**的那些写法:
+-- 合并掉的旧名、改名前的旧名、大小写/简繁变体。
+-- 查词 = 先查 tags.norm,再查这张表(findTag 一份逻辑)。
+CREATE TABLE IF NOT EXISTS tag_aliases (
+  name   TEXT PRIMARY KEY,        -- 归一化后的写法
+  tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE
+);
+
+-- 视频 ↔ 词。source 区分谁挂的:'ai' 标注 / 'rule' 规则 / 'user' 手动
+CREATE TABLE IF NOT EXISTS item_tags (
+  item_id TEXT NOT NULL REFERENCES items(id),
+  tag_id  INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  source  TEXT NOT NULL,
+  PRIMARY KEY (item_id, tag_id)
+);
+CREATE INDEX IF NOT EXISTS idx_item_tags_tag ON item_tags(tag_id);
 `;
