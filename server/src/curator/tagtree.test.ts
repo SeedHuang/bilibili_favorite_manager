@@ -116,4 +116,29 @@ describe('reconcile', () => {
     expect(listTagTree(db).map((n) => [n.name, n.children.map((c) => c.name)]))
       .toEqual([['甲', ['丙']]]);
   });
+
+  it('同轮被跳过的同义词不被挂父嵌套 —— 下一轮自愈', () => {
+    const db = openDb(':memory:');
+    const jia = ensureTag(db, '甲', null);
+    const yi = ensureTag(db, '乙', null);
+    const bing = ensureTag(db, '丙', null);
+    seed(db, 10, [jia, yi, bing]);   // 三个都在根上,挂完全同一批视频
+
+    // ① 第一轮:乙 并进 甲。剩下的 (甲,丙) 因为 `gone` 被跳过(甲 刚并进过东西,
+    //    `cov` 已过期)。它们**双向 100%** —— 判据的结论是"合并",所以挂父段
+    //    不该把它们嵌套起来:一旦成了父子,`isDescendant` 会把这一对**永久**
+    //    排除在合并之外,两个同义词就永远并不到一起了。
+    const first = reconcile(db);
+    expect(first.map((c) => c.kind)).toEqual(['merge']);
+    for (const id of [jia, bing]) {
+      expect(db.prepare(`SELECT parent_id FROM tags WHERE id = ?`).get(id)).toEqual({ parent_id: null });
+    }
+    expect(db.prepare(`SELECT COUNT(*) n FROM tags`).get()).toEqual({ n: 2 });
+
+    // ② 第二轮:数据刷新,(甲,丙) 正常合并 → 收敛成一个。
+    //    **这条才是重点** —— 它区分"自愈"和"永久嵌套成 丙>甲"。
+    const second = reconcile(db);
+    expect(second.map((c) => c.kind)).toEqual(['merge']);
+    expect(db.prepare(`SELECT name FROM tags`).all()).toEqual([{ name: '甲' }]);
+  });
 });

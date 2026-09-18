@@ -157,6 +157,14 @@ export function reconcile(
     // 只看 `k(a,b)` 的话,谁先建谁就永远是"父",挂父整天不触发
     const fwd = cov.get(k(a, b)) ?? 0;
     const back = cov.get(k(b, a)) ?? 0;
+
+    // **双向都 ≥cover 的一对不挂父** —— 它在判据里的结论是"合并",不是"谁是谁
+    // 的子";挂父是**单向**规则的落点,一个双向合规的对不归它管。少了这一句,
+    // 上一段因为 `gone` 跳过的那对同义词会在这里被**嵌套**起来 —— 而父子关系
+    // 会把它们永久排除在合并之外(`isDescendant` 拦住),两个同义词就此永久并存,
+    // 正是 §9F C4 要避开的失败。留着不动,下一轮(每轮都跑,数据已刷新)自会合并掉。
+    if (fwd >= cover && back >= cover) continue;
+
     const child = fwd >= cover ? a : back >= cover ? b : null;
     if (child === null) continue;
     const parent = child === a ? b : a;
