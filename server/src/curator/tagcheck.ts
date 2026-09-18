@@ -2,7 +2,12 @@
  * 标签质检(spec §9F C8)—— flash 在这一整条链路里**唯一**的出场点。
  *
  * 分界线:本地模型做生产,flash 只当质检员,而且**只对新的东西开口**。
- * 首轮 500-1500 个新词 ≈ 十几次调用;之后每轮只剩几十个 ≈ 一次。几轮之后趋近于零。
+ * 每轮**一次调用** —— 本轮所有新词进同一个 prompt。之后每轮新词趋近于零,开销也趋近于零,
+ * 所以挂在每轮末尾是划算的。
+ *
+ * ⚠️ 首轮可能有 500-1500 个新词挤进**同一个** prompt(§9F.4 那张成本表估的
+ * "10-30 次"是按分批算的,不是规范条款)。**这个规模问题挂着未决**:要不要切批是
+ * 设计取舍,不是本函数的实现细节 —— 别拿估算当规范,也别在这儿偷偷开第二套调用结构。
  *
  * 它回答三件事(§9F C8):① 这个词是不是太泛、根本不该进词库 ② 它是不是
  * 已经存在的东西的另一种写法 ③ 它该不该换个位置。
@@ -17,7 +22,7 @@ import { complete } from '../llm/provider.js';
 import { parseJsonArray } from './parse.js';
 import type { ChatMessage } from '../llm/context.js';
 import {
-  mergeTags, normalizeTagName, setTagParent, deleteTag, type TagNode,
+  findTag, mergeTags, normalizeTagName, setTagParent, deleteTag, type TagNode,
 } from '../db/repo/tags.js';
 
 export const CHECK_SYSTEM = `你是标签词库的质检员。用户给你一棵标签树和一批**新出现的词**,判断每个词该怎么办。
@@ -112,40 +117,41 @@ export async function runTagCheck(opts: {
 
   let dropped = 0, merged = 0, moved = 0;
   for (const v of verdicts) {
-    const id = byName(db, v.name);
-    if (id === null) continue;
-
     if (v.action === 'drop') {
+      // **drop 只认规范名**(`tags.norm`),不查别名表。
+      //
+      // 别名说明这个名字是某个**活词的另一种写法**(合并留下的旧名、改名前的旧名),
+      // 所以"要删的词"跟"这个词"根本不是一个东西。走 `findTag` 会顺着别名把 id 解到
+      // 那具活词上,一句 drop 就把无辜的词连同它的 `item_tags` 删了 —— 而这是本文件里
+      // **唯一不可逆**的动作。判错的两个方向也不对称:漏一个泛词只是树脏一点,误删一个
+      // 好词是丢掉信息(所以系统提示词写着"拿不准就 keep")。别名 → 直接跳过。
+      const row = db.prepare(`SELECT id FROM tags WHERE norm = ?`).get(normalizeTagName(v.name)) as
+        | { id: number }
+        | undefined;
+      if (!row) continue;
       // **泛词从词库里删掉,不是"留原地"** —— 它没有任何区分力,留着只会被
       // 集合判据推到树顶(§9F.6 说的那个软肋)。这是整套系统里唯一的防线
-      deleteTag(db, id);
+      deleteTag(db, row.id);
       dropped++;
       continue;
     }
+
+    // merge / move 相反:它们**要的就是"任何写法都认"**(模型认名字不认 id),
+    // 所以走 findTag —— 查规范名,再查别名表
+    const id = findTag(db, normalizeTagName(v.name));
+    if (id === null) continue;
+
     if (v.action === 'merge' && v.target) {
-      const targetId = byName(db, v.target);
+      const targetId = findTag(db, normalizeTagName(v.target));
       // 闸在 mergeTags 里(防环 + 深度):false = 这两个词不能并 —— 跳过,不是抛错
       if (targetId !== null && targetId !== id && mergeTags(db, id, targetId)) merged++;
       continue;
     }
     if (v.action === 'move' && v.target) {
-      const parentId = byName(db, v.target);
+      const parentId = findTag(db, normalizeTagName(v.target));
       // 闸在 setTagParent 里(唯一收口):false = 这次挂父不合法 → 留原位
       if (parentId !== null && setTagParent(db, id, parentId)) moved++;
     }
   }
   return { dropped, merged, moved };
-}
-
-/** 按名字(含别名)找节点。质检的输出用名字而不是 id —— 模型认名字 */
-function byName(db: Database.Database, name: string): number | null {
-  const row = db
-    .prepare(
-      `SELECT id FROM tags WHERE norm = ?
-        UNION ALL
-       SELECT tag_id AS id FROM tag_aliases WHERE name = ?
-        LIMIT 1`,
-    )
-    .get(normalizeTagName(name), normalizeTagName(name)) as { id: number } | undefined;
-  return row ? row.id : null;
 }
