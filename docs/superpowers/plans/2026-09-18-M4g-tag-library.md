@@ -23,9 +23,11 @@
 
 ## 对 spec 的落地细节(不改设计,只定实现)
 
-1. **`tags` 表多一列 `norm`**。spec §9F.2 的 DDL 是 `UNIQUE(parent_id, name)`,但 `name` 要留作**显示**(否则 `NBA` 会被迫存成 `nba`)。拆成:`name` 存首次见到的写法、`norm` 存归一化结果,唯一索引建在 `(COALESCE(parent_id,0), norm)` 上。**`COALESCE` 不能省** —— SQLite 里 NULL 互不相等,裸 `UNIQUE(parent_id, norm)` 拦不住两个同名根。
+1. **`tags` 表多一列 `norm`**。spec 的 DDL 原本只写了 `name`,但 `name` 要留作**显示**(否则 `NBA` 会被迫存成 `nba`)。拆成:`name` 存首次见到的写法、`norm` 存归一化结果,**`norm` 全局唯一**(C4 一个名字全树只有一处)。
+   ~~唯一索引建在 `(COALESCE(parent_id,0), norm)` 上~~ —— 那是"作用域唯一"那版的做法,已废弃(见 C4 的理由栏)。
 2. **`items.ai_kind` 走 `ALTER TABLE`**。schema.ts 开头写着"等真的需要改列时再引入 user_version 迁移";这里用一个九行的 `ensureColumn`(查 `PRAGMA table_info` → 没有才 ALTER)顶上,幂等且不引入迁移框架。三张新表仍走 `CREATE TABLE IF NOT EXISTS`。
 3. **规则里的 tag 条件存 id 不存名字**。`RuleCondition.any` 是 `string[]`,所以 tag 条件写作 `{field:'tag', any:['42','57']}` —— 存名字的话,改一次词名就悄悄改掉了规则语义。
+   **代价是 id 会随合并/删除失效,所以 `mergeTags`/`deleteTag` 必须重写规则里的 id**(C16)。这是这条改动的**配套义务**,不做就等于给自己挖了个静默失效的坑。
 4. **不做迁移**。`items.ai_tags` 里的旧扁平标签不灌进新树(§9F C1),旧库从零跑一轮。旧列留着不读不写,不 DROP。
 5. **`ContextPane` 是显示"这条视频的标签"的落点** —— 它已经在渲染 UP/时长/收藏时间/状态。
 6. **标签树的 UI 抄 `WorkFolderTree.tsx` 手写,不用 antd `Tree`** —— 仓库零使用,样式会打架(已回写进 spec C12)。
@@ -183,7 +185,9 @@ Run: `cd server && npm test`
 Expected: PASS
 
 ```bash
-git add server/src/llm/provider.ts server/src/llm/provider.test.ts server/src/curator/tagger.ts server/src/curator/classifier.ts server/src/curator/chat.ts
+git add server/src/llm/provider.ts server/src/llm/provider.test.ts \
+        server/src/curator/tagger.ts server/src/curator/classifier.ts \
+        server/src/curator/chat.ts server/src/curator/routes.ts
 git commit -m "feat(llm): thinking 开关 —— 批量环节关掉思考模式"
 ```
 
@@ -195,6 +199,7 @@ git commit -m "feat(llm): thinking 开关 —— 批量环节关掉思考模式"
 - Modify: `server/src/db/schema.ts`(末尾追加三表)
 - Modify: `server/src/db/index.ts`
 - Create: `server/src/db/repo/tags.ts`
+- Modify: `server/src/db/repo/rules.ts`(加 `rewriteRuleTagIds` —— 合并/删除词时重写规则里的 tag id)
 - Test: `server/src/db/repo/tags.test.ts`
 
 **Interfaces:**
@@ -214,8 +219,9 @@ git commit -m "feat(llm): thinking 开关 —— 批量环节关掉思考模式"
   - `export function subtreeSets(db): Map<number, Set<number>>`
   - `export function mergeTags(db, fromId: number, toId: number): boolean` —— false = 这两个词不能并(会成环/超深),**不是抛错**
   - `export function setTagParent(db, id: number, parentId: number | null): boolean` —— 树结构的**唯一收口**,内置防环 + 深度闸
-  - `export function renameTag(db, id: number, name: string): void`
+  - `export function renameTag(db, id: number, name: string): boolean` —— false = 名字被别的词占了(**不自动合并**,那是"合并"按钮的事)
   - `export function deleteTag(db, id: number): void`
+  - `export function rewriteRuleTagIds(db, map: (tagId: number) => number | null): void`(`db/repo/rules.ts`)—— §9F C16
   - `export const MAX_TAG_DEPTH = 4`
   - `export function depthOf(db, id: number): number` —— 根的深度是 1
   - `export function wouldExceedDepth(db, id: number, parentId: number | null): boolean`
@@ -236,14 +242,15 @@ CREATE TABLE IF NOT EXISTS tags (
   parent_id  INTEGER REFERENCES tags(id),
   created_at INTEGER NOT NULL
 );
--- COALESCE 不能省:SQLite 里 NULL 互不相等,裸 UNIQUE(parent_id, norm)
--- 拦不住两个同名根(NULL, 'nba') 插两次。
-CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_parent_norm
-  ON tags(COALESCE(parent_id, 0), norm);
+-- **norm 全局唯一**(C4):一个名字在整棵树里只有一处。
+-- 父**不**参与唯一性 —— 允许"不同父下同名"会造出两个 `篮球`、两个 `露营`,
+-- 那正是用户要避免的重复("相同的 tag 不要重复建立")。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_norm ON tags(norm);
 CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_id);
 
--- 见过的所有写法 → 规范节点。**"不重复建立"的物理保证**:合并掉的旧名、
--- 大小写/简繁变体、质检问出来的答案,全在这张表里。查词先查它。
+-- 见过的写法 → 它现在归哪个节点。装的是**不再是任何节点规范名**的那些写法:
+-- 合并掉的旧名、改名前的旧名、大小写/简繁变体。
+-- 查词 = 先查 tags.norm,再查这张表(findTag 一份逻辑)。
 CREATE TABLE IF NOT EXISTS tag_aliases (
   name   TEXT PRIMARY KEY,        -- 归一化后的写法
   tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE
@@ -330,34 +337,39 @@ describe('ensureTag', () => {
     expect(db.prepare(`SELECT name FROM tags WHERE id = ?`).get(a)).toEqual({ name: 'NBA' });
   });
 
-  it('COALESCE 索引拦得住两个同名根', () => {
+  it('同名只建一次,重复调用复用', () => {
     const db = fresh();
     ensureTag(db, '体育', null);
     ensureTag(db, '体育', null);
     expect(db.prepare(`SELECT COUNT(*) n FROM tags`).get()).toEqual({ n: 1 });
   });
 
-  it('不同父下可以同名', () => {
+  it('**同一个名字在全树只有一处** —— 换个父也不会再建一个', () => {
     const db = fresh();
     const sport = ensureTag(db, '体育', null);
     const food = ensureTag(db, '美食', null);
-    expect(ensureTag(db, '篮球', sport)).not.toBe(ensureTag(db, '篮球', food));
+    const ball = ensureTag(db, '篮球', sport);
+
+    // 模型说"篮球属于美食",而它已经挂在体育下了 —— **复用,不新建**。
+    // 这正是用户那句"相同的 tag 不要重复建立":两个 `篮球` 节点就是他抱怨的重复
+    expect(ensureTag(db, '篮球', food)).toBe(ball);
+    expect(db.prepare(`SELECT COUNT(*) n FROM tags WHERE norm = '篮球'`).get()).toEqual({ n: 1 });
+    // 父只在**新建**时起作用 —— 想挪位置走质检的 move / 判据的 reparent
+    expect(db.prepare(`SELECT parent_id FROM tags WHERE id = ?`).get(ball)).toEqual({
+      parent_id: sport,
+    });
   });
 
-  it('子节点不自动记别名 —— 否则"不同父同名"做不到', () => {
+  it('创建时就记一笔别名 —— 拿名字直接查得到,不管它是根还是子', () => {
     const db = fresh();
     const sport = ensureTag(db, '体育', null);
     const ball = ensureTag(db, '篮球', sport);
-    // 别名表是**全局身份**,只有根配得上它;子节点的身份是 (父, 名)
-    expect(findTag(db, normalizeTagName('篮球'))).toBeNull();
-    // 但同一父下重复调用仍然复用同一个节点(靠 (父,名) 那条唯一索引)
-    expect(ensureTag(db, '篮球', sport)).toBe(ball);
+    expect(findTag(db, normalizeTagName('体育'))).toBe(sport);
+    expect(findTag(db, normalizeTagName('篮球'))).toBe(ball);
   });
 
-  it('根在创建时记一笔别名 —— 拿名字直接查得到', () => {
-    const db = fresh();
-    const sport = ensureTag(db, '体育', null);
-    expect(findTag(db, normalizeTagName('体育'))).toBe(sport);
+  it('空名字直接抛 —— 别默默建一个 norm=\'\' 的节点(它会被 findTag 永久命中)', () => {
+    expect(() => ensureTag(fresh(), '   ', null)).toThrow();
   });
 });
 
@@ -546,21 +558,19 @@ export function normalizeTagName(raw: string): string {
 }
 
 /**
- * 按名字找节点 —— 查的是**全局身份**:先查别名表,再查根。
+ * 按名字找节点 —— 先查规范名(`tags.norm`),再查别名表。
  *
- * **它故意不查子节点**。子节点的身份是 (父, 名),同名可以有好几个,
- * 所以"按名字返回唯一一个"对它没有意义 —— 那种查找要用 `ensureTag(name, parentId)`
- * 或者直接按 `norm` 查表(`tagcheck.ts` 的 `byName` 就是后者)。
+ * 名字是**全局唯一**的(C4),所以这个函数永远只有一个答案,和父是谁无关。
  */
 export function findTag(db: Database.Database, norm: string): number | null {
+  const direct = db.prepare(`SELECT id FROM tags WHERE norm = ?`).get(norm) as
+    | { id: number }
+    | undefined;
+  if (direct) return direct.id;
   const aliased = db.prepare(`SELECT tag_id FROM tag_aliases WHERE name = ?`).get(norm) as
     | { tag_id: number }
     | undefined;
-  if (aliased) return aliased.tag_id;
-  const root = db.prepare(`SELECT id FROM tags WHERE parent_id IS NULL AND norm = ?`).get(norm) as
-    | { id: number }
-    | undefined;
-  return root ? root.id : null;
+  return aliased ? aliased.tag_id : null;
 }
 
 /** 记一笔"这个写法归到那个节点"。重复写入是幂等的(同一个写法只属于一个节点) */
@@ -574,11 +584,13 @@ export function addAlias(db: Database.Database, name: string, tagId: number): vo
 }
 
 /**
- * 找到或建出 (父, 名) 这个节点,返回 id。
+ * 找到或建出这个名字的节点,返回 id。
  *
- * **先查别名表再查 (父,名)** —— 顺序不能反:一个词被合并过之后,别名表里
- * 记着它的归宿,而 (父,名) 下已经没有它了。反过来的话,模型每吐一次旧名就
- * 新建一个节点,别名表形同虚设。
+ * **查到就复用,不管父是谁**(C4 全局唯一)。模型说"露营属于美食"而它已经挂在
+ * 户外下时,不该再建第二个 —— 那正是"相同的 tag 不要重复建立"。真要挪位置,
+ * 走质检的 move / 判据的 reparent,不靠"再建一个"。
+ *
+ * `parentId` 只在**新建**时用得上。
  */
 export function ensureTag(
   db: Database.Database,
@@ -586,26 +598,21 @@ export function ensureTag(
   parentId: number | null,
 ): number {
   const norm = normalizeTagName(name);
+  // 空名字是调用方的 bug(`coerceTagOutput` 已经把空串滤掉了)。这里直接抛,
+  // 别默默建一个 norm='' 的节点 —— 那个节点之后会被 findTag 永久命中
+  if (!norm) throw new Error('标签名不能为空');
+
   const known = findTag(db, norm);
   if (known !== null) return known;
-
-  const existing = parentId === null
-    ? db.prepare(`SELECT id FROM tags WHERE parent_id IS NULL AND norm = ?`).get(norm)
-    : db.prepare(`SELECT id FROM tags WHERE parent_id = ? AND norm = ?`).get(parentId, norm);
-  if (existing) return (existing as { id: number }).id;
 
   const info = db
     .prepare(`INSERT INTO tags (name, norm, parent_id, created_at) VALUES (?, ?, ?, ?)`)
     .run(name.trim() || norm, norm, parentId, Date.now());
   const id = Number(info.lastInsertRowid);
-  // **只有根记别名,子节点不记。**
-  //
-  // 别名表是**全局身份**(一个写法 → 一个节点),而子节点的身份是 **(父, 名)** ——
-  // 不同父下同名是合法的,`UNIQUE(parent_id, norm)` 保的就是这个。
-  // 给子节点也记一笔的话,`findTag` 会短路:第二次 `ensureTag('篮球', 别的父)`
-  // 在别名表命中、返回**同一个节点**,"不同父可以同名"就永远做不到,那个唯一索引
-  // 成了死条款。(这一版初稿就是这么写的,测试和实现直接对不上。)
-  if (parentId === null) addAlias(db, norm, id);
+  // 每个节点都记一笔。查词时 `tags.norm` 其实已经能命中,这一笔是为了让
+  // **"曾经用过的写法"**(合并掉的、改名前的)和规范名走同一条查询路径 ——
+  // `findTag` 因此只有一份逻辑,不用分两处判
+  addAlias(db, norm, id);
   return id;
 }
 
@@ -712,17 +719,14 @@ export function subtreeSets(db: Database.Database): Map<number, Set<number>> {
 }
 
 /**
- * 把 fromId 并进 toId:条目改挂、子节点改挂、旧名进别名表、旧节点删掉。
+ * 把 from 并进 to:条目改挂、子节点改挂、旧名进别名表、规则里的 id 重写、旧节点删掉。
  *
  * **这就是为什么要用关联表而不是一列 JSON** —— 字符串数组做不到"改一次词,
  * 所有视频跟着走"。
- */
-/**
- * 把 from 并进 to。**先过和挂父同一套闸。**
  *
- * 它换的是整棵子树(子节点跟着改父),所以两条都可能踩:并进**自己的后代**会造环,
- * 并进深层节点会超深。而它走的是裸 SQL,绕过了 `setTagParent` —— 闸必须在这儿
- * 再查一次。
+ * **先过和挂父同一套闸。** 它换的是整棵子树(子节点跟着改父),所以两条都可能踩:
+ * 并进**自己的后代**会造环,并进深层节点会超深。而它走的是裸 SQL,绕过了
+ * `setTagParent` —— 闸必须在这儿再查一次。
  *
  * 返回 false = 这两个词不能并(**不是抛错**):用户在下拉里挑错目标很正常,
  * 质检判错也很正常,那都该是"这次不动",不该炸掉整轮。
@@ -744,6 +748,13 @@ export function mergeTags(db: Database.Database, fromId: number, toId: number): 
     db.prepare(`UPDATE tags SET parent_id = ? WHERE parent_id = ?`).run(toId, fromId);
     if (from) addAlias(db, from.name, toId);
     db.prepare(`UPDATE tag_aliases SET tag_id = ? WHERE tag_id = ?`).run(toId, fromId);
+
+    // §9F C16:**规则里引用 fromId 的地方改成 toId**,再删节点。
+    // 顺序很重要:先重写再删 —— 反过来的话任何一步失败,规则里就留下一串死 id。
+    // 不重写的话那条规则会**静默停止命中**,而界面上的条件渲染成空串 ——
+    // 用户完全看不出自己的规则已经不生效了
+    rewriteRuleTagIds(db, (t) => (t === fromId ? toId : t));
+
     db.prepare(`DELETE FROM tags WHERE id = ?`).run(fromId);
   })();
   return true;
@@ -775,8 +786,14 @@ export function setTagParent(
   return true;
 }
 
-/** node 是不是 anc 的后代(anc 自己在不在它的祖先链上)—— 防环 */
-function isDescendant(db: Database.Database, node: number, anc: number): boolean {
+/**
+ * node 是不是 anc 的后代(anc 在不在它的祖先链上)—— 防环。
+ *
+ * **导出**给 `tagtree.ts` 用:判据要拿它挡"把子节点并进父"。
+ * 那边不能用自己内存里的父边快照 —— 同一轮里先发生的合并会改变库里的父子关系,
+ * 而快照是循环开始时的,闸门会被穿透(见 `reconcile` 里那段注释)。
+ */
+export function isDescendant(db: Database.Database, node: number, anc: number): boolean {
   const parentOf = new Map(
     (db.prepare(`SELECT id, parent_id FROM tags`).all() as
       { id: number; parent_id: number | null }[]).map((r) => [r.id, r.parent_id]),
@@ -791,40 +808,183 @@ function isDescendant(db: Database.Database, node: number, anc: number): boolean
   return false;
 }
 
-export function renameTag(db: Database.Database, id: number, name: string): void {
+/**
+ * 改名。返回 false = 这个名字已经被别的节点占了(全局唯一,撞了就改不了)。
+ *
+ * **撞名不自动合并** —— 那是"合并"按钮的事。改名是人的操作,悄悄把两个词并掉
+ * 比报个错糟得多。
+ */
+export function renameTag(db: Database.Database, id: number, name: string): boolean {
   const norm = normalizeTagName(name);
-  if (!norm) return;
+  if (!norm) return false;
+
+  let ok = false;
   db.transaction(() => {
-    const prev = db.prepare(`SELECT name, parent_id FROM tags WHERE id = ?`).get(id) as
-      | { name: string; parent_id: number | null }
+    const prev = db.prepare(`SELECT name FROM tags WHERE id = ?`).get(id) as
+      | { name: string }
       | undefined;
+    if (!prev) return;
+    if (db.prepare(`SELECT id FROM tags WHERE norm = ? AND id <> ?`).get(norm, id)) return;
+
     db.prepare(`UPDATE tags SET name = ?, norm = ? WHERE id = ?`).run(name.trim(), norm, id);
-    // **旧名进别名表**(老的引用还找得到它);**根**顺带把新名也记一笔 ——
-    // 子节点的新名不进别名表,理由和 `ensureTag` 那条一样:别名是全局身份,
-    // 而子节点的身份是 (父, 名)
-    if (prev) addAlias(db, prev.name, id);
-    if (prev?.parent_id === null) addAlias(db, norm, id);
+    // 旧名不再是任何节点的规范名(刚被腾出来),所以它只可能出现在别名表里 ——
+    // 记一笔,老引用还找得到它
+    addAlias(db, prev.name, id);
+    ok = true;
   })();
+  return ok;
 }
 
 export function deleteTag(db: Database.Database, id: number): void {
   db.transaction(() => {
-    // 子节点提一级,别连带删掉一整棵 —— 删一个词不该毁掉它底下所有东西
-    const kids = db.prepare(`SELECT id, name FROM tags WHERE parent_id = ?`).all(id) as
-      { id: number; name: string }[];
+    // 子节点提一级,别连带删掉一整棵 —— 删一个词不该毁掉它底下所有东西。
+    // (全局唯一下这不会撞名字:每个 kid 的 norm 本来就是唯一的)
     db.prepare(`UPDATE tags SET parent_id = NULL WHERE parent_id = ?`).run(id);
-    // 提上来的子节点**现在是根了** —— 根要能被名字直接查到(见 findTag),
-    // 所以补一笔别名。漏了这一步会出现"查不到自己的根"
-    for (const k of kids) addAlias(db, k.name, k.id);
+
+    // §9F C16:**规则里引用它的 id 要一起拿掉**,否则那条规则静默失效
+    rewriteRuleTagIds(db, (t) => (t === id ? null : t));
 
     db.prepare(`DELETE FROM item_tags WHERE tag_id = ?`).run(id);
     db.prepare(`DELETE FROM tag_aliases WHERE tag_id = ?`).run(id);
     db.prepare(`DELETE FROM tags WHERE id = ?`).run(id);
   })();
 }
+```
 
+`tags.ts` 顶部的 import 要多一行:
+
+```ts
+import { rewriteRuleTagIds } from './rules.js';
+```
+
+**同一步:给 `db/repo/rules.ts` 加上 `rewriteRuleTagIds`**(追加在文件末尾):
+
+```ts
 /**
- * 树深封顶(spec §9F C2):**根的深度是 1**。
+ * 把规则里引用的 tag id 重写一遍(spec §9F C16)。
+ *
+ * 规则存的是 tag id(落地细节 3,理由正当:改名不该改语义),而词库每轮都在
+ * 合并、偶尔删除 —— 那都是**删节点**。不重写的话:规则的 tag 条件永远匹配不上
+ * (`subtreeSets` 里没有那个 id 了),而 `renderConditions` 也翻不到名字、渲染成空串。
+ * 用户看到的是"规则还在,就是不生效"。规则是这产品唯一比 B站 多的东西(§9C),
+ * 这是整条链路上唯一会**静默吃掉它**的地方。
+ *
+ * `map` 返回 null = 那个 id 没了(节点被删)→ 从条件里去掉;某条 tag 条件被掏空
+ * 就整条丢掉(留一条"任何都不含"的空条件匹配不到任何东西,只是噪音)。
+ *
+ * **调用方必须在同一个事务里** —— 它是 `mergeTags` / `deleteTag` 的一部分,
+ * 而且要在**删节点之前**跑:反过来的话任何一步失败,规则里就留下一串死 id。
+ */
+export function rewriteRuleTagIds(
+  db: Database.Database,
+  map: (tagId: number) => number | null,
+): void {
+  const rows = db
+    .prepare(`SELECT folder_id, conditions_json FROM work_folder_rules`)
+    .all() as { folder_id: number; conditions_json: string }[];
+  const upd = db.prepare(
+    `UPDATE work_folder_rules SET conditions_json = ?, updated_at = ? WHERE folder_id = ?`,
+  );
+
+  for (const r of rows) {
+    // 坏 JSON 直接跳过 —— 静默当成"没有规则"会让归类悄悄少一层依据
+    // (和 `shape()` 里那条"坏 JSON 直接抛"同一条纪律:别猜)
+    let conds: RuleCondition[];
+    try {
+      conds = JSON.parse(r.conditions_json) as RuleCondition[];
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(conds)) continue;
+
+    let touched = false;
+    const next: RuleCondition[] = [];
+    for (const c of conds) {
+      if (c.field !== 'tag') {
+        next.push(c);
+        continue;
+      }
+      const ids: number[] = [];
+      for (const raw of c.any) {
+        const n = Number(raw);
+        if (!Number.isInteger(n)) continue; // 编不出数字的写法原样丢掉
+        const to = map(n);
+        if (to !== null && !ids.includes(to)) ids.push(to);
+      }
+      if (ids.length === 0) {
+        touched = true; // 这条条件被掏空了 → 整条丢掉
+        continue;
+      }
+      const shaped = ids.map(String);
+      if (shaped.join(',') !== c.any.join(',')) touched = true;
+      next.push({ ...c, any: shaped });
+    }
+
+    if (touched) upd.run(JSON.stringify(next), Date.now(), r.folder_id);
+  }
+}
+```
+
+> 它用的 `RuleCondition` 就在 `rules.ts` 自己文件里,不用 import。
+
+- [ ] **Step 5b: 补 `mergeTags` / `deleteTag` 的规则重写测试**
+
+```ts
+describe('C16 规则里的 tag id 跟着词走', () => {
+  const withRule = (db: ReturnType<typeof openDb>, folderId: number, any: string[]) => {
+    db.prepare(
+      `INSERT INTO work_folders (id, origin_id, name, created_at) VALUES (?, NULL, 'x', 0)`,
+    ).run(folderId);
+    db.prepare(
+      `INSERT INTO work_folder_rules (folder_id, conditions_json, origin, updated_at)
+       VALUES (?, ?, 'user', 0)`,
+    ).run(folderId, JSON.stringify([{ field: 'tag', any }]));
+  };
+  const ruleOf = (db: ReturnType<typeof openDb>, folderId: number) =>
+    (JSON.parse(
+      (db.prepare(`SELECT conditions_json c FROM work_folder_rules WHERE folder_id = ?`)
+        .get(folderId) as { c: string }).c,
+    ) as { field: string; any: string[] }[]);
+
+  it('合并 → 规则里的旧 id 改成新 id', () => {
+    const db = fresh();
+    const keep = ensureTag(db, '路飞', null);
+    const drop = ensureTag(db, '鲁夫', null);
+    withRule(db, 1, [String(drop)]);
+    mergeTags(db, drop, keep);
+    expect(ruleOf(db, 1)).toEqual([{ field: 'tag', any: [String(keep)] }]);
+  });
+
+  it('删除 → 那个 id 从规则里拿掉;条件被掏空就整条丢掉', () => {
+    const db = fresh();
+    const a = ensureTag(db, '露营', null);
+    const b = ensureTag(db, '美食', null);
+    withRule(db, 1, [String(a), String(b)]);
+    deleteTag(db, a);
+    expect(ruleOf(db, 1)).toEqual([{ field: 'tag', any: [String(b)] }]);
+
+    withRule(db, 2, [String(a)]);
+    expect(ruleOf(db, 2)).toEqual([]); // a 已经没了,那条条件在上一步就被掏空
+  });
+
+  it('非 tag 字段一个字不动', () => {
+    const db = fresh();
+    db.prepare(
+      `INSERT INTO work_folders (id, origin_id, name, created_at) VALUES (1, NULL, 'x', 0)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO work_folder_rules (folder_id, conditions_json, origin, updated_at)
+       VALUES (1, ?, 'user', 0)`,
+    ).run(JSON.stringify([{ field: 'title', any: ['python'] }, { field: 'tag', any: ['9'] }]));
+    const a = ensureTag(db, '露营', null);
+    mergeTags(db, a, ensureTag(db, '美食', null));
+    expect(ruleOf(db, 1)).toEqual([
+      { field: 'title', any: ['python'] },
+      { field: 'tag', any: ['9'] },  // 「9」不是本库里任何词的 id → 原样留着(不猜)
+    ]);
+  });
+});
+```
  *
  * 为什么封顶:模型和判据都可能越走越深(`体育/篮球/NBA/湖人/詹姆斯`),而一棵
  * 深成一条线的树是**目录**不是分类 —— 它再也帮不上"各个象限上的分类"。
@@ -910,8 +1070,10 @@ git commit -m "feat(tags): 词库树三张表 + 仓储层(归一化/别名/建�
   - `export function coerceTagOutput(raw: unknown, batchIds: ReadonlySet<string>): TagOutput[]`(`curator/tagger.ts`)
   - `export function applyTagOutput(db, o: TagOutput): { created: string[] }`(`curator/tagger.ts`)
   - `export function tagInfoByItem(db): Map<string, { names: string[]; kind: string | null }>`(写到 `db/repo/tags.ts`)
-  - `export function renderItem(i: ItemRow, maxIntro: number, tagNames?: readonly string[]): string`(`curator/classifier.ts`)
-  - `export function buildPass1Prompt(opts: {…; tagNames: ReadonlyMap<string, readonly string[]>})` / `buildPass2Prompt(opts: {…; tagNames: ReadonlyMap<string, readonly string[]>})`
+  - `export function renderItem(i: ItemRow, maxIntro?: number, tagNames?: readonly string[], kind?: string | null): string`(`curator/classifier.ts`)
+  - `buildPass1Prompt` / `buildPass2Prompt` 的 opts 各加一个字段:
+    `tagInfo: ReadonlyMap<string, { names: readonly string[]; kind: string | null }>`
+    (**一个 map 装两样** —— 它们同源、同一批消费者,分两个就是两次全表扫)
 
 - [ ] **Step 1: 改 `db/repo/tagging.ts`**
 
@@ -1162,7 +1324,26 @@ export function applyTagOutput(db: Database.Database, o: TagOutput): { created: 
     (db.prepare(`SELECT id FROM tags`).all() as { id: number }[]).map((r) => r.id),
   );
 
-  const domainIds = o.domains.map((d) => ensureTag(db, d, null));
+  const domainIds: number[] = [];
+  for (const d of o.domains) {
+    const id = ensureTag(db, d, null);
+    /**
+     * **模型这次把它当"领域"说了 —— 如果它现在挂在别人下面,就把它提成根。**
+     *
+     * 不提的话"新大类诞生"这条路是死的:全局唯一让 `ensureTag` 复用已有节点,
+     * 于是一个词**一旦当过子节点就永远是**。判据只挪根、质检的 move 也只能挪到
+     * 另一个词下面 —— 没有任何一条路能把它提上来。
+     *
+     * 而模型把它放进 `domains` 正是在说"这是一个领域",这是那条路唯一的信号源。
+     * 提错了不要紧:下一轮判据发现它的视频全落在某个词里,会把它挂回去(C9 的
+     * reparent 只动根 —— 所以"提成根"是它能被纠正的前提)。
+     */
+    const cur = db.prepare(`SELECT parent_id FROM tags WHERE id = ?`).get(id) as
+      | { parent_id: number | null }
+      | undefined;
+    if (cur && cur.parent_id !== null) setTagParent(db, id, null);
+    domainIds.push(id);
+  }
   const host = domainIds[0] ?? null;
 
   for (const name of o.tags) {
@@ -1789,7 +1970,7 @@ Expected: FAIL —— `Failed to resolve import "./tagtree.js"`
  */
 import type Database from 'better-sqlite3';
 import {
-  listTagsWithParent, mergeTags, setTagParent, tagSets, type TagRow,
+  isDescendant, listTagsWithParent, mergeTags, setTagParent, tagSets, type TagRow,
 } from '../db/repo/tags.js';
 
 export interface TreeChange {
@@ -1839,22 +2020,6 @@ function pairs(sets: ReadonlyMap<number, ReadonlySet<string>>): [number, number]
   return out;
 }
 
-/** node 是不是 anc 的后代(anc 在不在它的祖先链上)*/
-function isAncestor(
-  parentOf: ReadonlyMap<number, number | null>,
-  node: number,
-  anc: number,
-): boolean {
-  let cur: number | null | undefined = node;
-  const seen = new Set<number>();
-  while (cur != null && !seen.has(cur)) {
-    if (cur === anc) return true;
-    seen.add(cur);
-    cur = parentOf.get(cur) ?? null;
-  }
-  return false;
-}
-
 /**
  * 按数据核对整棵树,返回**变化清单**并落到结构上。
  *
@@ -1893,7 +2058,13 @@ export function reconcile(
     // **已经是父子关系的一对不合并。** 树里已经表达过这个包含关系了 ——
     // 再合并一次就是把树压塌。(父子挂的视频高度重合是完全正常的:
     // 篮球的视频本来就都挂着体育。测试夹具也特别容易造出"父和子一模一样"。)
-    if (isAncestor(parentOf, b, a) || isAncestor(parentOf, a, b)) continue;
+    //
+    // **必须查库,不能用内存里的 `parentOf`** —— 这一轮已经发生的合并会改变库里的
+    // 父子关系,而 `parentOf` 是循环开始时的快照。反例:X、Y 双向 100% 先被合并
+    // (X 吸收 Y),而 Z 原本是 Y 的子节点 —— 库里 Z 的父已经变成 X,内存里还记着 Y。
+    // 下一对 (X,Z) 沿 `parentOf` 走是 X→Y→null,Z 不在 X 的祖先链上 → 闸门放行 →
+    // **Z 被并进 X,整棵子树没了**。查库就没这个问题。
+    if (isDescendant(db, b, a) || isDescendant(db, a, b)) continue;
 
     const fwd = cov.get(k(a, b)) ?? 0;
     const back = cov.get(k(b, a)) ?? 0;
@@ -2428,14 +2599,34 @@ tag 条件里存的是 id。于是模型会读到 **「标签含 42、57」** �
 改法:多收一个名字表,渲染前把 id 翻成词名(翻不到就跳过那一条,别印数字)。
 
 ```ts
+/**
+ * 把一组条件渲染成给模型看的一句话(空条件 → 空串,调用方据此不写那一行)
+ *
+ * **`tagNameOf` 是必填的,不给默认值。** 给 `= new Map()` 的话,漏传的那个调用方
+ * 不报错 —— 只是 tag 条件静默渲染成空串,模型看不到这一半依据,而没有任何测试
+ * 会发现。这和 C6 里"闸放唯一收口、不放在各调用点"是同一条道理:
+ * **默认值会把"漏了"变成"静默降级"**。
+ */
 export function renderConditions(
   conditions: readonly RuleCondition[],
-  tagNameOf: ReadonlyMap<number, string> = new Map(),
+  tagNameOf: ReadonlyMap<number, string>,
 ): string {
   // …原有逻辑…
-  //   field === 'tag' 时:cond.any.map(Number).map(id => tagNameOf.get(id)).filter(Boolean)
+  //   field === 'tag' 时:cond.any.map(Number).map(id => tagNameOf.get(id)).filter((x): x is string => !!x)
   //   一个都没翻出来的话这条条件渲染成空串(和"关键词还空着"一样,不占行)
 }
+```
+
+配一条测试钉住它(`rules.test.ts`,现有 5 条只覆盖 title/intro/upper,tag 分支零覆盖):
+
+```ts
+  it('tag 条件渲染成**词名**,不是 id', () => {
+    const names = new Map([[1, '体育'], [2, 'NBA']]);
+    expect(renderConditions([{ field: 'tag', any: ['1', '2'] }], names)).toContain('体育');
+    expect(renderConditions([{ field: 'tag', any: ['1', '2'] }], names)).toContain('NBA');
+    // 翻不到名字的 id 不该原样印成数字
+    expect(renderConditions([{ field: 'tag', any: ['999'] }], names)).toBe('');
+  });
 ```
 
 **四个调用方都要传这个名字表**(不传的会静默退化成"不渲染 tag 条件",比印数字好,
@@ -2468,7 +2659,9 @@ export function renderConditions(
 真正的位置是 `ruleRoutes.ts:60-86` 的 `rulesWithHits()`,`matchAll` 在 `:64`:
 
 ```ts
-function rulesWithHits(db: Database.Database) {
+// **签名不变**(它本来就闭包了 db,两个调用点 `:112` 和 `:227` 都是零参调用)——
+// 改了签名就要连着改那两个调用点,而这个任务不值得那份改动
+function rulesWithHits() {
   const rules = listRules(db);
   const items = db.prepare(`SELECT * FROM items`).all() as ItemRow[];
   const tagsOf = itemTagIds(db);
@@ -2568,6 +2761,30 @@ const FIELD_LABEL: Record<RuleField, string> = {
 选中后把 `String(id)` 写进 `any`。**不要**让用户手打 id —— 那跟"填数字不填名字"
 那条纪律是两回事:那条说的是**给模型看**的时候填数字,而这里是**给人选**的时候。
 
+**同一文件还有第三个地方要改:`renderRule`(`RulesPanel.tsx:27-30`)。**
+它是规则列表里显示条件用的:
+
+```tsx
+const renderRule = (c: { field: RuleField; any: string[] }) =>
+  `${FIELD_LABEL[c.field]}含 ${c.any.join('·')}`;
+```
+
+`any` 对 title/intro/upper 是人打的关键词,对 tag 是 **id** —— 不改的话用户自己在
+规则列表里看到的是 **「标签含 42·57」**。服务端改了 `renderConditions` 只解决
+"给模型看的那份",这份是给人看的,得一起改:
+
+```tsx
+const renderRule = (c: { field: RuleField; any: string[] }, tagNameOf: ReadonlyMap<number, string>) => {
+  if (c.field !== 'tag') return `${FIELD_LABEL[c.field]}含 ${c.any.join('·')}`;
+  const names = c.any.map(Number).map((id) => tagNameOf.get(id)).filter((x): x is string => !!x);
+  // 翻不到名字也别印 id —— 印一串数字比留白更让人困惑
+  return names.length ? `标签含 ${names.join('·')}` : '标签(词已不在词库里)';
+};
+```
+
+`tagNameOf` 由 `RulesPanel` 从 `tagApi.tree()` 摊平时一起建(它本来就要拉那棵树
+给 Select 用,不额外多一次请求)。
+
 - [ ] **Step 7: 跑测试 + 提交**
 
 Run: `cd server && npm test` 然后 `cd web && npm run typecheck`
@@ -2591,6 +2808,8 @@ git commit -m "feat(rules): 第四字段 tag,选中即匹配整棵子树"
 - Modify: `server/src/curator/routes.ts`(run-pass-1 传画像与规则;**`GET /api/workbench` 加 `profiles`**)
 - Modify: `server/src/http/routes/items.ts`(`/api/items/:id` 带 `tagNames`)
 - Modify: `web/src/components/WorkFolderTree.tsx` + `web/src/pages/curator.tsx`(夹子行的 ⚠)
+- **Modify**: `web/src/types.ts` —— `WorkbenchView` 加 `profiles?: FolderProfile[]`,并新声明
+  `FolderProfile`(不然前端读 `view.profiles` 只能下 `as`,类型等于没有)
 
 **Interfaces:**
 - Produces:
@@ -2779,8 +2998,19 @@ opts 加 `profiles?: string` 与 **`rulesText?: string`**,插到"用户现有的
   // …clusterNote / userConstraint / 收尾 照旧…
 ```
 
-`runPass1` 的 opts 加 `profilesText?: string` / `rulesText?: string` 并透传
-(**别叫 `rules`** —— 那个名字已经被 keyword 词表占了)。
+`runPass1` 的 opts **三个都加**并透传给 `buildPass1Prompt`:
+
+```ts
+  /** §9F C15:每个夹子里**实际**是什么 —— 没有它模型只能看名字猜 */
+  profilesText?: string;
+  /** 现有规则的可读文本。**别叫 `rules`** —— 那个名字已经被 keyword 词表占了 */
+  rulesText?: string;
+  /** 标签名 + 形态,渲染样本条目用(Task 2 已有的那个) */
+  tagInfo?: ReadonlyMap<string, { names: readonly string[]; kind: string | null }>;
+```
+
+> 第三个 (`tagInfo`) 容易漏 —— 初稿只写了前两个,而 `routes.ts` 的调用点会传它,
+> 对象字面量的多余属性 + 下游 `opts.tagInfo` 无声明 = **编译不过**。
 
 `routes.ts` 的 `run-pass-1` 里:
 
@@ -2858,6 +3088,28 @@ C14 的离群判定算出来了,**但没地方能看到它** —— 画像只喂
 `outliers` 由 `WorkFolderTree` 的 props 传进来(在 `curator.tsx` 里从 `/api/workbench`
 的 `profiles` 按 `folderId` 取)。**只提示、不自动移** —— 夹子本来就一半放错时画像
 也是错的,它照的是镜子不是裁判(§9F.6)。
+
+前端类型(`web/src/types.ts`,追加):
+
+```ts
+/** §9F C14:一个夹子的标签画像 + 离群条目 */
+export interface FolderProfile {
+  folderId: number;
+  name: string;
+  itemCount: number;
+  /** 高频标签,降序 —— 模型提改进时看的就是它 */
+  topTags: { name: string; count: number }[];
+  /** 和这个夹子不搭的条目 id(零参数判据) */
+  outliers: string[];
+}
+```
+
+`WorkbenchView` 加一个字段:
+
+```ts
+  /** §9F C14:夹子画像。后端一次算完整个数组 */
+  profiles?: FolderProfile[];
+```
 
 - [ ] **Step 7: 跑测试 + 提交**
 
@@ -3705,7 +3957,25 @@ export default function ContextPane({ item, tags = [] }: { item: Item | null; ta
             </dd>
 ```
 
-`pages/index.tsx` 用了 `ContextPane`,**也要传**:它选中条目时带一个 `tagNames`(由 `GET /api/items/:id` 返回,Task 7 已改)。给 `Item` 类型加可选 `tagNames?: string[]`,列表接口不带(那里不需要),详情接口带。
+`pages/index.tsx` 用了 `ContextPane`,**也要传 `tags`**。
+
+**注意:标签不在 `Item` 里。** Task 7 是把 `tagNames` 放在 `/api/items/:id` 响应的
+**顶层**(和 `item` 并列),因为 `shapeItem` 的注释要求"出口形状单一口径"—— 往里塞字段
+就等于开了第二个出口。所以 `index.tsx` 要在它已经拉详情的地方把那个顶层字段取出来:
+
+```tsx
+// 选中某条时拉一次详情 —— 标签和 folders 都在响应的**顶层**,不在 item 里
+const { data: detail } = useRequest(
+  () => (selected ? api<{ item: Item; folders: {id:number;title:string}[]; tagNames: string[] }>(`/api/items/${selected.id}`) : Promise.resolve(null)),
+  { refreshDeps: [selected?.id], formatResult: rawResult },
+);
+// …
+<ContextPane item={selected} tags={detail?.tagNames ?? []} />
+```
+
+**不要给 `Item` 加 `tagNames`** —— 列表接口不会带它,加了就是"类型说有、实际永远是
+undefined",详情栏静默显示 `—`。(这是初稿两处写法打架的地方:Task 7 把字段放在顶层,
+Task 9 却说要加到 `Item` 上。)
 
 - [ ] **Step 5: typecheck + build 门禁**
 
