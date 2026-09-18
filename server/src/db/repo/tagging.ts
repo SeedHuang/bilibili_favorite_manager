@@ -33,14 +33,23 @@ export function markItemTagged(db: Database.Database, id: string, kind: string):
 export function listUntaggedItemIds(db: Database.Database, limit = 100_000): string[] {
   return (
     db.prepare(
-      `SELECT id FROM items WHERE ai_checked_at IS NULL ORDER BY id LIMIT ?`,
+      // **已失效的不进增量池**(invalid = 1):它没有标题没有简介,模型对着占位符标题
+      // 「已失效视频」什么都吐不出来 —— 放进来会每轮都失败、又因失败不写水位线而
+      // **永远留在池子里**。增量池的语义是"还没标上的",不是"标不上的"
+      `SELECT id FROM items WHERE ai_checked_at IS NULL AND invalid = 0 ORDER BY id LIMIT ?`,
     ).all(limit) as { id: string }[]
   ).map((r) => r.id);
 }
 
-export function tagStats(db: Database.Database): { tagged: number; total: number } {
+export function tagStats(db: Database.Database): { tagged: number; total: number; invalid: number } {
+  // **invalid 单列一数**:分母排掉了它,「已标 N/M」里的 M 就不再是用户数得出的那个
+  // 总数 —— 悄悄变小正是最不该发生的那种"没说明白",单独报出来(界面只在非零时显示)
   const r = db.prepare(
-    `SELECT SUM(CASE WHEN ai_checked_at IS NOT NULL THEN 1 ELSE 0 END) tagged, COUNT(*) total FROM items`,
-  ).get() as { tagged: number | null; total: number };
-  return { tagged: r.tagged ?? 0, total: r.total };
+    `SELECT
+       SUM(CASE WHEN ai_checked_at IS NOT NULL AND invalid = 0 THEN 1 ELSE 0 END) tagged,
+       SUM(CASE WHEN invalid = 0 THEN 1 ELSE 0 END) total,
+       SUM(CASE WHEN invalid = 1 THEN 1 ELSE 0 END) invalid
+     FROM items`,
+  ).get() as { tagged: number | null; total: number | null; invalid: number | null };
+  return { tagged: r.tagged ?? 0, total: r.total ?? 0, invalid: r.invalid ?? 0 };
 }

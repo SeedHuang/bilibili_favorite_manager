@@ -71,7 +71,11 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
     // 增量口径用 **Set** 不是 `listUntaggedItemIds().includes()`:后者是全库 O(n²) 扫,
     // 3250 条真跑起来是秒级的卡顿
     const untagged = new Set(listUntaggedItemIds(db));
-    const pool = allItems().filter((i) => scope === 'all' || untagged.has(i.id));
+    // **两条腿都排除已失效**:`scope='missing'` 靠上面的 Set(它已经不带 invalid 了),
+    // 但 `scope='all'` 是直接拿全表 —— 不加这句,「重新标注全部」会把 300 条
+    // 「已失效视频」占位符也喂给模型,一个没标题没简介的条目模型什么都标不出来,
+    // 白花一轮调用(还记一批失败)。invalid 在 items 上一直有、界面上也一直有徽标
+    const pool = allItems().filter((i) => (scope === 'all' || untagged.has(i.id)) && i.invalid === 0);
 
     reply.hijack();
     reply.raw.writeHead(200, {
@@ -235,6 +239,19 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
       // 客户端在这段里走了很正常。和前面那道守卫同理:发不出去的帧不写。
       // (变化清单已经落库了:树是真的动了,跟客户端在不在没关系)
       if (closed()) return;
+
+      // **每批失败都落一条 events,带上 firstItemId / size / reason。**
+      // 原因此前只活在 SSE 帧和屏幕上(用户报的「3 批失败」那行,库里的 events 是
+      // 空的 code + 空 detail)—— 事后查库要能看出"是哪条、因为什么",而不是只能
+      // 信截图。两种失败都在 failedBatches 里:「请求失败」和「补两轮仍未覆盖」
+      // (后者正是用户这次撞上的),一条循环都写到
+      for (const b of r.failedBatches) {
+        log.event({
+          level: 'warn', category: 'llm', code: 'TAGGING_BATCH_FAILED',
+          message: `标注批失败:${b.size} 条`,
+          detail: { firstItemId: b.firstItemId, size: b.size, reason: b.reason },
+        });
+      }
 
       log.event({
         level: 'info',

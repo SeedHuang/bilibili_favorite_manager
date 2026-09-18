@@ -19,7 +19,7 @@ const aiCols = (db: ReturnType<typeof seed>, id: string) =>
 describe('AI 派生列的落库口(C8:同步不碰这两列,这里是唯一写手)', () => {
   it('markItemTagged 同时写形态与水位线', () => {
     const db = seed();
-    expect(tagStats(db)).toEqual({ tagged: 0, total: 3 });
+    expect(tagStats(db)).toEqual({ tagged: 0, total: 3, invalid: 0 });
 
     markItemTagged(db, 'BV1', '教学');
     const row = aiCols(db, 'BV1');
@@ -47,6 +47,17 @@ describe('AI 派生列的落库口(C8:同步不碰这两列,这里是唯一写�
     markItemTagged(db, 'BV2', '娱乐');
 
     expect(listUntaggedItemIds(db)).toEqual(['BV1', 'BV3']);
-    expect(tagStats(db)).toEqual({ tagged: 1, total: 3 });
+    expect(tagStats(db)).toEqual({ tagged: 1, total: 3, invalid: 0 });
+  });
+
+  // ★ 已失效(invalid = 1)不进池、不进分母 —— 它是"标不上的",不是"还没标上的"。
+  //   它的标题是占位符「已失效视频」、没有简介,模型什么都吐不出来;放进池子会每轮
+  //   失败、又因失败不写水位线而**永远留下**(用户报的「0 条,3 批失败」就是它)。
+  it('invalid=1 的条目不进未标注池,也不被 tagStats 数进分母', () => {
+    const db = seed();
+    upsertItem(db, { id: 'BVX', type: 2, title: '已失效视频', invalid: true });
+
+    expect(listUntaggedItemIds(db)).toEqual(['BV1', 'BV2', 'BV3']);
+    expect(tagStats(db)).toEqual({ tagged: 0, total: 3, invalid: 1 });
   });
 });

@@ -293,6 +293,11 @@ export interface TagRunStatus {
   tagged: number;
   total: number;
   /**
+   * 被排除的已失效条目数(invalid = 1,没标题没简介,模型标不了)。
+   * 分母(total)不含它们 —— 单列出来是因为「已标 N/M」里的 M 变了用户该知道为什么
+   */
+  invalid: number;
+  /**
    * `source` 是**实际生效**的来源:用途平级后 tag 没配就是 null;'main' 仅为兼容保留。
    * 不告诉用户的话,他以为在烧本地 4b,实际每批都在打贵的那个。
    */

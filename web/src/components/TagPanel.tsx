@@ -451,6 +451,8 @@ export default function TagPanel() {
               <>
                 已标注 <span className="num">{(tagStatus?.tagged ?? 0).toLocaleString()}</span>
                 /<span className="num">{(tagStatus?.total ?? 0).toLocaleString()}</span> 条
+                {/* 分母排掉了已失效 —— 那个 M 用户数不出别的数,不说清楚就是"数字悄悄变了" */}
+                {tagStatus?.invalid ? `(另有 ${tagStatus.invalid.toLocaleString()} 条已失效,不参与标注)` : ''}
                 {' · '}
                 <Button
                   type="link" size="small"

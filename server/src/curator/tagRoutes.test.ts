@@ -70,6 +70,65 @@ describe('标注路由', () => {
     await app.close();
   });
 
+  // ★ 已失效条目(invalid=1)在池子里的唯一下场就是"每轮失败、永远留下"(没标题没简介,
+  //   模型对着占位符「已失效视频」什么都吐不出来,失败又不写水位线)。两个 scope 都得排掉:
+  //   missing 靠增量池本身排除,all 是直接拿全表 —— 不加这句,「重新标注全部」就把 300 条
+  //   占位符也喂给模型了
+  it('run:池子排除 invalid=1(scope=missing 与 scope=all 都不喂给模型)', async () => {
+    const { app, db } = makeApp();
+    upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
+    upsertItem(db, { id: 'BVX', type: 2, title: '已失效视频', invalid: true });
+
+    // missing:模型只该见到那 1 条有效的
+    mocks.complete.mockResolvedValue(JSON.stringify([{ id: 'BV1', tags: ['教学'], kind: '教学' }]));
+    const res = await app.inject({ method: 'POST', url: '/api/tags/run' });
+    const done = sse(res.body).find((e) => e.event === 'done')!.data;
+    expect(done.tagged).toBe(1);
+    expect(done.failedBatches).toEqual([]);
+    // 模型一次只收到一条 —— 断言它**没被喂** BVX(喂了会连它一起回,于是 mock 若回
+    // 空就该记 1 批失败,上面 failedBatches=[] 就是在钉"BVX 根本没进池")
+    expect(mocks.complete.mock.calls[0]![0].messages[1].content).not.toContain('BVX');
+
+    // all:重标全部,同样不带已失效
+    mocks.complete.mockClear();
+    mocks.complete.mockResolvedValue(JSON.stringify([{ id: 'BV1', tags: ['娱乐'], kind: '娱乐' }]));
+    const res2 = await app.inject({ method: 'POST', url: '/api/tags/run?scope=all' });
+    const done2 = sse(res2.body).find((e) => e.event === 'done')!.data;
+    expect(done2.tagged).toBe(1);
+    expect(done2.failedBatches).toEqual([]);
+    await app.close();
+  });
+
+  it('status:带已失效计数(分母排掉它之后,单独报出来)', async () => {
+    const { app, db } = makeApp();
+    upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
+    upsertItem(db, { id: 'BVX', type: 2, title: '已失效视频', invalid: true });
+
+    const res = await app.inject({ url: '/api/tags/status' });
+    expect(res.json()).toMatchObject({ tagged: 0, total: 1, invalid: 1 });
+    await app.close();
+  });
+
+  // ★ 失败原因要能事后从库里查出来 —— 它此前只活在 SSE 帧和屏幕上(用户报的
+  //   「3 批失败」那行,库里的 events 是空 code + 空 detail)。「补两轮仍未覆盖」
+  //   正是用户这次撞上的那种,和「请求失败」都在 failedBatches 里,一条循环都写
+  it('run:每批失败写一条 events,带着 firstItemId / size / reason', async () => {
+    const { app, db } = makeApp();
+    upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
+    mocks.complete.mockRejectedValue(new Error('连接被拒'));
+
+    const res = await app.inject({ method: 'POST', url: '/api/tags/run' });
+    expect(sse(res.body).find((e) => e.event === 'done')!.data.failedBatches).toHaveLength(1);
+
+    const row = db.prepare(
+      `SELECT level, code, message, detail FROM events WHERE code = 'TAGGING_BATCH_FAILED'`,
+    ).get() as { level: string; code: string; message: string; detail: string };
+    expect(row.level).toBe('warn');
+    expect(row.message).toContain('1 条');
+    expect(JSON.parse(row.detail)).toEqual({ firstItemId: 'BV1', size: 1, reason: '请求失败:连接被拒' });
+    await app.close();
+  });
+
   // **第一帧必须是 progress 且带着全量分母。** 这是"一共多少个"唯一的数据源:
   // 原来它只在 `onBatch` 里发,而那是批次完成后 —— 第一批跑完之前界面只能写
   // "已标 0 条"(用户报的就是这个)。池子在开跑前算好、跑中不变,所以第一帧就能给。
