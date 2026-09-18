@@ -199,6 +199,8 @@ export async function runSuggestions(opts: {
       { role: 'system', content: SUGGESTION_SYSTEM },
       { role: 'user', content: buildSuggestionPrompt({ folders: opts.folders, items: chosen }) },
     ],
+    // 建议同属批量:一次塞进一批条目(首跑最坏是全库),要的是一段规则 JSON —— 不是"想清楚"
+    thinking: false,
   });
 
   const list = parseJsonArray(raw);
