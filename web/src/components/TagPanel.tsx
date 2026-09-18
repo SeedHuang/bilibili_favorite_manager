@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, App as AntApp, Button, Select, Spin } from 'antd';
+import { Alert, App as AntApp, Button, Progress, Select, Spin } from 'antd';
 import { Combine, Pencil, Check, Square, Tag, X, Trash2 } from 'lucide-react';
 import { useRequest } from '@umijs/max';
 import { rawResult, tagApi } from '../api';
@@ -325,6 +325,19 @@ export default function TagPanel() {
       ? `用 ${tagStatus.model.provider}/${tagStatus.model.model}`
       : '当前用主模型打标 —— 想省成本可在授权页配本地小模型';
 
+  /**
+   * 进度条要的那一个数。**分母为 0 时给 0** —— 空池子(一条待标的都没有)下
+   * `done/total` 是 `0/0` = NaN,Progress 拿到它会画出一根坏条。0% 才是真话:
+   * 这一跑确实没有可标的东西。
+   *
+   * 取**下取整**不四舍五入:15/16 舍成 100% 就是"还没跑完却报跑完了",
+   * 而进度条正好卡在 100% 不动,比停在 94% 更让人以为卡死。
+   */
+  const tagPct =
+    tagProgress && tagProgress.total > 0
+      ? Math.floor((tagProgress.done / tagProgress.total) * 100)
+      : 0;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       {error && <Alert type="error" showIcon closable message={error} onClose={() => setError('')} />}
@@ -357,8 +370,10 @@ export default function TagPanel() {
                 <span className="num" style={{ color: 'var(--accent)' }}>
                   {(tagProgress?.done ?? 0).toLocaleString()}
                 </span>
-                {/* 第一帧还没到时不知道本轮的分母 —— 增量跑的是"缺的那些",不等于全库总数,
-                    硬报一个会紧跟着跳一下。所以先不报,不是省事 */}
+                {/* 分母是**这一跑自己的池子大小**(增量跑的是"缺的那些",不是全库总数)——
+                    服务端在第一批之前先发一帧把它带过来,所以它「一开始就知道」,不是等出来的。
+                    这个 `> 0` 只兜两件小事:那一帧还在路上的一瞬,和空池子(total=0 时
+                    报分母等于报"没有可标的",那行数字反而更绕) */}
                 {(tagProgress?.total ?? 0) > 0 && (
                   <>/<span className="num">{(tagProgress?.total ?? 0).toLocaleString()}</span></>
                 )}{' '}
@@ -379,6 +394,17 @@ export default function TagPanel() {
               </>
             )}
             {tagModelHint && <> · {tagModelHint}</>}
+          </div>
+        )}
+
+        {/* 进度条 —— 只在跑的时候有(空闲那行说的是"库里标了多少",不是一次跑的进度,
+            给它配一根条会让人以为有个东西正在动)。
+            §9D.2 那行等宽数字照旧是准确读数,这根条是**一眼看到大概到哪**;
+            颜色走 `--accent`(不留给 antd 默认的 `colorInfo` —— 那是蓝色,
+            和这块面板的青色对不上;主题只改了 colorPrimary) */}
+        {tagging && (
+          <div style={{ marginTop: 6 }}>
+            <Progress percent={tagPct} size="small" strokeColor="var(--accent)" />
           </div>
         )}
 

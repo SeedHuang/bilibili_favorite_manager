@@ -70,6 +70,23 @@ describe('标注路由', () => {
     await app.close();
   });
 
+  // **第一帧必须是 progress 且带着全量分母。** 这是"一共多少个"唯一的数据源:
+  // 原来它只在 `onBatch` 里发,而那是批次完成后 —— 第一批跑完之前界面只能写
+  // "已标 0 条"(用户报的就是这个)。池子在开跑前算好、跑中不变,所以第一帧就能给。
+  it('run:第一批跑完之前先发一帧 progress,带上本轮池子的总数', async () => {
+    const { app, db } = makeApp();
+    for (let i = 0; i < 20; i++) upsertItem(db, { id: `BV${i}`, type: 2, title: `题${i}` });
+    // 一条都标不上(模型回空)→ 一次 onBatch 都不会调 —— 这一帧就是**唯一**的进度来源
+    mocks.complete.mockResolvedValue('[]');
+
+    const res = await app.inject({ method: 'POST', url: '/api/tags/run' });
+    const events = sse(res.body);
+    // 断言的是"第一帧"不是"某处有一帧":界面靠它把分母画出来的时刻就是这里
+    expect(events[0]!.event).toBe('progress');
+    expect(events[0]!.data).toEqual({ done: 0, total: 20, tagged: 0 });
+    await app.close();
+  });
+
   it('run(scope=all):已标注的也重标', async () => {
     const { app, db } = makeApp();
     upsertItem(db, { id: 'BV1', type: 2, title: 'a' });

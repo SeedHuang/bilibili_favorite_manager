@@ -102,6 +102,21 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
       if (!closed()) reply.raw.write(`event: aborted\ndata: {"reason":"已中止"}\n\n`);
     };
 
+    /**
+     * **第一批跑完之前先发一帧,把分母交出去。**
+     *
+     * 进度帧原来只从 `onBatch` 里发,而 `onBatch` 是**批次完成后**才调的 —— 于是
+     * 第一批结束之前客户端手里一个数都没有,那一行只能写"已标 0 条"(用户报的就是这个)。
+     * 而分母开跑前就已经定了:`pool` 是上面增量过滤的结果,`runTagging` 的 `total`
+     * 就是 `pool.length`,跑中不会变(`done` 只增;补轮缩的是 pending,不是 total)。
+     * 所以这里补一帧 `done: 0` —— 客户端能画进度条、能报"一共多少个"全靠它。
+     */
+    if (!closed()) {
+      reply.raw.write(
+        `event: progress\ndata: ${JSON.stringify({ done: 0, total: pool.length, tagged: 0 })}\n\n`,
+      );
+    }
+
     try {
       const r = await runTagging({
         config: llm.config,
