@@ -307,8 +307,8 @@ export interface TagProgressPayload {
 }
 
 // ── M4g:标签体系(词库树)──────────────────────────────
-// 这里先只落「规则选择标签」用得着的那两个 —— 规则面板要从词库里挑标签,
-// 而存的又是 id(见 RuleCondition.any),没有树就既选不了、也显示不出名字。
+// 树这个形状是必须的:规则存的标签是 id(见 RuleCondition.any),而人挑的时候
+// 挑的是词名 —— 没有树就既选不了、也显示不出名字。
 
 export interface TagNode {
   id: number;
@@ -334,7 +334,7 @@ export interface TreeChange {
 
 export interface TagRunResult {
   tagged: number;
-  failedBatches: { firstItemId: string; size: number; reason: string }[];
+  failedBatches: FailedBatch[];
   /** 质检做了什么 —— 剔了几个泛词、合了几组、挪了几个 */
   check: { dropped: number; merged: number; moved: number };
   /** 这轮树发生了什么(质检的 + 判据的),「标签」页顶部那张清单 */
