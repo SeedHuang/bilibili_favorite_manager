@@ -38,7 +38,7 @@ import { generateText } from 'ai';
 import { createDeepSeek } from '@ai-sdk/deepseek';
 const deepseek = createDeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY });
 const { text } = await generateText({
-  model: deepseek('deepseek-v4-flash'),
+  model: deepseek('deepseek-flash'),
   prompt: '...',
 });
 ```
@@ -91,13 +91,27 @@ interface ModelConfig {
 | `minimax-m3` | 1024K | 128K | 测 | 方舟端限 128K(M3 原生更大) |
 | `glm-5.3` | 1024K | 128K | 测 | |
 | `glm-5.3-flash` | 1024K | 128K | 测 | |
-| `deepseekk-v4-flash` | 1024K | 384K | 测 | |
-| `deepseek-v4-pro` | 1024K | 384K | 测 | |
+| `deepseek-v4-pro` | 1024K | 384K | 官 | DeepSeek-V4-Pro-0813 |
+| `deepseek-flash` | 1024K | 384K | 官 | DeepSeek 普通 API,DeepSeek-V4.1-Flash;**thinking 默认开**(见 §3 末) |
 | `kimi-k2.7-code` | 256K | 32K | 测 | K2.7 ≠ K3 |
 | `kimi-k3` | 1024K | 128K | 测 | |
-| `deepseek-chat` | 128K | 8K | 官 | DeepSeek 普通 API |
-| `deepseek-reasoner` | 128K | 8K | 官 | DeepSeek 普通 API |
 | `MiniMax-M2.7` | 204.8K | 8K(估) | 官/估 | MiniMax 直连 |
+
+**这张表只收「厂商现在在售」的模型**(2026-09-18)。它是「模型管理」页下拉的数据源 ——
+所以留一条已下架的模型,等于让用户能在界面上选到一个用不了的名字。退役的直接删,不留痕。
+
+**2026-09-18 清理**:删掉 `deepseekk-v4-flash`(官方文档脚注明说**已退役**,请求由
+V4.1-Flash 服务、按 Flash 价计费)、`deepseek-chat`、`deepseek-reasoner`(官方模型表
+已不再列它们);补上 `deepseek-flash` —— 9-16 真机发现 `/models` 只回 flash / pro 时
+只补进了代码注册表,**这张表漏了**,现在补上。
+
+**DeepSeek 官方现在只有两个模型**:`deepseek-flash`(V4.1-Flash)与 `deepseek-v4-pro`
+(V4-Pro-0813),共用 1M 上下文 / 384K 输出。代码注册表里 pro 记在**方舟段** ——
+`getModelMeta` 按模型名查、与 provider 无关,所以 deepseek 直连拉到 pro 也命中同一条。
+
+**别把两代 flash 搞混**(同名不同代,差 15.6 分):`deepseek-v4-flash`(V4,已退役)
+在 LiveBench 上是 65.48,`deepseek-v4.1-flash-max`(V4.1)是 81.11。我们表里的
+`deepseek-flash` 是**后者**。
 
 **本地 Ollama 模型不入表** —— 运行时调 `/api/show` 拿 `context_length` 等真实值,自动 `verified:true`。
 
@@ -144,6 +158,22 @@ const batchSize = Math.floor((contextWindow - reservedForSystem) / estTokensPerI
 
 **备用升级**:若 14B 在"发现 42 个夹子可合并"这种结构洞察上不够,可试 `qwen3:30b` 或 27B 级
 (Q4_K_M ~17GB)。但**当前不选它** —— 稳定性优先。
+
+### ⚠️ thinking 模式要能按环节开关(2026-09-18)
+
+`deepseek-flash` **默认就走思考模式** —— 官方文档原话:「支持非思考与思考模式(默认)」。
+这个默认值对不同环节的影响是相反的:
+
+- **交互式**(聊天):**要开** —— §9D.5 的思考流可见正是为它做的
+- **批量**(归类、打标、质检):**要关** —— 每批吐一长串推理,输出 token 涨数倍、整体变慢;
+  而这些任务要的是「照格式吐 JSON」,不是「想清楚」
+
+**代码现状**:`llm/provider.ts` 只把 reasoning 透传出去给前端看,**没有开关** ——
+批量环节目前没有手段关掉它。**这是待补项**(见 m4f-tag-library.md 的运行方式一节)。
+
+**为什么值得专门记一笔**:它是这套流程里**唯一能让费用翻倍的杠杆**。输出价
+$0.60/M(off-peak)、$1.20/M(peak),而归类一轮的输出侧就是十几万 token ——
+thinking 开满,一轮从约 $0.24 涨到 $0.5–0.75。数字见 m4f-tag-library.md 的费用一节。
 
 **⚠️ 踩坑记录**:曾有外部模型建议 `Qwen3.8-27B` —— **该型号在 Ollama registry 不存在(404)**。
 外部答案要逐条核实,不能因为论证专业就盲信细节。

@@ -27,7 +27,7 @@ describe('凭证层', () => {
     const db = fresh();
     const p = saveProvider(db, { provider: 'deepseek', apiKey: 'sk-keep-me-1234' });
     // 读取走三层(凭证→条目→分配),所以要有一条被用途引用的条目才读得到
-    addEntry(db, { providerId: p.id, model: 'deepseek-chat' });
+    addEntry(db, { providerId: p.id, model: 'deepseek-flash' });
     saveProvider(db, { id: p.id, provider: 'deepseek', baseUrl: 'http://x/v1' });
     expect(readLlmSettings(db, 'chat')!.config.apiKey).toBe('sk-keep-me-1234');
     saveProvider(db, { id: p.id, provider: 'deepseek', apiKey: '' });
@@ -76,7 +76,7 @@ describe('条目层', () => {
     seedLlm(db);
     const [first] = listEntries(db);
     const p2 = saveProvider(db, { provider: 'deepseek', apiKey: 'sk-second-1234' });
-    const e2 = addEntry(db, { providerId: p2.id, model: 'deepseek-chat' });
+    const e2 = addEntry(db, { providerId: p2.id, model: 'deepseek-flash' });
     const a = getAssignments(db);
     for (const purpose of PURPOSES) expect(a[purpose]).toBe(first!.id);
     expect(e2.id).not.toBe(first!.id);
@@ -101,11 +101,11 @@ describe('条目层', () => {
 describe('readLlmSettings(三层查找)', () => {
   it('purpose 有分配 → 拼 config + ctx;apiKey 解密;数字来自注册表', () => {
     const db = fresh();
-    seedLlm(db, { provider: 'deepseek', model: 'deepseek-chat', apiKey: 'sk-x-12345678' });
+    seedLlm(db, { provider: 'deepseek', model: 'deepseek-flash', apiKey: 'sk-x-12345678' });
     const s = readLlmSettings(db, 'rules')!;
-    expect(s.config).toMatchObject({ provider: 'deepseek', model: 'deepseek-chat', apiKey: 'sk-x-12345678' });
-    expect(s.ctx.contextWindow).toBe(128_000); // 注册表里的,不是手填
-    expect(s.ctx.maxOutput).toBe(8_192);
+    expect(s.config).toMatchObject({ provider: 'deepseek', model: 'deepseek-flash', apiKey: 'sk-x-12345678' });
+    expect(s.ctx.contextWindow).toBe(1_024_000); // 注册表里的,不是手填
+    expect(s.ctx.maxOutput).toBe(384_000);
     expect(s.ctx.verified).toBe(true);
   });
 

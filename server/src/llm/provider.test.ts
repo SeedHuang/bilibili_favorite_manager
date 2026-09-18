@@ -72,7 +72,7 @@ const deepseekCfg: ModelConfig = {
   provider: 'deepseek',
   baseUrl: '',
   apiKey: 'sk-test',
-  model: 'deepseek-chat',
+  model: 'deepseek-flash',
 };
 const ollamaCfg: ModelConfig = {
   id: '本地 14b',

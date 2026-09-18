@@ -25,13 +25,13 @@ describe('listRemoteModels', () => {
     const got = await listRemoteModels({
       provider: 'deepseek',
       apiKey: 'k',
-      fetchImpl: fake(200, ok(['deepseek-chat'])),
+      fetchImpl: fake(200, ok(['deepseek-flash'])),
     });
 
     expect(got).toHaveLength(1);
-    expect(got[0]!.model).toBe('deepseek-chat');
+    expect(got[0]!.model).toBe('deepseek-flash');
     // 注册表里收录过 → 用真值,而且标成已确认
-    expect(got[0]!.contextWindow).toBe(128_000);
+    expect(got[0]!.contextWindow).toBe(1_024_000);
     expect(got[0]!.verified).toBe(true);
   });
 

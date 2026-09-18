@@ -28,8 +28,8 @@ describe('batchSize', () => {
   });
 
   it('大上下文但小输出上限 → 按输出预算压批次(防 JSON 写一半被截断)', () => {
-    // deepseek-chat 是 128K 输入 / 8K 输出:输入装得下 500 条,输出写不完
-    expect(batchSize(getModelMeta('deepseek', 'deepseek-chat'))).toBeLessThanOrEqual(200);
+    // MiniMax-M2.7 是 204.8K 输入 / 8K 输出:输入装得下 800 条,输出写不完
+    expect(batchSize(getModelMeta('minimax', 'MiniMax-M2.7'))).toBeLessThanOrEqual(200);
   });
 
   it('批次永远 ≥ 1 —— 上下文小到装不下预留量时也不能返回 0 或负数', () => {
@@ -37,7 +37,7 @@ describe('batchSize', () => {
   });
 
   it('输入侧的估算不超上下文预算', () => {
-    for (const m of [local14b, getModelMeta('ark', 'kimi-k3'), getModelMeta('deepseek', 'deepseek-chat')]) {
+    for (const m of [local14b, getModelMeta('ark', 'kimi-k3'), getModelMeta('deepseek', 'deepseek-flash')]) {
       expect(batchSize(m) * EST_TOKENS_PER_ITEM).toBeLessThanOrEqual(
         m.contextWindow - RESERVED_FOR_SYSTEM + EST_TOKENS_PER_ITEM,
       );

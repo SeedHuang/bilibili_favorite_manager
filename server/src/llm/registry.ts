@@ -115,15 +115,9 @@ export const MODELS: Record<string, ModelMeta> = {
     maxOutput: 128_000,
     verified: true,
   },
-  // 注:spec 表格里写作 `deepseekk-v4-flash`(双 k),同一份 spec 的 §3 用法示例
-  // 与 §3 模型清单都写作 `deepseek-v4-flash` —— 按后者收,双 k 是录入笔误。
-  'deepseek-v4-flash': {
-    provider: 'ark',
-    model: 'deepseek-v4-flash',
-    contextWindow: 1_024_000,
-    maxOutput: 384_000,
-    verified: true,
-  },
+  // 2026-09-18:方舟段原来还收着 `deepseek-v4-flash`,已删 —— 官方文档脚注写明它
+  // **已退役**,请求由 DeepSeek-V4.1-Flash 服务、按 Flash 价计费。留着等于让「模型管理」
+  // 的下拉能选到一个已下架的名字。详见下面「DeepSeek 普通 API」那段。
   'deepseek-v4-pro': {
     provider: 'ark',
     model: 'deepseek-v4-pro',
@@ -153,11 +147,16 @@ export const MODELS: Record<string, ModelMeta> = {
   // ── DeepSeek 普通 API ────────────────────────────
   //
   // **这张表不跟账号走。** key 实际服务哪些模型只有厂商知道,以「模型管理」里点「刷新」
-  // 拉回来的为准 —— 2026-09-16 实测一个账号只服务 flash / pro,**连 deepseek-chat 都不在
-  // 它的列表里**(虽然那个名字仍然调得通,所以下面那两条留着当兜底)。
+  // 拉回来的为准。
+  //
+  // 2026-09-18:官方模型表**只剩两个模型** —— `deepseek-flash`(V4.1-Flash)与
+  // `deepseek-v4-pro`(V4-Pro-0813)。这一段原来还有 chat / reasoner 两条兜底,已删:
+  // 官方表里不再列它们,而留着等于让「模型管理」的下拉能选到已下架的模型。
+  // (pro 记在**方舟段** —— getModelMeta 按模型名查、与 provider 无关,所以 deepseek 直连
+  // 拉到 pro 也命中同一条,数字照样对。见 registry.test.ts 那条测试。)
   //
   // 数字来源:官方价格页。那一页 flash / pro 两行是 `colspan=2` —— 两个模型**共用**
-  // 1M 上下文 / 384K 输出,所以底下两条记的是同一组数。
+  // 1M 上下文 / 384K 输出。
   'deepseek-flash': {
     provider: 'deepseek',
     model: 'deepseek-flash',
@@ -165,20 +164,6 @@ export const MODELS: Record<string, ModelMeta> = {
     maxOutput: 384_000,
     verified: true,
     note: 'DeepSeek-V4.1-Flash',
-  },
-  'deepseek-chat': {
-    provider: 'deepseek',
-    model: 'deepseek-chat',
-    contextWindow: 128_000,
-    maxOutput: 8_192,
-    verified: true,
-  },
-  'deepseek-reasoner': {
-    provider: 'deepseek',
-    model: 'deepseek-reasoner',
-    contextWindow: 128_000,
-    maxOutput: 8_192,
-    verified: true,
   },
 
   // ── MiniMax 直连 ─────────────────────────────────

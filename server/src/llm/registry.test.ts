@@ -3,8 +3,8 @@ import { MODELS, getModelMeta, listModels } from './registry.js';
 
 describe('模型注册表', () => {
   it('已知模型返回实测的 contextWindow / maxOutput', () => {
-    const m = getModelMeta('deepseek', 'deepseek-chat');
-    expect(m.contextWindow).toBe(128_000);
+    const m = getModelMeta('minimax', 'MiniMax-M2.7');
+    expect(m.contextWindow).toBe(204_800);
     expect(m.maxOutput).toBe(8_192);
     expect(m.verified).toBe(true);
   });
@@ -64,9 +64,10 @@ describe('模型注册表', () => {
 
   it('listModels 可按 provider 过滤,供设置页下拉用', () => {
     const deepseek = listModels('deepseek');
-    // 3 条 = chat / reasoner / flash。这是**兜底列表**(拉不到厂商列表时用),
-    // 所以它该有点东西,但不该被当成"你账号有哪些模型"的答案 —— 那个只有 /models 知道。
-    expect(deepseek).toHaveLength(3);
+    // 1 条 = flash(2026-09-18 起 chat / reasoner 随官方下架被删)。这是**兜底列表**
+    // (拉不到厂商列表时用),所以它该有点东西,但不该被当成"你账号有哪些模型"的答案
+    // —— 那个只有 /models 知道。
+    expect(deepseek).toHaveLength(1);
     expect(deepseek.every((m) => m.provider === 'deepseek')).toBe(true);
     expect(listModels()).toHaveLength(Object.keys(MODELS).length);
   });

@@ -1022,10 +1022,10 @@ describe('模型管理', () => {
       const { app, db } = makeApp({ llm: false });
       const p = await app.inject({ method: 'PUT', url: '/api/settings/providers', payload: { provider: 'deepseek' } });
       const pid = p.json().id;
-      const e = await app.inject({ method: 'POST', url: '/api/settings/entries', payload: { providerId: pid, model: 'deepseek-chat' } });
+      const e = await app.inject({ method: 'POST', url: '/api/settings/entries', payload: { providerId: pid, model: 'deepseek-flash' } });
       expect(e.statusCode).toBe(200);
       const list = (await app.inject({ method: 'GET', url: '/api/settings/entries' })).json();
-      expect(list.entries[0]).toMatchObject({ model: 'deepseek-chat', contextWindow: 128_000, maxOutput: 8_192, verified: true });
+      expect(list.entries[0]).toMatchObject({ model: 'deepseek-flash', contextWindow: 1_024_000, maxOutput: 384_000, verified: true });
       const a = (await app.inject({ method: 'GET', url: '/api/settings/assignments' })).json();
       expect(a.assignments).toEqual({
         chat: list.entries[0].id, classify: list.entries[0].id, rules: list.entries[0].id, tag: list.entries[0].id,
@@ -1102,7 +1102,7 @@ describe('模型管理', () => {
     await app.inject({
       method: 'POST',
       url: '/api/settings/test-llm',
-      payload: { provider: 'deepseek', model: 'deepseek-chat', apiKey: 'sk-live-DEADBEEF' },
+      payload: { provider: 'deepseek', model: 'deepseek-flash', apiKey: 'sk-live-DEADBEEF' },
     });
 
     const rows = db
