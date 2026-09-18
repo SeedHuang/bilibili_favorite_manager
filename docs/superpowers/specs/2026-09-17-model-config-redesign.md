@@ -37,7 +37,7 @@ tag 没配的项逐项回落主模型。问题:
 [{ "id": "p_xxx", "provider": "deepseek", "baseUrl": "", "apiKey": "<DPAPI 密文>" }]
 
 // llm.models
-[{ "id": "m_xxx", "providerId": "p_xxx", "model": "deepseek-v4-flash" }]
+[{ "id": "m_xxx", "providerId": "p_xxx", "model": "deepseek-flash" }]
 ```
 
 - id 由后端生成(`crypto.randomUUID()`),不透明,前端只透传。
