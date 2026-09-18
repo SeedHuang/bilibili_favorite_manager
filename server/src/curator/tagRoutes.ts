@@ -25,6 +25,16 @@ export interface TagDeps {
 /** 最近一轮「树的变化」清单存这个键 —— 刷新页面还在(§9F C10 要"看得见") */
 const CHANGES_KEY = 'tags.lastChanges';
 
+/**
+ * 「这次改动不合法」的哨兵 —— PATCH 路由用它把两种失败分开。
+ *
+ * 那个事务里两类失败必须走不同状态码:**用户输入不合法**是 400,**库真出故障**是 500。
+ * 都用裸 `Error` 的话 `catch` 无从分辨,只能一律当 400 —— 等于把一次 SQLite 故障
+ * 谎报成"你的输入有问题",还把内部错误串当成校验文案发给客户端。
+ * 错误归类错了比响亮地失败更糟,所以宁可多这一个类型。
+ */
+class Rejected extends Error {}
+
 /** 这些 id 是不是全都在词库里 —— 手动操作都要先过这一句,否则 404 变成静默无操作 */
 const tagsExist = (db: Database.Database, ids: number[]): boolean => {
   const uniq = [...new Set(ids)];
@@ -246,9 +256,12 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
      *
      * 失败靠**抛**来中止:事务正常返回才提交。`renameTag` / `setTagParent` 内部
      * 各自的 transaction 会被 savepoint 嵌套进来一起回滚,不用动那两个函数。
+     *
+     * 抛的是 `Rejected` 而**不是**裸 `Error` —— 见下面 catch 里那段:不区分的话
+     * 一次数据库故障会被谎报成 400。
      */
     const reject = (reason: string): never => {
-      throw new Error(reason);
+      throw new Rejected(reason);
     };
     try {
       db.transaction(() => {
@@ -270,7 +283,10 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
         }
       })();
     } catch (e) {
-      return reply.code(400).send({ ok: false, reason: (e as Error).message });
+      // **不是我们的拒绝 → 照实往上抛**,Fastify 默认处理回 500(和加事务之前一样)。
+      // 吞下去当 400 会把"库坏了"说成"你输入错了",还泄漏内部错误串
+      if (!(e instanceof Rejected)) throw e;
+      return reply.code(400).send({ ok: false, reason: e.message });
     }
     return { ok: true };
   });
