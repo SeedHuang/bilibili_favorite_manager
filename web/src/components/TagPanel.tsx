@@ -23,7 +23,7 @@ export default function TagPanel() {
   const [editing, setEditing] = useState<number | null>(null);
   const [draft, setDraft] = useState('');
 
-  // ── AI 标注(spec §9E C8)── 照 `suggesting` 那套:**自己的开关,不碰 `busy`**。
+  // ── AI 标注(spec §9E C8)── **专用开关、不碰 `busy`**。
   // 共用 busy 会让"标注跑着"把改名/合并/删除全锁死,反过来也一样 —— §9D.5 已经踩过一次。
   //
   // **入口在这一页,不在「规则」页**(§9F 改址)── §9E C8 当初把它摆在规则页,理由是
@@ -146,12 +146,18 @@ export default function TagPanel() {
       setTagging(false);
       setTagProgress(null);
       // 落库是**逐批**的,所以成功和中断都得刷新:状态行要重算"已标 N/M",树和
-      // 「上一轮变化」也要重拉 —— 中断时已落库的那几批同样长在树上。状态那下来
-      // 挂了不能顶掉上面那句话,所以它单独把错误吞掉。
+      // 「上一轮变化」也要重拉 —— 中断时已落库的那几批同样长在树上。
+      //
+      // **三个都得吞掉自己的错误**:这里在 `finally` 里,调用方又是 `void runTag(...)`,
+      // 没人接住的 rejection 会直接冒成 unhandled —— 后端一挂,一次普通的刷新失败就
+      // 会变成控制台的报错。而且 `refreshChanges` 没有 `onError`,不吞的话它单独失败
+      // 就会变成"上面报着「新增词 N 个」、下面「上一轮变化」静悄悄停在旧数据"。
+      // 树那下来的错不吞也白搭:`useRequest` 的 `onError` 已经会画红条,这里吞掉
+      // 不隐藏任何东西。
       await Promise.all([
         tagApi.status().then(setTagStatus).catch(() => {}),
-        refreshTree(),
-        refreshChanges(),
+        refreshTree().catch(() => {}),
+        refreshChanges().catch(() => {}),
       ]);
     }
   };
