@@ -25,8 +25,9 @@ const EMPTY: {
 /**
  * 按标签看收藏 —— 复用 ItemGrid(条目渲染只有一套口径),只在旁边加一层标签选择。
  *
- * 选中的标签存在 URL 上(`?tag=`),不放在 state 里 —— 这样"从「标签」页点一个词
- * 跳过来"和"在这一页点"走的是同一条路,而且刷新/后退都还在原地。
+ * 选中的标签存在 URL 上(`?tag=`),不放在 state 里:刷新和后退键都还在原地,
+ * 而且"选中了哪个词"本来就是一个能用纯 URL 表达的状态 —— 想钉到某一个词,
+ * 给个链接就行,不必为此开一条组件间的传参通道。
  */
 export default function BrowsePanel() {
   const [params, setParams] = useSearchParams();

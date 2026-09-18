@@ -12,7 +12,7 @@ export default function BrowsePage() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <span className="hud-label" style={{ color: 'var(--accent)' }}>浏览</span>
         <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
-          按标签看收藏 —— 选一个词,它**连同下面所有的词**一起捞出来
+          按标签看收藏 —— 选一个词,连同它下面所有的词一起捞出来
         </span>
       </div>
       <BrowsePanel />

@@ -244,6 +244,25 @@ describe('标签树路由', () => {
     expect(body.foldersOf[body.items[0].id]).toEqual([{ id: 1, title: '露营' }]);
   });
 
+  // **这个页面的承重语义**(C12):选「体育」要能捞出只挂 篮球 的视频。
+  //
+  // 上面那条用例只挂**叶子**词,所以退化成 `WHERE tag_id = ?` 也照样绿 ——
+  // 定义性的行为没有测试钉住。而"点一个词捞不出它下面的词"正是这一页存在的理由,
+  // 和规则引擎的 tag 条件(C11)也是同一套语义,两处必须一致。
+  it('GET /api/tags/:id/items 走子树 —— 只挂子词的条目也捞得出来', async () => {
+    const { app, db } = makeApp();
+    const sport = ensureTag(db, '体育', null);
+    const ball = ensureTag(db, '篮球', sport);
+    // 这条**一个父词都没挂**,只有 篮球
+    upsertItem(db, { id: 'BV1', type: 2, title: '篮球教学' });
+    linkItemTag(db, 'BV1', ball, 'ai');
+
+    const r = await app.inject({ method: 'GET', url: `/api/tags/${sport}/items` });
+    const body = r.json();
+    expect(body.total).toBe(1);
+    expect(body.items[0].id).toBe('BV1');
+  });
+
   // 标点组成的名字 trim 后非空、归一化后是空串:状态码本来就是 400,别让文案变成谎话
   it('PATCH 名字只有标点 → 400,理由不是"被占了"', async () => {
     const { app, db } = makeApp();
