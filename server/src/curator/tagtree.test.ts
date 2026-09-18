@@ -43,8 +43,8 @@ describe('reconcile', () => {
     const db = openDb(':memory:');
     const food = ensureTag(db, '美食', null);
     const roast = ensureTag(db, '烤羊肉', null);
-    // 美食 40 条(其中 18 条也挂烤羊肉),烤羊肉 18 条
-    // → cover(烤羊肉→美食)=1.0,cover(美食→烤羊肉)=18/40=0.45
+    // 美食 58 条(40 条只挂美食 + 18 条同时挂两个),烤羊肉 18 条
+    // → cover(烤羊肉→美食)=18/18=1.0,cover(美食→烤羊肉)=18/58≈0.31
     //   单向高 → 挂父,不是合并(双向都高才是合并)
     seed(db, 40, [food]);
     seed(db, 18, [food, roast], 40);
