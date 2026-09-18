@@ -222,6 +222,28 @@ describe('标签树路由', () => {
     expect(row.name).toBe('体育');
   });
 
+  it('GET /api/tags/:id/items 回条目 + 每条散在哪些夹子', async () => {
+    const { app, db } = makeApp();
+    const t = ensureTag(db, '露营', null);
+    // 两条挂「露营」的视频,都在工作副本的同一个夹子里 —— 归属要跟着回来
+    db.prepare(`INSERT INTO work_folders (id, origin_id, name, created_at) VALUES (1, NULL, '露营', 0)`).run();
+    for (const id of ['BV1', 'BV2']) {
+      upsertItem(db, { id, type: 2, title: `露营 ${id}` });
+      linkItemTag(db, id, t, 'ai');
+      db.prepare(`INSERT INTO work_folder_items (folder_id, item_id) VALUES (1, ?)`).run(id);
+    }
+
+    const r = await app.inject({ method: 'GET', url: `/api/tags/${t}/items` });
+    const body = r.json();
+    expect(body.total).toBe(2);
+    // shapeItem 的字段一个不少(出口形状单一口径)
+    expect(Object.keys(body.items[0]).sort()).toEqual(
+      ['cover', 'duration', 'favTime', 'id', 'invalid', 'pubtime', 'title', 'upperName'].sort(),
+    );
+    // 夹子归属走**同级字段**,不塞进 item 里 —— 免得破坏 shapeItem 的单一口径
+    expect(body.foldersOf[body.items[0].id]).toEqual([{ id: 1, title: '露营' }]);
+  });
+
   // 标点组成的名字 trim 后非空、归一化后是空串:状态码本来就是 400,别让文案变成谎话
   it('PATCH 名字只有标点 → 400,理由不是"被占了"', async () => {
     const { app, db } = makeApp();

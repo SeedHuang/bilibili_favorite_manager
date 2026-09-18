@@ -47,6 +47,22 @@ export default function Overview() {
     { refreshDeps: [query], formatResult: rawResult },
   );
 
+  /**
+   * 选中某条时拉一次详情 —— 标签和 folders 都在响应的**顶层**,不在 item 里。
+   *
+   * **不能把 tagNames 塞进 `Item`**:列表接口(夹子/搜索/工作台)都不会带它,
+   * 加了就是"类型说有、实际永远是 undefined" —— 详情栏会静默显示「—」。
+   */
+  const { data: detail } = useRequest(
+    () =>
+      selectedItem
+        ? api<{ item: Item; folders: { id: number; title: string }[]; tagNames: string[] }>(
+            `/api/items/${selectedItem.id}`,
+          )
+        : Promise.resolve(null),
+    { refreshDeps: [selectedItem?.id], formatResult: rawResult },
+  );
+
   const displayItems = searching ? (searchRes?.items ?? []) : (folderItems?.items ?? []);
   const activeTitle =
     folders?.folders?.find((f) => f.id === activeFolder)?.title ?? '全部收藏';
@@ -127,7 +143,7 @@ export default function Overview() {
         <div style={{ height: 36 }} aria-hidden />
       </div>
 
-      <ContextPane item={selectedItem} />
+      <ContextPane item={selectedItem} tags={detail?.tagNames ?? []} />
     </div>
   );
 }

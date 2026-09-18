@@ -10,8 +10,13 @@ const dur = (d: number | null) =>
 
 const date = (t: number | null) => (t ? new Date(t * 1000).toLocaleDateString('zh-CN') : '—');
 
-/** 右栏详情 —— HUD 面板。折叠状态只留一个展开按钮,不占版面。 */
-export default function ContextPane({ item }: { item: Item | null }) {
+/**
+ * 右栏详情 —— HUD 面板。折叠状态只留一个展开按钮,不占版面。
+ *
+ * `tags` 由**调用方**传进来,组件自己不发请求:详情栏跟着选中项变,
+ * 让它自己请求的话每选一条都要多打一次接口(而且「浏览」页手上本来就有)。
+ */
+export default function ContextPane({ item, tags = [] }: { item: Item | null; tags?: string[] }) {
   const [open, setOpen] = useState(true);
 
   if (!open) {
@@ -110,6 +115,11 @@ export default function ContextPane({ item }: { item: Item | null }) {
               }}
             >
               {item.invalid ? '已失效' : '正常'}
+            </dd>
+
+            <dt className="hud-label" style={{ margin: 0 }}>标签</dt>
+            <dd style={{ margin: 0, color: 'var(--text)' }}>
+              {tags.length ? tags.join(' · ') : '—'}
             </dd>
           </dl>
 

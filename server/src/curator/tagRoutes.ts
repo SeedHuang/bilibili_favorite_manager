@@ -8,10 +8,13 @@ import type Database from 'better-sqlite3';
 import type { Logger } from '../logger/index.js';
 import { readLlmSettings } from '../llm/config.js';
 import { listUntaggedItemIds, tagStats } from '../db/repo/tagging.js';
-import type { ItemRow } from '../db/repo/items.js';
+import { getItem, type ItemRow } from '../db/repo/items.js';
+import { listWorkFolders } from '../db/repo/workbench.js';
+import { shapeItem } from '../http/routes/items.js';
 import { runTagging } from './tagger.js';
 import {
-  listTagTree, mergeTags, setTagParent, renameTag, deleteTag, normalizeTagName, type TagNode,
+  listTagTree, mergeTags, setTagParent, renameTag, deleteTag, normalizeTagName,
+  subtreeSets, type TagNode,
 } from '../db/repo/tags.js';
 import { runTagCheck } from './tagcheck.js';
 import { reconcile, type TreeChange } from './tagtree.js';
@@ -301,5 +304,73 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
   app.get('/api/tags/changes', async () => {
     const raw = getSetting(db, CHANGES_KEY);
     return { changes: raw ? (JSON.parse(raw) as TreeChange[]) : [] };
+  });
+
+  /**
+   * 按标签筛条目(§9F C12「浏览」页)。
+   *
+   * **用子树**:选「体育」要能捞出 NBA、世界杯那些 —— 和规则的匹配语义(C11)一致,
+   * 否则用户点一下发现"体育 只有 3 条"会以为标签没用。
+   *
+   * 夹子归属走**同级字段 `foldersOf`**,不塞进 item 里:shapeItem 是"出口形状
+   * 单一口径"(见它的注释),加字段会让前端两套渲染分叉。
+   */
+  app.get('/api/tags/:id/items', async (req, reply) => {
+    const id = Number((req.params as { id: string }).id);
+    if (!tagsExist(db, [id])) return reply.code(404).send({ ok: false, reason: '词库里没有这个标签' });
+    const q = req.query as { page?: string; pageSize?: string };
+    const page = Math.max(1, Number(q.page ?? 1) || 1);
+    const pageSize = Math.max(1, Number(q.pageSize ?? 60) || 60);
+
+    const sub = subtreeSets(db).get(id) ?? new Set([id]);
+    const ids = db
+      .prepare(
+        `SELECT DISTINCT item_id FROM item_tags
+          WHERE tag_id IN (${[...sub].map(() => '?').join(',')})
+          ORDER BY item_id`,
+      )
+      .all(...sub) as { item_id: string }[];
+
+    const total = ids.length;
+    const slice = ids.slice((page - 1) * pageSize, page * pageSize).map((r) => r.item_id);
+
+    // 归属一次查完(工作副本口径 —— 「浏览」看的是"你桌上这份")
+    const foldersOf: Record<string, { id: number; title: string }[]> = {};
+    const folderName = new Map(listWorkFolders(db).map((f) => [f.id, f.name]));
+    if (slice.length) {
+      const rows = db
+        .prepare(
+          `SELECT item_id, folder_id FROM work_folder_items
+            WHERE item_id IN (${slice.map(() => '?').join(',')})`,
+        )
+        .all(...slice) as { item_id: string; folder_id: number }[];
+      for (const r of rows) {
+        (foldersOf[r.item_id] ??= []).push({ id: r.folder_id, title: folderName.get(r.folder_id) ?? `#${r.folder_id}` });
+      }
+    }
+
+    const tagsOf: Record<string, string[]> = {};
+    if (slice.length) {
+      const rows = db
+        .prepare(
+          `SELECT it.item_id, t.name FROM item_tags it JOIN tags t ON t.id = it.tag_id
+            WHERE it.item_id IN (${slice.map(() => '?').join(',')})
+            ORDER BY it.item_id, t.name`,
+        )
+        .all(...slice) as { item_id: string; name: string }[];
+      for (const r of rows) (tagsOf[r.item_id] ??= []).push(r.name);
+    }
+
+    return {
+      items: slice
+        .map((iid) => getItem(db, iid))
+        .filter((x): x is ItemRow => x !== undefined)
+        .map((x) => shapeItem(x, null)),
+      total,
+      foldersOf,
+      // 详情栏要显示"这条挂的**全部**标签" —— 只显示当前筛的那个词会让人
+      // 以为它没有别的标签。和 foldersOf 同一批查完,不多一次往返
+      tagsOf,
+    };
   });
 }

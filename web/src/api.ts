@@ -379,6 +379,17 @@ export const tagApi = {
 
   changes: () => api<{ changes: TreeChange[] }>('/api/tags/changes'),
 
+  /**
+   * 按标签捞条目(§9F C12「浏览」页)。**子树口径** —— 选「体育」连 篮球 一起出。
+   *
+   * `foldersOf` / `tagsOf` 是**同级字段**:夹子归属和标签都不在 item 里,
+   * 因为 shapeItem 只走一个出口(见服务端那条注释)。
+   */
+  items: (id: number, page = 1) =>
+    api<{ items: Item[]; total: number; foldersOf: Record<string, { id: number; title: string }[]>; tagsOf: Record<string, string[]> }>(
+      `/api/tags/${id}/items?page=${page}&pageSize=60`,
+    ),
+
   merge: (fromId: number, toId: number) => json<{ ok: true }>('POST', '/api/tags/merge', { fromId, toId }),
 
   update: (id: number, patch: { name?: string; parentId?: number | null }) =>

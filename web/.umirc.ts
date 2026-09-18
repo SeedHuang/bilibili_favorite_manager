@@ -10,6 +10,7 @@ export default defineConfig({
     { path: '/curator', component: 'curator' },
     { path: '/rules', component: 'rules' },
     { path: '/tag', component: 'tag' },
+    { path: '/browse', component: 'browse' },
     { path: '/auth', component: 'auth' },
   ],
   npmClient: 'npm',
