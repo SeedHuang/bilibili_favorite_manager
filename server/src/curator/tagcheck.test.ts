@@ -175,8 +175,9 @@ describe('runTagCheck', () => {
     const rows = db.prepare(`SELECT message FROM events WHERE code = 'TAGCHECK_EMPTY'`).all() as
       { message: string }[];
     expect(rows).toHaveLength(1);
-    // 说清"几个词送出去了" —— 光说"什么都没判"没有可行动的信息
-    expect(rows[0]!.message).toContain('1 个新词');
+    // 说清"几个词送出去了" —— 光说"什么都没判"没有可行动的信息。
+    // 词数来自 allNames(它已含 newNames 或全库词),所以 scope='all' 空 newNames 时也报得对
+    expect(rows[0]!.message).toContain('1 个词送出去');
   });
 
   it('没传 logger 也不炸(可选参数)', async () => {

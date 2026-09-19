@@ -157,7 +157,11 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
     if (currentRun.running) {
       return reply.code(409).send({ ok: false, reason: '标注跑着不能质检 —— 先等它跑完或停止' });
     }
-    const scope = (req.body as { scope?: string })?.scope === 'all' ? 'all' : 'new';
+    // scope 显式校验:没传或传别的都 400 —— 前端弹窗永远传一个,不许静默落 new
+    const scope = (req.body as { scope?: string })?.scope;
+    if (scope !== 'all' && scope !== 'new') {
+      return reply.code(400).send({ ok: false, reason: 'scope 只能是 all 或 new' });
+    }
     const checker = readLlmSettings(db, 'tagcheck');
     if (!checker) {
       return reply.code(400).send({ ok: false, reason: '还没配「标签质检」模型 —— 先去「授权」页配一个' });

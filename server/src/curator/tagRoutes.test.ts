@@ -480,6 +480,39 @@ describe('标注路由', () => {
     await app.close();
   });
 
+  // ★ scope='new' 查的是**上一轮标注长出的新词**(lastRunNewWords)—— 上面那条用例只建老词、
+  //   从没跑过标注,lastRunNewWords=[] 一路空跑,没钉住这条接线。这里先跑一轮标注让
+  //   lastRunNewWords 有值,再 scope='new',模型判 drop 就该真的删掉那个词。
+  it('tagcheck:scope=new 检上一轮标注的新词(不是空跑)', async () => {
+    const { app, db } = makeApp();
+    upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
+    // 第一轮标注:模型标出「教学」→ 新建这个词 → lastRunNewWords=['教学']
+    // (run 里标注后还有自动质检一次调用,同样回这份结果 —— 对「教学」是无操作,不影响断言)
+    mocks.complete.mockResolvedValue(JSON.stringify([{ id: 'BV1', tags: ['教学'], kind: '教学' }]));
+    await runAndSettle(app);
+
+    // 手动质检 scope=new,模型判「教学」drop → 应真的删掉(它是上一轮新词,过 fresh 闸门)
+    mocks.complete.mockClear();
+    mocks.complete.mockResolvedValue(JSON.stringify([{ name: '教学', action: 'drop' }]));
+    const r = await app.inject({ method: 'POST', url: '/api/tags/tagcheck', payload: { scope: 'new' } });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toMatchObject({ ok: true, scope: 'new', dropped: 1 });
+    expect(db.prepare(`SELECT id FROM tags WHERE name='教学'`).get()).toBeUndefined();
+    await app.close();
+  });
+
+  it('tagcheck:scope 没传或传非法值 → 400(不许静默落 new)', async () => {
+    const { app, db } = makeApp();
+    // 没传 scope
+    const r1 = await app.inject({ method: 'POST', url: '/api/tags/tagcheck', payload: {} });
+    expect(r1.statusCode).toBe(400);
+    expect(r1.json().reason).toContain('scope 只能是 all 或 new');
+    // 非法值
+    const r2 = await app.inject({ method: 'POST', url: '/api/tags/tagcheck', payload: { scope: 'bogus' } });
+    expect(r2.statusCode).toBe(400);
+    await app.close();
+  });
+
   it('tagcheck:标注跑着时拒绝(409)', async () => {
     const { app, db } = makeApp();
     upsertItem(db, { id: 'BV1', type: 2, title: 'a' });

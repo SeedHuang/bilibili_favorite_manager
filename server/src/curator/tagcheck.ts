@@ -133,7 +133,7 @@ export async function runTagCheck(opts: {
 
   // 闸门:没词可判就一次 LLM 都不调
   if (allNames.length === 0) {
-    opts.onNote?.('info', '本轮没有新词可判 —— 质检无事发生');
+    opts.onNote?.('info', opts.allTags ? '词库是空的 —— 没有词可判' : '本轮没有新词可判 —— 质检无事发生');
     return { dropped: 0, merged: 0, moved: 0 };
   }
 
@@ -175,10 +175,10 @@ export async function runTagCheck(opts: {
    * (每条 ~20 token)撞上服务商的默认输出上限就会被截断。**要不要切批、上限定多少
    * 是设计取舍,不在这儿偷偷定**(见文件头那段)—— 但"什么都没判"必须出声。
    *
-   * 上面那道闸门保证走到这里 `newNames` 非空,所以"送出去 0 个词"不需要另判。
+   * 上面那道闸门保证走到这里 `allNames` 非空,所以"送出去 0 个词"不需要另判。
    */
   if (verdicts.length === 0) {
-    const why = `标签质检一个词都没判回来:${opts.newNames.length} 个新词送出去、0 条判定 —— 本轮的变化清单是空的,别当成"都没问题"(输出可能被截断)`;
+    const why = `标签质检一个词都没判回来:${allNames.length} 个词送出去、0 条判定 —— 本轮的变化清单是空的,别当成"都没问题"(输出可能被截断)`;
     opts.log?.event({ level: 'warn', category: 'llm', code: 'TAGCHECK_EMPTY', message: why });
     // 同一句话也发一帧(§9D.7)—— 日志要独立成立:events 表是给事后查的,日志是
     // 给**正在看着它跑**的人看的,而这一路此前恰恰是"跑完了、什么都没说"
