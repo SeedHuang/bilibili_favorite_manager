@@ -15,7 +15,7 @@ export const RESERVED_FOR_SYSTEM = 1500;
  * 标注批的条数上限 —— 公共配置,AI 标注 / 继续标注 / 重新标注全部共读(tagger.ts)。
  * 模型偶尔漏条有补轮兜底,调小只多花轮次、不会漏标;调大减少调用次数。
  */
-export const TAG_BATCH_CAP = 5;
+export const TAG_BATCH_CAP = 16;
 
 /**
  * 一批塞多少条。由当前模型的 `contextWindow` 动态算,**不硬编码** ——
