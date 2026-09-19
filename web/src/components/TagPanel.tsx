@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, App as AntApp, Button, Progress, Select, Spin } from 'antd';
-import { Combine, Pencil, Check, Square, Tag, X, Trash2, ScrollText, RefreshCw } from 'lucide-react';
+import { Alert, App as AntApp, Button, Input, Progress, Select, Spin } from 'antd';
+import { Combine, Pencil, Check, Square, Tag, X, Trash2, ScrollText, RefreshCw, Eraser } from 'lucide-react';
 import { useRequest } from '@umijs/max';
 import { rawResult, tagApi } from '../api';
 import type { TagLogLine, TagNode, TagProgressPayload, TagRunStatus } from '../types';
 import TagTree from './TagTree';
 import TagLogDrawer from './TagLogDrawer';
+import { runButtons } from '../utils/tagRunButtons';
 
 /**
  * 词库治理 —— 四层:顶上「AI 标注」(这一跑长出下面的一切)、「树的变化」清单、
@@ -249,6 +250,44 @@ export default function TagPanel() {
       onOk: () => void runTag('all'),
     });
 
+  /** 清空标注:高危、不可撤销,必须输入「清空」二字才可点确定(二次确认) */
+  const confirmClearTags = () => {
+    let typed = '';
+    const inst = modal.confirm({
+      title: '清空所有标注?',
+      content: (
+        <div style={{ fontSize: 13 }}>
+          <div style={{ color: 'var(--text-dim)', marginBottom: 8 }}>
+            会把 <b>整棵词库树</b>(tags + 条目关联)和所有条目的 AI 标注一起删掉,
+            规则里的标签条件也会移除。这个动作<b>不可撤销</b> —— 想测「继续标注」
+            性能时,用它回到「从没标过」的状态。
+          </div>
+          <div style={{ color: 'var(--text-dim)', marginBottom: 4 }}>输入「清空」以确认:</div>
+          <Input
+            autoFocus
+            value={typed}
+            onChange={(e) => {
+              typed = e.target.value;
+              inst.update({ okButtonProps: { disabled: typed !== '清空' } });
+            }}
+            style={{ width: '100%' }}
+          />
+        </div>
+      ),
+      okText: '清空',
+      okButtonProps: { danger: true, disabled: true },
+      cancelText: '算了',
+      onOk: async () => {
+        await act(async () => {
+          await tagApi.clearTags();
+          setTagNote('已清空标注 —— 所有条目回到未标注状态');
+        });
+        // act 只刷 tree/changes/stats;按钮态靠 tagStatus 算,清空后要一起刷回 0
+        await tagApi.status().then(setTagStatus).catch(() => {});
+      },
+    });
+  };
+
   const toggle = (id: number) =>
     setExpanded((s) => {
       const next = new Set(s);
@@ -462,11 +501,25 @@ export default function TagPanel() {
               </Button>
             ) : (
               <>
-                <Button size="small" icon={<Tag size={13} />} onClick={() => void runTag('missing')}>
-                  AI 标注
-                </Button>
-                <Button size="small" icon={<RefreshCw size={13} />} onClick={retagAll}>
-                  重新标注全部
+                {runButtons(tagStatus?.tagged ?? 0, tagStatus?.total ?? 0).map((b) =>
+                  b === 'retag' ? (
+                    <Button key="retag" size="small" icon={<RefreshCw size={13} />} onClick={retagAll}>
+                      重新标注全部
+                    </Button>
+                  ) : (
+                    <Button
+                      key="run"
+                      size="small"
+                      icon={<Tag size={13} />}
+                      onClick={() => void runTag('missing')}
+                    >
+                      {b === 'continue' ? '继续标注' : 'AI 标注'}
+                    </Button>
+                  ),
+                )}
+                {/* 清空标注:高危、连词库树一起清,必须输入「清空」二字才可确定 */}
+                <Button size="small" danger icon={<Eraser size={13} />} onClick={confirmClearTags}>
+                  清空标注
                 </Button>
               </>
             )}

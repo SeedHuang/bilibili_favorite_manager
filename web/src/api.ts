@@ -422,4 +422,7 @@ export const tagApi = {
 
   /** 中止正在跑的那一轮。幂等 —— 没在跑也返回 ok */
   abortRun: () => json<{ ok: true }>('POST', '/api/tags/run-abort'),
+
+  /** 清空标注(M4h 后测试辅助)—— 连词库树一起清,高危,前端要二次确认 */
+  clearTags: () => json<{ ok: true }>('POST', '/api/tags/clear-tags'),
 };
