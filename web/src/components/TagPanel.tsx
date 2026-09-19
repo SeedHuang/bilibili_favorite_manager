@@ -294,18 +294,19 @@ export default function TagPanel() {
   /** 手动质检:弹窗单选范围。「全部审查」会删模型判定为泛词的词,不可逆,默认不选 */
   const confirmTagCheck = () => {
     let scope: 'all' | 'new' = 'new';
-    const inst = modal.confirm({
+    modal.confirm({
       title: '词库质检',
       content: (
         <div style={{ fontSize: 13 }}>
           <div style={{ color: 'var(--text-dim)', marginBottom: 10 }}>
             跑一遍质检,模型会逐个判定词的去向 —— 泛词该删、重复词该并、归错层的该挪。
           </div>
+          {/* 非受控(照 confirmClearTags 的 Input):content 只在调用时求值一次,
+              value 绑定会把 'new' 冻结进不可变 element,inst.update 也换不走 ——
+              onChange 只更新闭包 scope 供 onOk 读 */}
           <Radio.Group
-            value={scope}
             onChange={(e) => {
               scope = e.target.value;
-              inst.update({});
             }}
           >
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
