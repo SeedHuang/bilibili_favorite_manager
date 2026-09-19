@@ -54,6 +54,24 @@ async function runAndSettle(app: Awaited<ReturnType<typeof makeApp>>['app'], url
 
 beforeEach(() => vi.clearAllMocks());
 
+/** 手动质检的轮询骨架 —— 照 runAndSettle:POST 启动即返回,轮询 check-progress 到 running=false */
+async function checkAndSettle(app: Awaited<ReturnType<typeof makeApp>>['app']) {
+  const progress = await vi.waitFor(async () => {
+    const p = (await app.inject({ method: 'GET', url: '/api/tags/check-progress' })).json() as {
+      running: boolean;
+      result: { dropped: number; merged: number; moved: number; checked: number } | null;
+      error: string | null;
+    };
+    if (p.running) throw new Error('still running');
+    return p;
+  });
+  return progress as {
+    running: boolean;
+    result: { dropped: number; merged: number; moved: number; checked: number } | null;
+    error: string | null;
+  };
+}
+
 describe('标注路由', () => {
   it('status:报已标/总数;打标用途没配 → model 为 null(不再回落主模型)', async () => {
     const { app, db } = makeApp();
@@ -455,7 +473,8 @@ describe('标注路由', () => {
     await app.close();
   });
 
-  // 手动质检端点:scope='new' 只检新词;scope='all' 检全库
+  // 手动质检端点:scope='new' 只检新词;scope='all' 检全库。
+  // 端点是**启动即返回 + 后台跑**,结果从 check-progress 轮询拿
   it('tagcheck:scope=new 走 fresh 闸门,scope=all 绕开', async () => {
     const { app, db } = makeApp();
     ensureTag(db, '美食', null);
@@ -463,17 +482,20 @@ describe('标注路由', () => {
     // 两种 scope 模型都判 drop 美食
     mocks.complete.mockResolvedValue(JSON.stringify([{ name: '美食', action: 'drop' }]));
 
-    // scope=new:美食不是本轮新词(没传 newWords),被 fresh 闸门挡住 → 不删
+    // scope=new:美食不是本轮新词(lastRunNewWords 里没有它 —— 模块级变量可能带着
+    // 其他测试残留的词,所以只断言"美食不被删",不钉 checked 的具体数)
     const r1 = await app.inject({ method: 'POST', url: '/api/tags/tagcheck', payload: { scope: 'new' } });
     expect(r1.statusCode).toBe(200);
-    expect(r1.json()).toMatchObject({ ok: true, scope: 'new', dropped: 0 });
+    const p1 = await checkAndSettle(app);
+    expect(p1.result).toMatchObject({ dropped: 0 });
     expect(db.prepare(`SELECT id FROM tags WHERE name='美食'`).get()).toBeTruthy();
 
     // scope=all:检全库 → 美食被删
     mocks.complete.mockClear();
     const r2 = await app.inject({ method: 'POST', url: '/api/tags/tagcheck', payload: { scope: 'all' } });
     expect(r2.statusCode).toBe(200);
-    expect(r2.json()).toMatchObject({ ok: true, scope: 'all', dropped: 1 });
+    const p2 = await checkAndSettle(app);
+    expect(p2.result).toMatchObject({ dropped: 1, checked: 2 }); // 全库=美食+露营
     expect(db.prepare(`SELECT id FROM tags WHERE name='美食'`).get()).toBeUndefined();
     // 记了 TAGCHECK_MANUAL
     expect(db.prepare(`SELECT code FROM events WHERE code='TAGCHECK_MANUAL'`).get()).toBeTruthy();
@@ -496,7 +518,8 @@ describe('标注路由', () => {
     mocks.complete.mockResolvedValue(JSON.stringify([{ name: '教学', action: 'drop' }]));
     const r = await app.inject({ method: 'POST', url: '/api/tags/tagcheck', payload: { scope: 'new' } });
     expect(r.statusCode).toBe(200);
-    expect(r.json()).toMatchObject({ ok: true, scope: 'new', dropped: 1 });
+    const p = await checkAndSettle(app);
+    expect(p.result).toMatchObject({ dropped: 1, checked: 1 });
     expect(db.prepare(`SELECT id FROM tags WHERE name='教学'`).get()).toBeUndefined();
     await app.close();
   });

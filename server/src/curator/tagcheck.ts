@@ -26,7 +26,7 @@ import {
   findTag, listTagsWithParent, mergeTags, normalizeTagName, setTagParent, deleteTag, type TagNode,
 } from '../db/repo/tags.js';
 
-export const CHECK_SYSTEM = `你是标签词库的质检员。用户给你一棵标签树和一批词,判断每个词该怎么办。
+export const CHECK_SYSTEM = `你是标签词库的质检员。用户给你一棵标签树和一批词,判断每个词该怎么办,并给出一句理由。
 
 - **drop**(太泛,删掉):这个词不能把一类内容和其它内容**分开**。
   该删的例:"AI""视频""教程""分享""合集""超清" —— 几乎每条都挂,没有区分力。
@@ -41,12 +41,15 @@ export const CHECK_SYSTEM = `你是标签词库的质检员。用户给你一棵
   该留的例:"露营""烤羊肉""NBA"。
 
 **拿不准就 keep** —— 漏掉一个泛词只是让树脏一点,误删一个好词是丢掉信息。
-只输出 JSON 数组:[{"name":"AI","action":"drop"},{"name":"鲁夫","action":"merge","target":"路飞"}]`;
+每条都必须带 reason(一句话,说清为什么这么判,比如"挂了 3000 条,什么都有,分不开")。
+只输出 JSON 数组:[{"name":"AI","action":"drop","reason":"几乎每条都挂,没有区分力"},{"name":"鲁夫","action":"merge","target":"路飞","reason":"同一个人的译名"}]`;
 
 export interface TagVerdict {
   name: string;
   action: 'keep' | 'drop' | 'merge' | 'move';
   target?: string;
+  /** 模型给的判定理由(一句话)—— 日志里让用户看懂"为什么" */
+  reason?: string;
 }
 
 /** 收窄。**target 必须是已有词** —— 模型编的目标一律丢掉,退回 keep */
@@ -60,7 +63,7 @@ export function coerceVerdicts(raw: unknown, known: ReadonlySet<string>): TagVer
   const knownNorm = new Map([...known].map((n) => [normalizeTagName(n), n]));
 
   for (const r of list) {
-    const o = r as { name?: unknown; action?: unknown; target?: unknown };
+    const o = r as { name?: unknown; action?: unknown; target?: unknown; reason?: unknown };
     if (typeof o?.name !== 'string' || !o.name.trim()) continue;
 
     const name = o.name.trim();
@@ -68,6 +71,7 @@ export function coerceVerdicts(raw: unknown, known: ReadonlySet<string>): TagVer
       o.action === 'drop' || o.action === 'merge' || o.action === 'move' ? o.action : 'keep';
     const targetNorm = typeof o.target === 'string' ? normalizeTagName(o.target) : '';
     const target = targetNorm ? knownNorm.get(targetNorm) : undefined;
+    const reason = typeof o.reason === 'string' && o.reason.trim() ? o.reason.trim() : undefined;
 
     // **只有 merge / move 需要目标。**
     //
@@ -75,10 +79,10 @@ export function coerceVerdicts(raw: unknown, known: ReadonlySet<string>): TagVer
     // 于是条件恒真、**每个 drop 都被改写成 keep**,「剔泛词」那道闸门整轮失效。
     // §9F.6 明说"剔除裸泛词是这套判据**唯一**的软肋",那唯一的闸门却是关着的。
     if ((action === 'merge' || action === 'move') && !target) {
-      out.push({ name, action: 'keep' });
+      out.push({ name, action: 'keep', ...(reason ? { reason } : {}) });
       continue;
     }
-    out.push({ name, action, ...(target ? { target } : {}) });
+    out.push({ name, action, ...(target ? { target } : {}), ...(reason ? { reason } : {}) });
   }
   return out;
 }
@@ -108,6 +112,8 @@ export async function runTagCheck(opts: {
   onNote?: (level: 'info' | 'warn', text: string) => void;
   /** 用户中止信号 —— 透传给 complete,不然质检挂起时 run-abort 也停不下来 */
   signal?: AbortSignal;
+  /** 批判完报一次进度(手动质检的进度条靠它)—— done/total 是**词数** */
+  onBatch?: (p: { done: number; total: number }) => void;
   /**
    * 单次质检调用的超时(ms)。**和打标同一个理由**:本地模型挂起时不设超时,
    * complete 永不 resolve,`currentRun.running` 被永久钉在 true,后续 run 全 409。
@@ -170,6 +176,7 @@ export async function runTagCheck(opts: {
     // 每批判完都报数 —— 分批后单批输出被截断(0 判定)会被其他批的非零总数掩盖,
     // 不在这里出声的话用户看到的就是" apparently 干净"的一轮
     console.log(`[tags/check] 批 ${batchNo}/${batchTotal} 判定 ${batchVerdicts.length} 个`);
+    opts.onBatch?.({ done: Math.min(i + TAGCHECK_BATCH, allNames.length), total: allNames.length });
     if (batchVerdicts.length === 0) {
       const why = `第 ${batchNo}/${batchTotal} 批一个词都没判回来:${batch.length} 个词送出去、0 条判定 —— 这批可能被截断了,按"都没问题"处理了`;
       opts.log?.event({ level: 'warn', category: 'llm', code: 'TAGCHECK_EMPTY', message: why });

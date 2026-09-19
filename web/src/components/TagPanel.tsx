@@ -3,7 +3,7 @@ import { Alert, App as AntApp, Button, Input, Progress, Radio, Select, Spin } fr
 import { Combine, Pencil, Check, Square, Tag, X, Trash2, ScrollText, RefreshCw, Eraser, ScanSearch } from 'lucide-react';
 import { useRequest } from '@umijs/max';
 import { rawResult, tagApi } from '../api';
-import type { TagLogLine, TagNode, TagProgressPayload, TagRunStatus } from '../types';
+import type { TagCheckProgressPayload, TagLogLine, TagNode, TagProgressPayload, TagRunStatus } from '../types';
 import TagTree from './TagTree';
 import TagLogDrawer from './TagLogDrawer';
 import { runButtons } from '../utils/tagRunButtons';
@@ -34,13 +34,16 @@ export default function TagPanel() {
   // 去别处按,说不通。所以搬过来,规则页那边不再留副本。
   const [tagging, setTagging] = useState(false);
   const [tagProgress, setTagProgress] = useState<TagProgressPayload | null>(null);
+  /** 手动质检的运行态 —— 和 tagging 同一套三件套(进度/轮询/停止) */
+  const [checking, setChecking] = useState(false);
+  const [checkProgress, setCheckProgress] = useState<TagCheckProgressPayload | null>(null);
   /** 常显那行的两个数:打开页面取一次,每跑完一轮(成功或中断)再刷一次 */
   const [tagStatus, setTagStatus] = useState<TagRunStatus | null>(null);
   /** 中断/完成的一句话 —— warn 色,不走顶上那个红条(§9D B4) */
   const [tagNote, setTagNote] = useState('');
   /** 中断文案里要报"已标了多少" —— 轮询结束会清 state,所以单独留一份(照 ChatDrawer) */
   const lastTagProgress = useRef<TagProgressPayload | null>(null);
-  /** 当前活动轮询的停止函数 —— runTag 和"重进恢复"共用一处,卸载时统一清理 */
+  /** 当前活动轮询的停止函数 —— runTag/质检/恢复三个入口共用,卸载时统一清理 */
   const stopPollingRef = useRef<(() => void) | null>(null);
 
   // ── 标注日志(§9D.7)──────────────────────────────────
@@ -220,27 +223,6 @@ export default function TagPanel() {
   // **重进页面恢复**:后端可能还有一轮在跑(用户上次离开时没停,后台继续标了)。
   // 进页面先查一次 run-progress —— 还在跑就把界面恢复成"标注中"并接管轮询。
   // 这样用户一进来就看到真相,想停点「停止」就真停了。
-  useEffect(() => {
-    let cancelled = false;
-    // resolve 前可能已卸载 —— 用 cancelled 挡在启动轮询之前,不然泄漏一个
-    // 在已卸载组件上 setState 的轮询
-    tagApi.getRunProgress().then((p) => {
-      if (cancelled || !p.running) return;
-      setTagging(true);
-      setTagProgress({ done: p.done, total: p.total, tagged: p.tagged });
-      setLogLines(p.logs);
-      stopPollingRef.current?.();
-      stopPollingRef.current = startPolling();
-    }).catch(() => {});
-    return () => {
-      cancelled = true;
-      stopPollingRef.current?.();
-      stopPollingRef.current = null;
-    };
-  }, [startPolling]);
-  // **卸载不中止后端** —— 用户在标注跑着时关页面/切走,后台照常标完(逐批落库,
-  // 停了才是浪费已标的部分)。下次进来由上面的恢复 effect 接管。
-
   /** 「重新标注全部」= 全量重标,**会覆盖旧标注**(spec §9E.4),所以先问一句 */
   const retagAll = () =>
     modal.confirm({
@@ -291,6 +273,87 @@ export default function TagPanel() {
     });
   };
 
+  /**
+   * 手动质检的轮询 —— 照 startPolling(标注)的结构:500ms 一拍、stopped 标志防
+   * 竞态、跑完刷树/变化/健康度。日志(verdict 带 reason)进同一个抽屉。
+   */
+  const startCheckPolling = useCallback(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let stopped = false;
+    const stopTimer = () => { stopped = true; if (timer) clearTimeout(timer); };
+
+    const tick = async () => {
+      try {
+        const p = await tagApi.getCheckProgress();
+        if (stopped) return;
+        setCheckProgress({ done: p.done, total: p.total });
+        setLogLines((prev) => (prev.length === p.logs.length ? prev : p.logs));
+
+        if (p.error) {
+          setError(p.error);
+          setChecking(false);
+          await finishPoll();
+          return;
+        }
+        if (!p.running) {
+          if (p.result) {
+            const r = p.result;
+            // checked=0 = 根本没词可检(没跑过标注/库空),和"检完都没问题"分开说
+            setTagNote(
+              r.checked === 0
+                ? '质检完成 —— 没有可检的词(还没跑过标注,或词库是空的)'
+                : `质检完成(查了 ${r.checked.toLocaleString()} 个词):删 ${r.dropped} · 合 ${r.merged} · 挪 ${r.moved}`,
+            );
+          } else {
+            setTagNote('已中断:已判定的词保留在库里');
+          }
+          setChecking(false);
+          await finishPoll();
+          return;
+        }
+      } catch {
+        // 单次轮询失败不炸 —— 下一拍再试
+      }
+      if (stopped) return;
+      timer = setTimeout(tick, 500);
+    };
+
+    void tick();
+    return stopTimer;
+  }, [finishPoll]);
+
+  // **重进页面恢复**:标注或手动质检可能还在后台跑(用户切走没停)。进页面先查
+  // 两处 run-progress / check-progress —— 在跑就恢复界面并接管轮询。
+  // **卸载不中止后端** —— 用户在跑着时关页面/切走,后台照常跑完(逐批落库,
+  // 停了才是浪费)。下次进来由这个 effect 接管。
+  useEffect(() => {
+    let cancelled = false;
+    // resolve 前可能已卸载 —— 用 cancelled 挡在启动轮询之前,不然泄漏一个
+    // 在已卸载组件上 setState 的轮询
+    tagApi.getRunProgress().then((p) => {
+      if (cancelled || !p.running) return;
+      setTagging(true);
+      setTagProgress({ done: p.done, total: p.total, tagged: p.tagged });
+      setLogLines(p.logs);
+      stopPollingRef.current?.();
+      stopPollingRef.current = startPolling();
+    }).catch(() => {});
+    // 手动质检也要恢复 —— 后端在跑时切走再回来,同样接管轮询
+    tagApi.getCheckProgress().then((p) => {
+      if (cancelled || !p.running) return;
+      setChecking(true);
+      setCheckProgress({ done: p.done, total: p.total });
+      setLogLines(p.logs);
+      stopPollingRef.current?.();
+      stopPollingRef.current = startCheckPolling();
+    }).catch(() => {});
+    return () => {
+      cancelled = true;
+      stopPollingRef.current?.();
+      stopPollingRef.current = null;
+    };
+  }, [startPolling, startCheckPolling]);
+
   /** 手动质检:弹窗单选范围。「全部审查」会删模型判定为泛词的词,不可逆,默认不选 */
   const confirmTagCheck = () => {
     let scope: 'all' | 'new' = 'new';
@@ -324,24 +387,19 @@ export default function TagPanel() {
       okText: '开始质检',
       cancelText: '算了',
       onOk: () => {
-        // **不锁界面等它** —— 全库质检是最长几分钟的 LLM 调用,把用户关在弹窗里
-        // 转圈(runTag 不走 act() 的同一个理由)。确定即关弹窗,结果落 tagNote
-        setTagNote(scope === 'all' ? '词库质检进行中(全部审查)……' : '词库质检进行中(只查新的)……');
-        void tagApi.tagcheck(scope)
-          .then((r) => {
-            // checked=0 = 根本没词可检(没跑过标注/库是空的),和"检完都没问题"必须分开说
-            if (r.checked === 0) {
-              setTagNote('质检完成 —— 没有可检的词(还没跑过标注,或词库是空的)');
-            } else {
-              setTagNote(`质检完成(查了 ${r.checked} 个词):删 ${r.dropped} · 合 ${r.merged} · 挪 ${r.moved}`);
-            }
-          })
-          .then(() => Promise.all([
-            refreshTree().catch(() => {}),
-            refreshChanges().catch(() => {}),
-            refreshStats().catch(() => {}),
-          ]))
-          .catch((e) => setError((e as Error).message));
+        // 照 runTag:启动即返回,进度/判定/理由靠轮询 check-progress,日志抽屉全程可见
+        setError('');
+        setTagNote('');
+        setLogLines([]);
+        setChecking(true);
+        setCheckProgress(null);
+        tagApi.tagcheck(scope).catch((e) => {
+          setChecking(false);
+          setError((e as Error).message);
+          return;
+        });
+        stopPollingRef.current?.();
+        stopPollingRef.current = startCheckPolling();
       },
     });
   };
@@ -439,7 +497,10 @@ export default function TagPanel() {
   walk(tree?.tree ?? []);
 
   const actions = (node: TagNode) =>
-    editing === node.id ? (
+    // 标注/质检在跑时不渲染行内操作 —— 两边都会改同一棵树,跑了改名/合并/删除
+    // 会让轮询回来看到的世界和界面动作打架
+    tagging || checking ? null
+      : editing === node.id ? (
       <>
         <input
           autoFocus
@@ -545,18 +606,25 @@ export default function TagPanel() {
             {/* 运行中只有一个「停止」 —— 两个"发动标注"的按钮在跑着的时候都藏着,
                 不然"已经有两个能发动的按钮"同时杵在「停止」旁边很奇怪。停止走显式
                 abort 端点(轮询版没有可 abort 的 fetch) */}
-            {tagging ? (
-              <Button
-                size="small"
-                danger
-                icon={<Square size={13} />}
-                onClick={() => {
-                  // 停止失败要出声 —— 不然用户点了"停止"却完全不知道没生效
-                  void tagApi.abortRun().catch((e) => setError((e as Error).message));
-                }}
-              >
-                停止
-              </Button>
+            {tagging || checking ? (
+              <>
+                {/* 标注或质检在跑:只留「停止」+「日志」—— 两边都会改同一棵树,
+                    其他按钮(质检/清空/树行操作)运行中一律不可见 */}
+                <Button
+                  size="small"
+                  danger
+                  icon={<Square size={13} />}
+                  onClick={() => {
+                    // 停止失败要出声 —— 不然用户点了"停止"却完全不知道没生效
+                    void tagApi.abortRun().catch((e) => setError((e as Error).message));
+                  }}
+                >
+                  停止
+                </Button>
+                <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
+                  {tagging ? '标注运行中' : '质检运行中'}
+                </span>
+              </>
             ) : (
               <>
                 {/* tagStatus 取数前(null)兜底成 primary —— 不然 runButtons(0,0) 返回 []
@@ -592,9 +660,21 @@ export default function TagPanel() {
 
         {/* 常显:首屏就该看到"标了多少、这轮用哪个模型"。跑起来换成进度行
             (§9D.2:数字走 num 等宽,位数不抖) */}
-        {(tagStatus || tagging) && (
+        {(tagStatus || tagging || checking) && (
           <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)', marginTop: 8 }}>
-            {tagging ? (
+            {checking ? (
+              <>
+                质检中:已判{' '}
+                <span className="num" style={{ color: 'var(--accent)' }}>
+                  {(checkProgress?.done ?? 0).toLocaleString()}
+                </span>
+                {/* total 在第一批判完前是 0 —— 和标注同一个兜法,不报分母 */}
+                {(checkProgress?.total ?? 0) > 0 && (
+                  <>/<span className="num">{(checkProgress?.total ?? 0).toLocaleString()}</span></>
+                )}{' '}
+                个词
+              </>
+            ) : tagging ? (
               <>
                 标注中:已标{' '}
                 <span className="num" style={{ color: 'var(--accent)' }}>
@@ -630,6 +710,16 @@ export default function TagPanel() {
         {tagging && (
           <div style={{ marginTop: 6 }}>
             <Progress percent={tagPct} size="small" strokeColor="var(--accent)" />
+          </div>
+        )}
+        {/* 质检的进度条 —— 同一根条的逻辑,分母是待检词数(第一批前 0,不画) */}
+        {checking && (checkProgress?.total ?? 0) > 0 && (
+          <div style={{ marginTop: 6 }}>
+            <Progress
+              percent={Math.round(((checkProgress!.done / checkProgress!.total) * 100) * 100) / 100}
+              size="small"
+              strokeColor="var(--accent)"
+            />
           </div>
         )}
 

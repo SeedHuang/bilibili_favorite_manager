@@ -137,13 +137,19 @@ function LogRow({ line }: { line: TagLogLine }) {
   }
   if (line.type === 'verdict') {
     return (
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0 }}>
         <span className="num" style={{ color: 'var(--text-dim)', flex: 'none' }}>质检</span>
         <span style={{ flex: 'none' }}>「{line.name}」</span>
         {/* 判词按动作上色 —— 一眼扫过去就知道这轮主要动了什么 */}
         <span style={{ color: actionColor(line.action), flex: 'none' }}>
           {actionText(line)}
         </span>
+        {/* 模型给的判定理由 —— "为什么这么判"必须看得见,不然删词就是黑箱 */}
+        {line.reason && (
+          <span style={{ color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {line.reason}
+          </span>
+        )}
       </div>
     );
   }

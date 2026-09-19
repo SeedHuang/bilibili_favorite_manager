@@ -359,6 +359,8 @@ export interface TagLogVerdict {
   name: string;
   action: 'keep' | 'drop' | 'merge' | 'move';
   target?: string;
+  /** 模型给的判定理由(一句话)—— "为什么这么判"要看得见 */
+  reason?: string;
 }
 
 /** note 帧:过程中的一句话 —— info 是顺带说明,warn 是要看的岔子 */
@@ -394,6 +396,26 @@ export interface ReconcileStats {
   activeTags: number;
   reconcileMs: number | null;
   lastRunAt: number | null;
+}
+
+/** 手动质检的 progress 帧载荷 —— done/total 是**词数** */
+export interface TagCheckProgressPayload {
+  done: number;
+  total: number;
+}
+
+/**
+ * 手动质检的实时状态 —— `GET /api/tags/check-progress` 一次拉全,轮询模式同 TagRunProgress。
+ * `logs` 是这一轮的全部日志行(phase/verdict/note),verdict 带 reason(模型给的判定理由)。
+ */
+export interface TagCheckProgress {
+  running: boolean;
+  scope: 'all' | 'new' | null;
+  done: number;
+  total: number;
+  result: { dropped: number; merged: number; moved: number; checked: number } | null;
+  error: string | null;
+  logs: TagLogLine[];
 }
 
 /** 一轮整理对树做了什么 —— 「标签」页顶部的清单(§9F C10) */

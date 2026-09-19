@@ -42,15 +42,27 @@ const CHANGES_KEY = 'tags.lastChanges';
  */
 const lastReconcile: { ms: number | null; at: number | null } = { ms: null, at: null };
 
-/**
- * 手动质检的在跑标志 —— **双向并发守卫的一半**。clear-tags / run 那边只看
- * `currentRun.running`,这边必须同样立一个:两个手动质检并行、或质检与标注
- * 并行,都会在**同一棵树**上互相踩(drop 已删的节点 → 500/树损坏,不可逆)。
- */
-const manualCheck: { running: boolean } = { running: false };
-
 /** 单次质检模型调用的超时 —— 和标注后自动质检同一个数,一处改两边跟 */
 const TAGCHECK_TIMEOUT_MS = 180_000;
+
+/**
+ * 手动质检的实时状态 —— 照 currentRun 的样子,**轮询 `/api/tags/check-progress` 读**。
+ * 手动全库质检是最长几分钟的 LLM 调用,启动即返回 + 前端轮询(和标注同一套 UX),
+ * 进度/判定/理由全挂在 logs 上,日志抽屉里看得见。
+ */
+const currentCheck: {
+  running: boolean;
+  scope: 'all' | 'new' | null;
+  done: number;
+  total: number;
+  result: { dropped: number; merged: number; moved: number; checked: number } | null;
+  error: string | null;
+  logs: unknown[];
+  controller: AbortController | null;
+} = {
+  running: false, scope: null, done: 0, total: 0,
+  result: null, error: null, logs: [], controller: null,
+};
 
 /**
  * 上一轮标注长出的新词 —— 手动质检 scope='new' 用它(不然"只查这次新的"没词可查)。
@@ -139,9 +151,17 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
   });
 
   app.post('/api/tags/run-abort', async () => {
-    // 没有在跑的就当无事发生 —— 幂等,反复点停止不炸
+    // 没有在跑的就当无事发生 —— 幂等,反复点停止不炸。
+    // 标注和手动质检都可能挂在模型调用上,两个 controller 都发中止信号
     currentRun.controller?.abort();
+    currentCheck.controller?.abort();
     return { ok: true };
+  });
+
+  // ── 手动质检的进度查询 —— 和 run-progress 同一套轮询模式 ──
+  app.get('/api/tags/check-progress', async () => {
+    const { running, scope, done, total, result, error, logs } = currentCheck;
+    return { running, scope, done, total, result, error, logs };
   });
 
   /**
@@ -161,11 +181,13 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
    * 手动质检(spec M4h 扩展)。scope 选范围:
    * - 'new':只检本轮新词(fresh 闸门,老词不碰)
    * - 'all':检全库词,绕过 fresh(老词可能被删,不可逆 —— 弹窗已明示风险)
-   * 同步执行;标注跑着时 409。
+   *
+   * **启动即返回 + 后台跑** —— 和 /api/tags/run 同一套 UX:前端轮询
+   * check-progress 看进度,日志抽屉看每条判定和理由,run-abort 能停。
    */
   app.post('/api/tags/tagcheck', async (req, reply) => {
     // **双向守卫**:标注在跑、或另一个手动质检在跑,都拒 —— 两边会改同一棵树
-    if (currentRun.running || manualCheck.running) {
+    if (currentRun.running || currentCheck.running) {
       return reply.code(409).send({ ok: false, reason: '已有标注/质检在跑 —— 先等它跑完或停止' });
     }
     // scope 显式校验:没传或传别的都 400 —— 前端弹窗永远传一个,不许静默落 new
@@ -177,11 +199,27 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
     if (!checker) {
       return reply.code(400).send({ ok: false, reason: '还没配「标签质检」模型 —— 先去「授权」页配一个' });
     }
-    manualCheck.running = true;
+
+    // 初始化这轮质检的状态 + 启动即返回
+    const controller = new AbortController();
+    currentCheck.running = true;
+    currentCheck.scope = scope;
+    currentCheck.done = 0;
+    currentCheck.total = 0;
+    currentCheck.result = null;
+    currentCheck.error = null;
+    currentCheck.logs = [];
+    currentCheck.controller = controller;
+    reply.send({ ok: true });
+
     const t0 = Date.now();
-    let r;
+    /** 日志出口 —— 照 run 路由的 frame:写进 currentCheck.logs 让轮询读到 */
+    const frame = (event: 'phase' | 'verdict' | 'note', data: unknown) => {
+      currentCheck.logs.push({ type: event, ...(data as object) });
+    };
     try {
-      r = await runTagCheck({
+      frame('phase', { phase: 'check', provider: checker.config.provider, model: checker.config.model });
+      const r = await runTagCheck({
         config: checker.config,
         tree: listTagTree(db),
         // scope='new' 用上一轮标注的新词(还没跑过标注就是空数组 → 零批早退,合理:没有"这次新的"可查);
@@ -190,31 +228,42 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
         db,
         log,
         allTags: scope === 'all',
-        // 无 signal:手动质检是独立请求,没有 run 的 controller(词库上万时整轮最长 N×180s,
-        // 是 spec 接受的已知天花板 —— 前端已改为不锁界面等它)
+        signal: controller.signal,
         timeoutMs: TAGCHECK_TIMEOUT_MS,
+        // 每批判完刷进度 + 判定/理由逐条进日志(onVerdict/onNote 见 runTagCheck)
+        onBatch: (p) => { currentCheck.done = p.done; currentCheck.total = p.total; },
+        onVerdict: (v) => frame('verdict', v),
+        onNote: (level, text) => frame('note', { level, text }),
       });
+      console.log(`[tags/check] 手动质检完成 scope=${scope} 耗时 ${Date.now() - t0}ms`);
+      log.event({ level: 'info', category: 'llm', code: 'TAGCHECK_MANUAL', message: `手动质检(${scope}):查 ${r.checked} · 删 ${r.dropped} · 合 ${r.merged} · 挪 ${r.moved}` });
+      // 手动质检动了树(删/并/挪都已落库),「上一轮变化」要跟着写 —— 不然前端
+      // refreshChanges() 拉回来的还是上一轮标注的清单,和眼前这棵树对不上
+      if (r.dropped > 0 || r.merged > 0 || r.moved > 0) {
+        setSetting(db, CHANGES_KEY, JSON.stringify([{
+          kind: 'merge',
+          from: '（手动质检）',
+          to: '',
+          detail: `范围 ${scope === 'all' ? '全部审查' : '只查新的'} · 合并 ${r.merged} 组 · 挪位 ${r.moved} 个 · 剔除泛词 ${r.dropped} 个`,
+        }]));
+      }
+      currentCheck.result = r;
     } catch (e) {
-      // 手动质检失败要出声 + 回 500 —— 不能静默返回"删 0 合 0 挪 0"(看起来像"什么都没检"但其实是挂了)
-      const message = (e as Error)?.message ?? String(e);
-      log.event({ level: 'warn', category: 'llm', code: 'TAGCHECK_FAILED', message });
-      return reply.code(500).send({ ok: false, reason: `质检失败:${message}` });
+      // 中止不是故障(用户点停止,§9D B5);其余失败要出声
+      if (controller.signal.aborted) {
+        const message = '用户中止了质检 —— 已判定的词已保留';
+        log.event({ level: 'warn', category: 'llm', code: 'TAGCHECK_ABORTED', message });
+        frame('note', { level: 'warn', text: message });
+      } else {
+        const message = (e as Error)?.message ?? String(e);
+        log.event({ level: 'warn', category: 'llm', code: 'TAGCHECK_FAILED', message });
+        frame('note', { level: 'warn', text: `质检失败:${message}` });
+        currentCheck.error = message;
+      }
     } finally {
-      manualCheck.running = false;
+      currentCheck.running = false;
+      currentCheck.controller = null;
     }
-    console.log(`[tags/check] 手动质检完成 scope=${scope} 耗时 ${Date.now() - t0}ms`);
-    log.event({ level: 'info', category: 'llm', code: 'TAGCHECK_MANUAL', message: `手动质检:${scope}` });
-    // 手动质检动了树(删/并/挪都已落库),「上一轮变化」要跟着写 —— 不然前端
-    // refreshChanges() 拉回来的还是上一轮标注的清单,和眼前这棵树对不上
-    if (r.dropped > 0 || r.merged > 0 || r.moved > 0) {
-      setSetting(db, CHANGES_KEY, JSON.stringify([{
-        kind: 'merge',
-        from: '（手动质检）',
-        to: '',
-        detail: `范围 ${scope === 'all' ? '全部审查' : '只查新的'} · 合并 ${r.merged} 组 · 挪位 ${r.moved} 个 · 剔除泛词 ${r.dropped} 个`,
-      }]));
-    }
-    return { ok: true, scope, ...r };
   });
 
   app.post('/api/tags/run', async (req, reply) => {
