@@ -129,7 +129,6 @@ export async function runTagCheck(opts: {
     ? listTagsWithParent(db).map((r) => r.name)   // 全库词名
     : [...opts.newNames];
 
-  const verdicts: TagVerdict[] = [];
   const known = new Set<string>();
   const collect = (nodes: readonly TagNode[]) => {
     for (const n of nodes) { known.add(n.name); collect(n.children); }
@@ -146,6 +145,77 @@ export async function runTagCheck(opts: {
   // 树的 prompt 前缀整轮不变(改动要等批次跑完才落库),循环外算一次 —— 全库 60 批
   // 每批重渲染 12000 行的树字符串是白烧 CPU
   const treeText = renderTree(opts.tree) || '(空)';
+
+  let dropped = 0, merged = 0, moved = 0;
+  /** 一条判定落到库上(闸门/动作/计数/onVerdict 全在这)—— 每批 coerce 完**当场执行** */
+  const applyVerdict = (v: TagVerdict) => {
+    // **老词一律不碰** —— 但 allTags=true(手动全库质检)时放开(fresh 为 null)。
+    // 比较走归一化,树里存的是显示名("NBA"),模型可能吐 "nba"
+    if (fresh && !fresh.has(normalizeTagName(v.name))) {
+      // 跳过也得出声(§9D.7)—— 一句"判了但没动它"比一个字都没有诚实
+      opts.onNote?.('warn', `质检判了「${v.name}」,但它不是本轮的新词 —— 按规矩没动它`);
+      return;
+    }
+
+    if (v.action === 'drop') {
+      // **drop 只认规范名**(`tags.norm`),不查别名表。
+      //
+      // 别名说明这个名字是某个**活词的另一种写法**(合并留下的旧名、改名前的旧名),
+      // 所以"要删的词"跟"这个词"根本不是一个东西。走 `findTag` 会顺着别名把 id 解到
+      // 那具活词上,一句 drop 就把无辜的词连同它的 `item_tags` 删了 —— 而这是本文件里
+      // **唯一不可逆**的动作。判错的两个方向也不对称:漏一个泛词只是树脏一点,误删一个
+      // 好词是丢掉信息(所以系统提示词写着"拿不准就 keep")。别名 → 直接跳过。
+      const row = db.prepare(`SELECT id FROM tags WHERE norm = ?`).get(normalizeTagName(v.name)) as
+        | { id: number }
+        | undefined;
+      if (!row) {
+        // 上面那段"只认规范名"的规矩在这里**没删成**,而它和删成了长一样(都是静默)
+        opts.onNote?.('warn', `质检要剔除「${v.name}」,但词库里没有这个规范名(只认规范名、不查别名)—— 没删`);
+        return;
+      }
+      // **泛词从词库里删掉,不是"留原地"** —— 它没有任何区分力,留着只会被
+      // 集合判据推到树顶(§9F.6 说的那个软肋)。这是整套系统里唯一的防线
+      deleteTag(db, row.id);
+      dropped++;
+      opts.onVerdict?.(v);
+      return;
+    }
+
+    // merge / move 相反:它们**要的就是"任何写法都认"**(模型认名字不认 id),
+    // 所以走 findTag —— 查规范名,再查别名表
+    const id = findTag(db, normalizeTagName(v.name));
+    if (id === null) {
+      opts.onNote?.('warn', `质检判了「${v.name}」,但词库里找不到这个词 —— 没动它`);
+      return;
+    }
+
+    if (v.action === 'merge' && v.target) {
+      const targetId = findTag(db, normalizeTagName(v.target));
+      // 闸在 mergeTags 里(防环 + 深度):false = 这两个词不能并 —— 跳过,不是抛错
+      if (targetId !== null && targetId !== id && mergeTags(db, id, targetId)) {
+        merged++;
+        opts.onVerdict?.(v);
+      } else {
+        // 闸门挡下也是"判了却没动" —— 不报的话它就是又一次静默
+        opts.onNote?.('warn', `合并「${v.name}」→「${v.target}」没成(目标不在词库里,或者并过去会成环/超深)`);
+      }
+      return;
+    }
+    if (v.action === 'move' && v.target) {
+      const parentId = findTag(db, normalizeTagName(v.target));
+      // 闸在 setTagParent 里(唯一收口):false = 这次挂父不合法 → 留原位
+      if (parentId !== null && setTagParent(db, id, parentId)) {
+        moved++;
+        opts.onVerdict?.(v);
+      } else {
+        opts.onNote?.('warn', `挪位「${v.name}」→「${v.target}」没成(目标不在词库里,或者挂过去会成环/超深)`);
+      }
+      return;
+    }
+    // 落到这里的是 **keep**(没有目标的 merge/move 在 coerceVerdicts 里已经退回 keep 了)。
+    // keep 也是它做的决定 —— 用户问的正是"每个词判成了什么",只报动手的那些是半份日志
+    opts.onVerdict?.(v);
+  };
 
   for (let i = 0; i < allNames.length; i += TAGCHECK_BATCH) {
     const batchNo = Math.floor(i / TAGCHECK_BATCH) + 1;
@@ -172,7 +242,6 @@ export async function runTagCheck(opts: {
       }),
       known,
     );
-    verdicts.push(...batchVerdicts);
     // 每批判完都报数 —— 分批后单批输出被截断(0 判定)会被其他批的非零总数掩盖,
     // 不在这里出声的话用户看到的就是" apparently 干净"的一轮
     console.log(`[tags/check] 批 ${batchNo}/${batchTotal} 判定 ${batchVerdicts.length} 个`);
@@ -182,99 +251,10 @@ export async function runTagCheck(opts: {
       opts.log?.event({ level: 'warn', category: 'llm', code: 'TAGCHECK_EMPTY', message: why });
       opts.onNote?.('warn', why);
     }
+    // **当场执行本批判定** —— 日志实时滚动(用户不用等 37 批跑完才看到第一条),
+    // 中止时已判的已落库,和"部分整理"语义一致
+    for (const v of batchVerdicts) applyVerdict(v);
   }
 
-  /**
-   * **判回来 0 条,不等于"这批词都没问题"。**
-   *
-   * `parseJsonArray` 遇到**被截断**的数组返回 null(`sliceBalanced` 要一对闭括号),
-   * 于是 `coerceVerdicts` 得到 `[]`、三个计数器全是 0 —— 而这一路**没有任何红点**:
-   * 不抛错、不记 TAGCHECK_FAILED、变化清单写一份空的。用户看到的是"上一轮变化:还没有
-   * 跑过标注,或者上一轮什么都没变",旁边写着本轮新增了几百个词 —— 而 §9F.6 说首轮
-   * 那个形状会一直留在界面上。
-   *
-   * 这不是假想的路径:`provider.ts` 全程没设 `maxOutputTokens`,几百条 verdict
-   * (每条 ~20 token)撞上服务商的默认输出上限就会被截断。**要不要切批、上限定多少
-   * 是设计取舍,不在这儿偷偷定**(见文件头那段)—— 但"什么都没判"必须出声。
-   *
-   * 上面那道闸门保证走到这里 `allNames` 非空,所以"送出去 0 个词"不需要另判。
-   */
-  if (verdicts.length === 0) {
-    const why = `标签质检一个词都没判回来:${allNames.length} 个词送出去、0 条判定 —— 本轮的变化清单是空的,别当成"都没问题"(输出可能被截断)`;
-    opts.log?.event({ level: 'warn', category: 'llm', code: 'TAGCHECK_EMPTY', message: why });
-    // 同一句话也发一帧(§9D.7)—— 日志要独立成立:events 表是给事后查的,日志是
-    // 给**正在看着它跑**的人看的,而这一路此前恰恰是"跑完了、什么都没说"
-    opts.onNote?.('warn', why);
-  }
-
-  let dropped = 0, merged = 0, moved = 0;
-  for (const v of verdicts) {
-    // **老词一律不碰** —— 但 allTags=true(手动全库质检)时放开(fresh 为 null)。
-    // 比较走归一化,树里存的是显示名("NBA"),模型可能吐 "nba"
-    if (fresh && !fresh.has(normalizeTagName(v.name))) {
-      // 跳过也得出声(§9D.7)—— 一句"判了但没动它"比一个字都没有诚实
-      opts.onNote?.('warn', `质检判了「${v.name}」,但它不是本轮的新词 —— 按规矩没动它`);
-      continue;
-    }
-
-    if (v.action === 'drop') {
-      // **drop 只认规范名**(`tags.norm`),不查别名表。
-      //
-      // 别名说明这个名字是某个**活词的另一种写法**(合并留下的旧名、改名前的旧名),
-      // 所以"要删的词"跟"这个词"根本不是一个东西。走 `findTag` 会顺着别名把 id 解到
-      // 那具活词上,一句 drop 就把无辜的词连同它的 `item_tags` 删了 —— 而这是本文件里
-      // **唯一不可逆**的动作。判错的两个方向也不对称:漏一个泛词只是树脏一点,误删一个
-      // 好词是丢掉信息(所以系统提示词写着"拿不准就 keep")。别名 → 直接跳过。
-      const row = db.prepare(`SELECT id FROM tags WHERE norm = ?`).get(normalizeTagName(v.name)) as
-        | { id: number }
-        | undefined;
-      if (!row) {
-        // 上面那段"只认规范名"的规矩在这里**没删成**,而它和删成了长一样(都是静默)
-        opts.onNote?.('warn', `质检要剔除「${v.name}」,但词库里没有这个规范名(只认规范名、不查别名)—— 没删`);
-        continue;
-      }
-      // **泛词从词库里删掉,不是"留原地"** —— 它没有任何区分力,留着只会被
-      // 集合判据推到树顶(§9F.6 说的那个软肋)。这是整套系统里唯一的防线
-      deleteTag(db, row.id);
-      dropped++;
-      opts.onVerdict?.(v);
-      continue;
-    }
-
-    // merge / move 相反:它们**要的就是"任何写法都认"**(模型认名字不认 id),
-    // 所以走 findTag —— 查规范名,再查别名表
-    const id = findTag(db, normalizeTagName(v.name));
-    if (id === null) {
-      opts.onNote?.('warn', `质检判了「${v.name}」,但词库里找不到这个词 —— 没动它`);
-      continue;
-    }
-
-    if (v.action === 'merge' && v.target) {
-      const targetId = findTag(db, normalizeTagName(v.target));
-      // 闸在 mergeTags 里(防环 + 深度):false = 这两个词不能并 —— 跳过,不是抛错
-      if (targetId !== null && targetId !== id && mergeTags(db, id, targetId)) {
-        merged++;
-        opts.onVerdict?.(v);
-      } else {
-        // 闸门挡下也是"判了却没动" —— 不报的话它就是又一次静默
-        opts.onNote?.('warn', `合并「${v.name}」→「${v.target}」没成(目标不在词库里,或者并过去会成环/超深)`);
-      }
-      continue;
-    }
-    if (v.action === 'move' && v.target) {
-      const parentId = findTag(db, normalizeTagName(v.target));
-      // 闸在 setTagParent 里(唯一收口):false = 这次挂父不合法 → 留原位
-      if (parentId !== null && setTagParent(db, id, parentId)) {
-        moved++;
-        opts.onVerdict?.(v);
-      } else {
-        opts.onNote?.('warn', `挪位「${v.name}」→「${v.target}」没成(目标不在词库里,或者挂过去会成环/超深)`);
-      }
-      continue;
-    }
-    // 落到这里的是 **keep**(没有目标的 merge/move 在 coerceVerdicts 里已经退回 keep 了)。
-    // keep 也是它做的决定 —— 用户问的正是"每个词判成了什么",只报动手的那些是半份日志
-    opts.onVerdict?.(v);
-  }
   return { dropped, merged, moved, checked: allNames.length };
 }

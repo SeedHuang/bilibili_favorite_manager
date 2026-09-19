@@ -18,12 +18,15 @@ export default function TagLogDrawer({
   onClose,
   lines,
   onClear,
+  waiting,
 }: {
   open: boolean;
   onClose: () => void;
   /** 全量缓冲区 —— 封顶在渲染层做,关抽屉/再打开不会丢 */
   lines: TagLogLine[];
   onClear: () => void;
+  /** 有任务(标注/质检)在跑但日志还没内容 —— 空态要说"正在等模型",不能说"还没跑过" */
+  waiting?: boolean;
 }) {
   const [follow, setFollow] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -89,7 +92,9 @@ export default function TagLogDrawer({
       >
         {lines.length === 0 ? (
           <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-dim)', fontSize: 'var(--fs-13)' }}>
-            还没跑过标注 —— 点上面的「AI 标注」,这里会出现每一步
+            {waiting
+              ? '任务在跑 —— 正在等模型返回第一批结果……(批量越大等得越久,不是卡死)'
+              : '还没跑过标注 —— 点上面的「AI 标注」,这里会出现每一步'}
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 'var(--fs-12)', lineHeight: 1.6 }}>

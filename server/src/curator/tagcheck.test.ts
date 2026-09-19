@@ -174,11 +174,8 @@ describe('runTagCheck', () => {
     await runTagCheck({ config, tree: listTagTree(db), newNames: ['露营'], db, log });
     const rows = db.prepare(`SELECT message FROM events WHERE code = 'TAGCHECK_EMPTY'`).all() as
       { message: string }[];
-    // **两条**:单批 0 判定一条(分批后单批截断会被其他批的非零总数掩盖,必须单独报)
-    // + 总计 0 条一条(总闸门)。单批数 = 总数(只有一批),两条都说"1 个词送出去"
-    expect(rows).toHaveLength(2);
-    expect(rows[0]!.message).toContain('1 个词送出去');
-    expect(rows[1]!.message).toContain('1 个词送出去');
+    // 单批 0 判定告警(判定改当场执行后,批循环内的空批告警是唯一一处 —— 总闸门已并进去)
+    expect(rows).toHaveLength(1);
     // 说清"几个词送出去了" —— 光说"什么都没判"没有可行动的信息。
     // 词数来自 allNames(它已含 newNames 或全库词),所以 scope='all' 空 newNames 时也报得对
     expect(rows[0]!.message).toContain('1 个词送出去');

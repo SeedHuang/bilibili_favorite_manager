@@ -391,22 +391,23 @@ export default function TagPanel() {
       cancelText: '算了',
       onOk: () => {
         // 照 runTag:启动即返回,进度/判定/理由靠轮询 check-progress,日志抽屉全程可见
-        console.log('[check-ui] 点了开始质检 scope=' + scope + ' —— 进入运行态,启动轮询');
+        console.log('[check-ui] 点了开始质检 scope=' + scope + ' —— 进入运行态');
         setError('');
         setTagNote('');
         setLogLines([]);
         setChecking(true);
         setCheckProgress(null);
+        // **先等启动请求返回,再开轮询** —— 不然第一拍 tick 读到后端还没初始化的
+        // running:false,把"还没开跑"当成"跑完了",轮询直接收尾(实测踩过的竞态)
         tagApi.tagcheck(scope).then(() => {
-          console.log('[check-ui] 后端已接受启动(tagcheck 返回 ok)');
+          console.log('[check-ui] 后端已接受启动(tagcheck 返回 ok)—— 开始轮询');
+          stopPollingRef.current?.();
+          stopPollingRef.current = startCheckPolling();
         }).catch((e) => {
           console.log('[check-ui] 启动失败', String(e));
           setChecking(false);
           setError((e as Error).message);
-          return;
         });
-        stopPollingRef.current?.();
-        stopPollingRef.current = startCheckPolling();
       },
     });
   };
@@ -671,15 +672,19 @@ export default function TagPanel() {
           <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)', marginTop: 8 }}>
             {checking ? (
               <>
-                质检中:已判{' '}
-                <span className="num" style={{ color: 'var(--accent)' }}>
-                  {(checkProgress?.done ?? 0).toLocaleString()}
-                </span>
-                {/* total 在第一批判完前是 0 —— 和标注同一个兜法,不报分母 */}
-                {(checkProgress?.total ?? 0) > 0 && (
-                  <>/<span className="num">{(checkProgress?.total ?? 0).toLocaleString()}</span></>
-                )}{' '}
-                个词
+                {/* total 在第一批判完前是 0 —— 那段时间明确说"第一批判定中",
+                    不然用户只看到"已判 0 个词"分不清是在跑还是卡死 */}
+                {(checkProgress?.total ?? 0) === 0 ? (
+                  <>质检中:第一批判定中……(每批 200 个词,批量越大等得越久)</>
+                ) : (
+                  <>
+                    质检中:已判{' '}
+                    <span className="num" style={{ color: 'var(--accent)' }}>
+                      {(checkProgress?.done ?? 0).toLocaleString()}
+                    </span>
+                    /<span className="num">{(checkProgress?.total ?? 0).toLocaleString()}</span> 个词
+                  </>
+                )}
               </>
             ) : tagging ? (
               <>
@@ -719,12 +724,18 @@ export default function TagPanel() {
             <Progress percent={tagPct} size="small" strokeColor="var(--accent)" />
           </div>
         )}
-        {/* 质检的进度条 —— 同一根条的逻辑,分母是待检词数(第一批前 0,不画) */}
-        {checking && (checkProgress?.total ?? 0) > 0 && (
+        {/* 质检的进度条 —— **点击确定立刻出现**:total=0(第一批判定中)时画 0%,
+            状态 active 让它有流动动画,别让用户面对一片空白怀疑没点上 */}
+        {checking && (
           <div style={{ marginTop: 6 }}>
             <Progress
-              percent={Math.round(((checkProgress!.done / checkProgress!.total) * 100) * 100) / 100}
+              percent={
+                (checkProgress?.total ?? 0) > 0
+                  ? Math.round(((checkProgress!.done / checkProgress!.total) * 100) * 100) / 100
+                  : 0
+              }
               size="small"
+              status="active"
               strokeColor="var(--accent)"
             />
           </div>
@@ -806,6 +817,7 @@ export default function TagPanel() {
         onClose={() => setLogOpen(false)}
         lines={logLines}
         onClear={() => setLogLines([])}
+        waiting={tagging || checking}
       />
     </div>
   );

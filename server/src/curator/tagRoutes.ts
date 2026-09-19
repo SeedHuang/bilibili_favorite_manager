@@ -153,6 +153,7 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
   app.post('/api/tags/run-abort', async () => {
     // 没有在跑的就当无事发生 —— 幂等,反复点停止不炸。
     // 标注和手动质检都可能挂在模型调用上,两个 controller 都发中止信号
+    console.log('[tags/abort] 收到中止请求 run=' + currentRun.running + ' check=' + currentCheck.running);
     currentRun.controller?.abort();
     currentCheck.controller?.abort();
     return { ok: true };
@@ -264,16 +265,18 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
       }
       currentCheck.result = r;
     } catch (e) {
-      // 中止不是故障(用户点停止,§9D B5);其余失败要出声
+      // 中止不是故障(用户点停止,§9D B5);其余失败要出声。
+      // **错误消息无论哪条路都打出来** —— 中止分支也带上真实错误,别吞
+      const raw = (e as Error)?.message ?? String(e);
+      console.log(`[tags/check] 批次抛错 signal.aborted=${controller.signal.aborted} 错误=${raw}`);
       if (controller.signal.aborted) {
-        const message = '用户中止了质检 —— 已判定的词已保留';
+        const message = `用户中止了质检 —— 已判定的词已保留(触发时的错误:${raw})`;
         log.event({ level: 'warn', category: 'llm', code: 'TAGCHECK_ABORTED', message });
         frame('note', { level: 'warn', text: message });
       } else {
-        const message = (e as Error)?.message ?? String(e);
-        log.event({ level: 'warn', category: 'llm', code: 'TAGCHECK_FAILED', message });
-        frame('note', { level: 'warn', text: `质检失败:${message}` });
-        currentCheck.error = message;
+        log.event({ level: 'warn', category: 'llm', code: 'TAGCHECK_FAILED', message: raw });
+        frame('note', { level: 'warn', text: `质检失败:${raw}` });
+        currentCheck.error = raw;
       }
     } finally {
       currentCheck.running = false;
