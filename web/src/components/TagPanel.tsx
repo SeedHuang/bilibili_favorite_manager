@@ -269,7 +269,9 @@ export default function TagPanel() {
             autoFocus
             onChange={(e) => {
               typed = e.target.value;
-              inst.update({ okButtonProps: { disabled: typed !== '清空' } });
+              // HookModal.update 顶层浅合并,okButtonProps 整体替换 —— 丢了 danger
+              // 就没了红底(不可撤销的破坏性操作,红警示不能丢),所以补回
+              inst.update({ okButtonProps: { danger: true, disabled: typed !== '清空' } });
             }}
             style={{ width: '100%' }}
           />
