@@ -1,6 +1,8 @@
 # Spec:清空标注按钮 + 标注按钮三态 —— 为「继续标注」性能测试开路
 
-> 状态:待实施。本文件由 brainstorming 对话确认后写成,供新 session 按此实施。
+> 状态:**已实施(2026-09-19)**。由 `docs/superpowers/plans/2026-09-19-clear-tags-and-run-button-modes.md` 实施完成。
+> 后端 778 测试全绿(含 clear-tags 2 条)、前端 runButtons 4/4、双端 typecheck 干净。
+> 手动验收(起 dev 服务点按钮)未执行,留给用户按第四节验收。
 > 关联代码:`server/src/db/repo/tags.ts`、`server/src/curator/tagRoutes.ts`、
 > `web/src/components/TagPanel.tsx`、`web/src/api.ts`。
 
