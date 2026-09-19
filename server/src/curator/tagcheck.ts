@@ -100,6 +100,13 @@ export async function runTagCheck(opts: {
    * 界面上"质检判了个词然后什么都没发生"和"质检根本没跑"长得一模一样。
    */
   onNote?: (level: 'info' | 'warn', text: string) => void;
+  /** 用户中止信号 —— 透传给 complete,不然质检挂起时 run-abort 也停不下来 */
+  signal?: AbortSignal;
+  /**
+   * 单次质检调用的超时(ms)。**和打标同一个理由**:本地模型挂起时不设超时,
+   * complete 永不 resolve,`currentRun.running` 被永久钉在 true,后续 run 全 409。
+   */
+  timeoutMs?: number;
 }): Promise<{ dropped: number; merged: number; moved: number }> {
   const { db } = opts;
   // 闸门:**没有新词就一次 LLM 都不调** —— 所以放在每轮末尾是免费的
@@ -140,7 +147,14 @@ export async function runTagCheck(opts: {
 
   const verdicts = coerceVerdicts(
     // 批量判断:关思考模式(Task 0)。它要的是"照格式吐 JSON",不是"想清楚"
-    await complete({ config: opts.config, messages, thinking: false }),
+    await complete({
+      config: opts.config,
+      messages,
+      thinking: false,
+      ...(opts.signal ? { abortSignal: opts.signal } : {}),
+      // 质检也要超时 —— 不然质检模型挂起同样把整轮 running 钉死在 true(tagger 同款)
+      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    }),
     known,
   );
 

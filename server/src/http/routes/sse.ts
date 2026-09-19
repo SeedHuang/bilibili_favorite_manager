@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type Database from 'better-sqlite3';
 import type { Logger } from '../../logger/index.js';
+import { corsOrigin } from '../cors.js';
 
 export function registerSseRoutes(app: FastifyInstance, deps: { db: Database.Database; log: Logger }): void {
   const { db } = deps;
@@ -9,11 +10,19 @@ export function registerSseRoutes(app: FastifyInstance, deps: { db: Database.Dat
     // 这个响应由我们自己完全接管(长连接,永不 send),必须 hijack:
     // 否则 Fastify 会在 handler 返回后试图结束回复,真机上打 "reply already sent"。
     reply.hijack();
-    reply.raw.writeHead(200, {
+    const headers: Record<string, string> = {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
-    });
+    };
+    // 前端 dev 直连 3001(不走 umi 代理)—— hijack 响应不走 Fastify 的 onSend
+    // hook,这里手动补 CORS,策略和 index.ts 共用同一份白名单(cors.ts)
+    const origin = corsOrigin(req.headers.origin);
+    if (origin) {
+      headers['Access-Control-Allow-Origin'] = origin;
+      headers['Vary'] = 'Origin';
+    }
+    reply.raw.writeHead(200, headers);
 
     // last-event-id 续传:从该 id 之后开始
     let lastId = Number(req.headers['last-event-id'] ?? 0) || 0;

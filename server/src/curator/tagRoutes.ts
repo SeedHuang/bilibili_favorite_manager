@@ -1,5 +1,13 @@
 /**
- * /api/tags/* —— 条目 AI 标注(spec §9E)。SSE/中止/进度模式照抄 §9D 的 run-pass-2。
+ * /api/tags/* —— 条目 AI 标注(spec §9E)。
+ *
+ * **轮询不是 SSE**:这一版把 `run` 从"开 SSE 长连接逐帧推"改成"启动即返回 +
+ * 前端轮询 `run-progress`"。原因:umi dev server 的代理在 dev 下对 SSE 长连接
+ * 处理有毛病(帧被攒着延迟吐、长连接还会把浏览器到 8000 的同域连接占死,
+ * 后续 `tree`/`changes`/`status` 全部 pending)。轮询是短连接,没有这个病。
+ *
+ * 进度/日志都挂在**内存里的 `currentRun`** 上,`run-progress` 一拉就有。
+ * 中止也从"客户端断开才感知"改成显式的 `run-abort` 端点。
  *
  * 和 ruleRoutes 一样单独一个文件:curator/routes.ts 已经近千行,标注是独立的一件事。
  */
@@ -14,10 +22,10 @@ import { shapeItem } from '../http/routes/items.js';
 import { runTagging } from './tagger.js';
 import {
   listTagTree, mergeTags, setTagParent, renameTag, deleteTag, normalizeTagName,
-  subtreeSets, type TagNode,
+  subtreeSets, tagScale, type TagNode,
 } from '../db/repo/tags.js';
 import { runTagCheck } from './tagcheck.js';
-import { reconcile, type TreeChange } from './tagtree.js';
+import { reconcileWithBudget, MIN_SAMPLE, type TreeChange } from './tagtree.js';
 import { getSetting, setSetting } from '../db/repo/state.js';
 
 export interface TagDeps {
@@ -27,6 +35,12 @@ export interface TagDeps {
 
 /** 最近一轮「树的变化」清单存这个键 —— 刷新页面还在(§9F C10 要"看得见") */
 const CHANGES_KEY = 'tags.lastChanges';
+
+/**
+ * 最近一次 reconcile 的耗时(M4h Task 1)—— `reconcile-stats` 读它。
+ * 单进程内存变量:标注一次只跑一轮,没有并发场景,和 currentRun 同一个理由。
+ */
+const lastReconcile: { ms: number | null; at: number | null } = { ms: null, at: null };
 
 /**
  * 「这次改动不合法」的哨兵 —— PATCH 路由用它把两种失败分开。
@@ -51,6 +65,38 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
   const { db, log } = deps;
   const allItems = () => db.prepare(`SELECT * FROM items`).all() as ItemRow[];
 
+  /**
+   * 当前这一轮标注的实时状态 —— `run-progress` 轮询读的就是它。
+   *
+   * 单进程内存对象就够了(标注一次只跑一轮,没有并发的场景)。`logs` 是
+   * 这一轮的日志行(phase/item/verdict/note 全进),前端按长度增量追加。
+   */
+  const currentRun: {
+    running: boolean;
+    scope: 'missing' | 'all' | null;
+    done: number;
+    total: number;
+    tagged: number;
+    failedBatches: { firstItemId: string; size: number; reason: string }[];
+    /** 完成后才有 —— 结果载荷 */
+    result: { tagged: number; failedBatches: { firstItemId: string; size: number; reason: string }[]; newWordCount: number; changes: TreeChange[] } | null;
+    error: string | null;
+    logs: unknown[];
+    /** 中止控制器 —— `run-abort` 端点拿着它停正在跑的那轮 */
+    controller: AbortController | null;
+  } = {
+    running: false,
+    scope: null,
+    done: 0,
+    total: 0,
+    tagged: 0,
+    failedBatches: [],
+    result: null,
+    error: null,
+    logs: [],
+    controller: null,
+  };
+
   app.get('/api/tags/status', async () => {
     const tag = readLlmSettings(db, 'tag');
     // 用途平级后没有"回落"了:tag 没配就是没配,界面照实说
@@ -60,10 +106,37 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
     };
   });
 
+  /**
+   * 词库健康度(M4h Task 1)。活跃词数是整理成本的决定量(spec §1.5)——
+   * 用户从这里看到"词库正在膨胀"的早期信号,而不是等它卡死。
+   */
+  app.get('/api/tags/reconcile-stats', async () => {
+    // 活跃词的口径和 reconcile 用同一个下限 —— 硬编码会静默分叉
+    const { totalTags, activeTags } = tagScale(db, MIN_SAMPLE);
+    return { totalTags, activeTags, reconcileMs: lastReconcile.ms, lastRunAt: lastReconcile.at };
+  });
+
+  // ── 进度查询 / 中止 ─────────────────────────────────
+  app.get('/api/tags/run-progress', async () => {
+    const { running, scope, done, total, tagged, failedBatches, result, error, logs } = currentRun;
+    return { running, scope, done, total, tagged, failedBatches, result, error, logs };
+  });
+
+  app.post('/api/tags/run-abort', async () => {
+    // 没有在跑的就当无事发生 —— 幂等,反复点停止不炸
+    currentRun.controller?.abort();
+    return { ok: true };
+  });
+
   app.post('/api/tags/run', async (req, reply) => {
+    // 已经在跑就拒掉 —— 轮询版没有"再开一条连接同跑"的可能(那是 SSE 时代的坑),
+    // 但两个标签页同时点还是可能撞上,守一道
+    if (currentRun.running) {
+      return reply.code(409).send({ ok: false, reason: '已有一轮标注在跑 —— 等它跑完或先停止' });
+    }
+
     const scope = (req.query as { scope?: string }).scope === 'all' ? 'all' : 'missing';
     const llm = readLlmSettings(db, 'tag');
-    // **先校验后 hijack** —— 接管响应之后就只能写 SSE 帧,4xx 再也发不出去
     if (!llm) {
       return reply.code(400).send({ ok: false, reason: '还没配模型 —— 先去「授权」页配一个' });
     }
@@ -77,92 +150,86 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
     // 白花一轮调用(还记一批失败)。invalid 在 items 上一直有、界面上也一直有徽标
     const pool = allItems().filter((i) => (scope === 'all' || untagged.has(i.id)) && i.invalid === 0);
 
-    reply.hijack();
-    reply.raw.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-    });
+    // **启动即返回** —— 后台跑,前端靠轮询 run-progress 看进度
+    reply.send({ ok: true, poolSize: pool.length });
 
-    /** 客户端还在吗 —— 断了就别再写了(连接没了,写了也是丢) */
-    const closed = () => reply.raw.writableEnded || reply.raw.destroyed;
+    // 初始化这一轮的状态
+    const controller = new AbortController();
+    currentRun.running = true;
+    currentRun.scope = scope;
+    currentRun.done = 0;
+    currentRun.total = pool.length;
+    currentRun.tagged = 0;
+    currentRun.failedBatches = [];
+    currentRun.result = null;
+    currentRun.error = null;
+    currentRun.logs = [];
+    currentRun.controller = controller;
 
-    /**
-     * 日志四种帧的唯一出口(§9D.7):`phase` / `item` / `verdict` / `note`。
-     *
-     * **帧只从路由发**,tagger/tagcheck 只把"什么时候发生了什么"回调出来 —— 两个模型
-     * 的元信息(provider/model)都在这一层读,回调里再传一遍等于让下游多背一份它
-     * 不该知道的配置。守卫和别的帧同一个:连接没了,写了也是丢。
-     */
+    /** 日志的唯一出口 —— SSE 版写帧,这里写进 currentRun.logs 让轮询读到 */
     const frame = (event: 'phase' | 'item' | 'verdict' | 'note', data: unknown) => {
-      if (closed()) return;
-      reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      // 载荷里补上 type —— 前端受控联合的判别字段(原来在前端解析时补,现在这里补)
+      currentRun.logs.push({ type: event, ...(data as object) });
     };
     /** note 帧的两个字段就这么两个,包一层省得每个调用点都写一遍对象字面量 */
     const note = (level: 'info' | 'warn', text: string) => frame('note', { level, text });
-    // **不能听 req.raw 的 'close'** —— Node ≥16 里它表示"请求体读完了",不是"客户端走了":
-    // JSON body 会被 Fastify 在进 handler 之前消费掉,那条 close 在第一个 tick 就触发,
-    // 把刚建好的 controller 直接 abort 掉 —— 每跑一条都当场自尽。断开要看**响应**:
-    // 我们自己正常收尾(writableEnded)之外的 close 才是客户端真的走了
-    const controller = new AbortController();
-    reply.raw.on('close', () => {
-      if (!reply.raw.writableEnded) controller.abort();
-    });
 
-    /** 中断收尾:记 warn(用户改主意不是故障,§9D B5)+ 尽力回一帧(连接在就回) */
+    /** 中止收尾:记 warn(用户改主意不是故障,§9D B5)+ 日志留一行 */
     const finishAborted = () => {
       const message = '用户中止了标注 —— 已完成的条目已保留';
       log.event({ level: 'warn', category: 'llm', code: 'TAGGING_ABORTED', message });
-      // 中止也要在日志里留一行(§9D.7)。**尽力发**:中止的触发源就是客户端自己断开
-      // (见上面那段 close 的说明),所以这帧多半发不出去 —— 发得出去才有,和下面
-      // 那帧 aborted 一个待遇。真正兜住"它停了"的是界面自己那条 warn 文案(§9D B4)
       note('warn', message);
-      if (!closed()) reply.raw.write(`event: aborted\ndata: {"reason":"已中止"}\n\n`);
     };
 
     /**
-     * **第一批跑完之前先发一帧,把分母交出去。**
-     *
-     * 进度帧原来只从 `onBatch` 里发,而 `onBatch` 是**批次完成后**才调的 —— 于是
-     * 第一批结束之前客户端手里一个数都没有,那一行只能写"已标 0 条"(用户报的就是这个)。
-     * 而分母开跑前就已经定了:`pool` 是上面增量过滤的结果,`runTagging` 的 `total`
-     * 就是 `pool.length`,跑中不会变(`done` 只增;补轮缩的是 pending,不是 total)。
-     * 所以这里补一帧 `done: 0` —— 客户端能画进度条、能报"一共多少个"全靠它。
+     * 打标阶段的开场(§9D.7)。空池子**不该有打标阶段**:发 phase 帧会让人以为
+     * "用这个模型标了",而真相是"没什么可跑的"。
      */
-    if (!closed()) {
-      reply.raw.write(
-        `event: progress\ndata: ${JSON.stringify({ done: 0, total: pool.length, tagged: 0 })}\n\n`,
-      );
+    if (pool.length > 0) {
+      frame('phase', { phase: 'tag', provider: llm.config.provider, model: llm.config.model });
     }
 
-    /**
-     * **打标阶段的开场**(§9D.7)。放在那帧 progress **之后** —— "第一帧必须是
-     * progress"是 §9D.6 钉死的契约(界面靠它把分母画出来),日志不该去挤那个位置。
-     */
-    frame('phase', { phase: 'tag', provider: llm.config.provider, model: llm.config.model });
-
     try {
-      const r = await runTagging({
-        config: llm.config,
-        ctx: llm.ctx,
-        items: pool,
-        signal: controller.signal,
-        db,
-        // progress 帧只有这三个数 —— 没有 ruleCount,那是归类的字段
-        onBatch: (b) => {
-          if (closed()) return; // 帧发不出去,但结果照落(批次落库在 runTagging 里)
-          reply.raw.write(
-            `event: progress\ndata: ${JSON.stringify({ done: b.done, total: b.total, tagged: b.tagged })}\n\n`,
-          );
-        },
-        onItem: (i) => frame('item', i),
-        onNote: note,
-      });
+      // 空池子直接给一份"无事发生"的结果 —— 形状不变(§9D.7),数全为 0
+      const r = pool.length === 0
+        ? { tagged: 0, failedBatches: [], newWords: [] }
+        : await runTagging({
+            config: llm.config,
+            ctx: llm.ctx,
+            items: pool,
+            signal: controller.signal,
+            db,
+            // 每批完成更新一次进度 —— 轮询端点读到的最新值
+            onBatch: (b) => {
+              currentRun.done = b.done;
+              currentRun.total = b.total;
+              currentRun.tagged = b.tagged;
+              currentRun.failedBatches = b.failedBatches;
+            },
+            onItem: (i) => frame('item', i),
+            onNote: note,
+          });
 
       // runTagging 中止时**不抛**而是带着已完成的批次原样返回 —— 这里也要认一次,
       // 否则会拿"跑到一半"的结果发 done 帧(把没跑的批次当成标完了)
-      if (controller.signal.aborted) return finishAborted();
-      if (closed()) return;
+      if (controller.signal.aborted) {
+        finishAborted();
+        return;
+      }
+
+      // 空池子(本轮一条都没标)→ **树没变,跳过质检和整理**(M4h Task 2)。
+      // reconcile 是同步全量计算,词库大时空池子的高频点击也会把它拖成秒级卡顿;
+      // 而它整理的历史同义词在下次真实增量标注时一并合并(树真的变了才需要整理)。
+      // 已知限制:全标完且再无新条目时历史同义词暂停整理 —— spec §2.2 接受。
+      if (pool.length === 0) {
+        note('info', '没有需要标注的条目 —— 有效的都标过了');
+        log.event({ level: 'info', category: 'llm', message: '没有需要标注的条目 —— 有效的都标过了' });
+        currentRun.done = 0;
+        currentRun.tagged = 0;
+        currentRun.failedBatches = [];
+        currentRun.result = { tagged: 0, failedBatches: [], newWordCount: 0, changes: [] };
+        return;
+      }
 
       // ── 跑完自动整理(§9F C8 + C9 + C10)────────────────
       // 顺序不能反:先质检(定新词的归宿、剔泛词),再让数据说话(合并/挂父)。
@@ -183,9 +250,7 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
           level: 'info', category: 'llm',
           message: '没配「标签质检」模型 —— 跳过质检(泛词闸门这轮没跑)',
         });
-        // **跳过质检只发 note、不发 phase 帧**:phase 是"这一阶段开跑了、用哪个模型",
-        // 而这里根本没跑 —— 发一个 phase 会让人以为跑过一遍。它也不是故障(用户
-        // 就是没配那个用途),但它是**这一轮少了半件事**,所以仍走 warn 色
+        // 跳过质检只发 note、不发 phase 帧:phase 是"这一阶段开跑了",而这里根本没跑
         note('warn', '没配「标签质检」模型 —— 跳过质检,这轮泛词闸门没跑');
       } else {
         try {
@@ -199,6 +264,9 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
             log,
             onVerdict: (v) => frame('verdict', v),
             onNote: note,
+            // 中止 + 超时都要透传:质检挂起不能把 running 永久钉在 true(和打标同款)
+            signal: controller.signal,
+            timeoutMs: 180_000,
           });
         } catch (e) {
           // 质检失败**不该**把已经标好的东西废掉 —— 下一轮还会再判一次
@@ -224,9 +292,27 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
         });
       }
       // **判据单独 try** —— 它和质检一样是"锦上添花",不该把已经跑通的标注
-      // 连 done 帧一起带崩(质检那步是包着的,这里不包就是两套待遇)
+      // 连 done 帧一起带崩(质检那步是包着的,这里不包就是两套待遇)。
+      // 超时也是 warn 但不当作失败(M4h Task 3):部分整理已落库,差的下一轮补
+      const t0 = Date.now();
       try {
-        changes.push(...reconcile(db));
+        const { changes: treeChanges, timedOut, limitRaised } = reconcileWithBudget(db);
+        changes.push(...treeChanges);
+        lastReconcile.ms = Date.now() - t0;
+        lastReconcile.at = Date.now();
+        if (timedOut) {
+          log.event({
+            level: 'warn', category: 'llm', code: 'TREE_RECONCILE_TIMEOUT',
+            message: '词库整理超时,本轮部分整理 —— 活跃词过多需要治理',
+          });
+        }
+        // 活跃词破限自动提了下限 —— 规模治理的可见信号,用户该知道"词库在膨胀"
+        if (limitRaised) {
+          log.event({
+            level: 'info', category: 'llm', code: 'TREE_RECONCILE_LIMIT_RAISED',
+            message: '活跃词过多,统计下限自动从 5 提到 10 —— 词库在膨胀,该治理了',
+          });
+        }
       } catch (e) {
         log.event({
           level: 'warn', category: 'llm', code: 'TREE_RECONCILE_FAILED',
@@ -235,16 +321,7 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
       }
       setSetting(db, CHANGES_KEY, JSON.stringify(changes));
 
-      // 上面两步是网络往返(质检一次 LLM 调用 + 判据一遍全表),可能是**秒级** ——
-      // 客户端在这段里走了很正常。和前面那道守卫同理:发不出去的帧不写。
-      // (变化清单已经落库了:树是真的动了,跟客户端在不在没关系)
-      if (closed()) return;
-
       // **每批失败都落一条 events,带上 firstItemId / size / reason。**
-      // 原因此前只活在 SSE 帧和屏幕上(用户报的「3 批失败」那行,库里的 events 是
-      // 空的 code + 空 detail)—— 事后查库要能看出"是哪条、因为什么",而不是只能
-      // 信截图。两种失败都在 failedBatches 里:「请求失败」和「补两轮仍未覆盖」
-      // (后者正是用户这次撞上的),一条循环都写到
       for (const b of r.failedBatches) {
         log.event({
           level: 'warn', category: 'llm', code: 'TAGGING_BATCH_FAILED',
@@ -258,25 +335,28 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
         category: 'llm',
         message: `标注完成:${r.tagged} 条,${r.failedBatches.length} 批失败`,
       });
-      reply.raw.write(`event: done\ndata: ${JSON.stringify({
+
+      // 完成态写入 currentRun —— 前端轮询到 running=false 且有 result 就知道跑完了
+      currentRun.done = r.tagged;
+      currentRun.tagged = r.tagged;
+      currentRun.failedBatches = r.failedBatches;
+      currentRun.result = {
         tagged: r.tagged,
         failedBatches: r.failedBatches,
-        check,
-        changes,
-        // 只报**个数**不报名单:界面上要的是"这轮长了多少新词",名单没人看,
-        // 而它可能上千条 —— 塞进 SSE 帧是白占带宽
         newWordCount: r.newWords.length,
-      })}\n\n`);
+        changes,
+      };
     } catch (e) {
       if (controller.signal.aborted) {
         finishAborted();
       } else {
         const message = (e as Error)?.message ?? String(e);
         log.event({ level: 'error', category: 'llm', code: 'TAGGING_FAILED', message });
-        if (!closed()) reply.raw.write(`event: error\ndata: ${JSON.stringify({ reason: message })}\n\n`);
+        currentRun.error = message;
       }
     } finally {
-      reply.raw.end();
+      currentRun.running = false;
+      currentRun.controller = null;
     }
   });
 

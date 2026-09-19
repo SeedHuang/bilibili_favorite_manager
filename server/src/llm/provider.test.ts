@@ -203,6 +203,42 @@ describe('complete', () => {
     const arg = mocks.generateText.mock.calls.at(-1)![0] as { providerOptions?: unknown };
     expect(JSON.stringify(arg.providerOptions ?? {})).not.toContain('thinking');
   });
+
+  // ★ 回归测试:本地 4b 挂起(OOM/卡死/网络黑洞)时 `generateText` 永不 resolve,
+  //   整轮标注卡死、`running` 永久 true、用户停止不生效 —— 用户报的那一串症状。
+  //   timeoutMs 必须在挂起时抛"超时"(不是伪装成用户中止的 AbortError)
+  it('模型挂起时 timeoutMs 抛"超时"错误(不装成用户中止)', async () => {
+    const hung = new MockLanguageModelV3({
+      // 永不 resolve —— 模拟 4b 卡死
+      doGenerate: () => new Promise(() => {}),
+    });
+    mocks.createOpenAICompatible.mockReturnValue(() => hung);
+
+    await expect(
+      complete({
+        config: ollamaCfg,
+        messages: [{ role: 'user', content: 'x' }],
+        timeoutMs: 50,
+      }),
+    ).rejects.toThrow(/超时/);
+  });
+
+  it('正常生成不受 timeoutMs 影响(超时只在挂起时触发)', async () => {
+    await expect(
+      complete({
+        config: deepseekCfg,
+        messages: [{ role: 'user', content: '嗨' }],
+        timeoutMs: 5_000,
+      }),
+    ).resolves.toBe('结果');
+  });
+
+  it('不传 timeoutMs 就没有超时(聊天那条路一行不变)', async () => {
+    await complete({ config: deepseekCfg, messages: [{ role: 'user', content: '嗨' }] });
+    const arg = mocks.generateText.mock.calls[0]![0] as { abortSignal?: unknown };
+    // 没有超时 controller 注入的 abortSignal —— 只有用户传来的才算数
+    expect(arg.abortSignal).toBeUndefined();
+  });
 });
 
 describe('provider 选择', () => {

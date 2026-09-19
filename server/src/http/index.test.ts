@@ -61,3 +61,40 @@ describe('路由组装', () => {
     await app.close();
   });
 });
+
+describe('CORS', () => {
+  // 前端 dev 直连 3001 不走代理:带 body 的跨域请求要先过 OPTIONS 预检。
+  // 预检只有**命中一条路由** onSend 钩子才跑 —— 之前没 OPTIONS 路由,预检落到
+  // 404,浏览器直接中止真实请求(带 body 的 json() 全断)。
+  it('OPTIONS 预检命中通配路由 → 204 + 白名单 origin 放行', async () => {
+    const { app } = makeApp();
+    const res = await app.inject({
+      method: 'OPTIONS',
+      url: '/api/tags/run',
+      headers: { origin: 'http://localhost:8000' },
+    });
+    expect(res.statusCode).toBe(204);
+    expect(res.headers['access-control-allow-origin']).toBe('http://localhost:8000');
+    await app.close();
+  });
+
+  it('白名单外的 origin 不放行(任意网页不能驱动本机工具)', async () => {
+    const { app } = makeApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/health',
+      headers: { origin: 'https://evil.example.com' },
+    });
+    // 不带 access-control-allow-origin → 浏览器读不到响应 / 发不起写请求
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    await app.close();
+  });
+
+  it('同源/无 Origin 的请求照常(不误伤非浏览器调用)', async () => {
+    const { app } = makeApp();
+    const res = await app.inject({ method: 'GET', url: '/api/health' });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    await app.close();
+  });
+});

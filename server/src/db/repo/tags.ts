@@ -149,6 +149,26 @@ export function tagCounts(db: Database.Database): Map<number, number> {
   return new Map(rows.map((r) => [r.tag_id, r.n]));
 }
 
+/**
+ * 词库规模:总词数 + 活跃词数(挂 ≥ minSample 条视频)。
+ *
+ * **活跃词数是 reconcile 成本的决定量**(M4h §1.5):判据对挂得少的词本来就不判,
+ * 总词数涨到十万也无关紧要,活跃词破 3000 整理才会爬到秒级。reconcile-stats
+ * 端点和活跃层的自适应下限都读这一个数 —— 一处建一份。
+ */
+export function tagScale(
+  db: Database.Database,
+  minSample: number,
+): { totalTags: number; activeTags: number } {
+  const totalTags = (db.prepare(`SELECT COUNT(*) n FROM tags`).get() as { n: number }).n;
+  const activeTags = (db
+    .prepare(
+      `SELECT COUNT(*) n FROM (SELECT tag_id FROM item_tags GROUP BY tag_id HAVING COUNT(*) >= ?)`,
+    )
+    .get(minSample) as { n: number }).n;
+  return { totalTags, activeTags };
+}
+
 /** 整棵树。count 用 tagCounts,不递归求和 */
 export function listTagTree(db: Database.Database): TagNode[] {
   const rows = db

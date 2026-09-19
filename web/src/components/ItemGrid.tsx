@@ -1,9 +1,11 @@
 import { Pagination } from 'antd';
 import type { Item } from '../types';
+import { API_BASE } from '../api';
 
-/** 封面走同源代理(/api/cover 转发 CDN),绕开浏览器跨域 ORB 拦截 */
+/** 封面走后端转发(/api/cover 转发 CDN),绕开浏览器跨域 ORB 拦截。
+ *  直连后端 —— 不再依赖会挂的 umi 代理 */
 const coverSrc = (c: string) =>
-  `/api/cover?url=${encodeURIComponent(c.replace(/^http:\/\//, 'https://'))}`;
+  `${API_BASE}/api/cover?url=${encodeURIComponent(c.replace(/^http:\/\//, 'https://'))}`;
 
 const dur = (d: number | null) =>
   d ? `${Math.floor(d / 60)}:${String(d % 60).padStart(2, '0')}` : '';

@@ -5,6 +5,7 @@ import { createServer } from '../http/index.js';
 import { upsertItem } from '../db/repo/items.js';
 import { seedLlm, setAssignment } from '../llm/config.js';
 import { itemTagIds, ensureTag, linkItemTag, listTagTree } from '../db/repo/tags.js';
+import { markItemTagged } from '../db/repo/tagging.js';
 import type { BiliClient } from '../bilibili/client.js';
 
 // LLM 全 mock —— 路由测试绝不打真实 API(和 routes.test.ts 同一套:importOriginal
@@ -25,12 +26,31 @@ function makeApp() {
   return { app, db };
 }
 
-/** SSE 文本 → [{event, data}] */
-const sse = (body: string) =>
-  body.split('\n\n').filter((b) => b.trim()).map((b) => ({
-    event: /^event: (.+)$/m.exec(b)?.[1] ?? 'message',
-    data: JSON.parse(/^data: (.*)$/m.exec(b)?.[1] ?? '{}') as Record<string, unknown>,
-  }));
+/**
+ * 轮询版测试骨架:POST run 启动即返回,后台异步跑。要拿结果得**轮询 run-progress**
+ * 直到 running 变 false —— mock 的 complete 是同步 resolve 的,但 runTagging 是
+ * async,POST 返回那一刻后台未必跑完,直接断言会读到"还没跑"的状态。
+ */
+async function runAndSettle(app: Awaited<ReturnType<typeof makeApp>>['app'], url = '/api/tags/run') {
+  const res = await app.inject({ method: 'POST', url });
+  expect(res.statusCode).toBe(200);
+  const progress = await vi.waitFor(async () => {
+    const p = (await app.inject({ method: 'GET', url: '/api/tags/run-progress' })).json() as { running: boolean };
+    if (p.running) throw new Error('still running');
+    return p;
+  });
+  return progress as {
+    running: boolean;
+    scope: 'missing' | 'all' | null;
+    done: number;
+    total: number;
+    tagged: number;
+    failedBatches: { firstItemId: string; size: number; reason: string }[];
+    result: { tagged: number; failedBatches: { firstItemId: string; size: number; reason: string }[]; newWordCount: number; changes: unknown[] } | null;
+    error: string | null;
+    logs: { type: string; [k: string]: unknown }[];
+  };
+}
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -49,7 +69,7 @@ describe('标注路由', () => {
     await app.close();
   });
 
-  it('run(scope=missing):只标没标注的;progress + done 帧', async () => {
+  it('run(scope=missing):只标没标注的;进度 + 结果', async () => {
     const { app, db } = makeApp();
     upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
     upsertItem(db, { id: 'BV2', type: 2, title: 'b' });
@@ -57,15 +77,13 @@ describe('标注路由', () => {
       JSON.stringify([{ id: 'BV1', tags: ['教学'], kind: '教学' }, { id: 'BV2', tags: ['娱乐'], kind: '娱乐' }]),
     );
 
-    const res = await app.inject({ method: 'POST', url: '/api/tags/run' });
-    expect(res.headers['content-type']).toContain('text/event-stream');
-    const events = sse(res.body);
-    expect(events.find((e) => e.event === 'done')!.data.tagged).toBe(2);
+    const p = await runAndSettle(app);
+    expect(p.result!.tagged).toBe(2);
 
-    // 增量:再跑一次,没有未标注的 → done.tagged=0 且一次 LLM 都不调
+    // 增量:再跑一次,没有未标注的 → tagged=0 且一次 LLM 都不调
     mocks.complete.mockClear();
-    const res2 = await app.inject({ method: 'POST', url: '/api/tags/run' });
-    expect(sse(res2.body).find((e) => e.event === 'done')!.data.tagged).toBe(0);
+    const p2 = await runAndSettle(app);
+    expect(p2.result!.tagged).toBe(0);
     expect(mocks.complete).not.toHaveBeenCalled();
     await app.close();
   });
@@ -81,10 +99,9 @@ describe('标注路由', () => {
 
     // missing:模型只该见到那 1 条有效的
     mocks.complete.mockResolvedValue(JSON.stringify([{ id: 'BV1', tags: ['教学'], kind: '教学' }]));
-    const res = await app.inject({ method: 'POST', url: '/api/tags/run' });
-    const done = sse(res.body).find((e) => e.event === 'done')!.data;
-    expect(done.tagged).toBe(1);
-    expect(done.failedBatches).toEqual([]);
+    const p = await runAndSettle(app);
+    expect(p.result!.tagged).toBe(1);
+    expect(p.result!.failedBatches).toEqual([]);
     // 模型一次只收到一条 —— 断言它**没被喂** BVX(喂了会连它一起回,于是 mock 若回
     // 空就该记 1 批失败,上面 failedBatches=[] 就是在钉"BVX 根本没进池")
     expect(mocks.complete.mock.calls[0]![0].messages[1].content).not.toContain('BVX');
@@ -92,10 +109,91 @@ describe('标注路由', () => {
     // all:重标全部,同样不带已失效
     mocks.complete.mockClear();
     mocks.complete.mockResolvedValue(JSON.stringify([{ id: 'BV1', tags: ['娱乐'], kind: '娱乐' }]));
-    const res2 = await app.inject({ method: 'POST', url: '/api/tags/run?scope=all' });
-    const done2 = sse(res2.body).find((e) => e.event === 'done')!.data;
-    expect(done2.tagged).toBe(1);
-    expect(done2.failedBatches).toEqual([]);
+    const p2 = await runAndSettle(app, '/api/tags/run?scope=all');
+    expect(p2.result!.tagged).toBe(1);
+    expect(p2.result!.failedBatches).toEqual([]);
+    await app.close();
+  });
+
+  // ★ 上一轮的修复(排除 invalid)让"池子全空"从"每轮失败"变成**真实可达到的状态**:
+  // 有效的都标过了、剩下的只有已失效。这一跑**不该有打标阶段** —— 模型一次都不调,
+  // 发一帧 info 的 note 说出"没什么可标的"。
+  // M4h 起**空池子连质检和判据整理都跳过**(树没变,没必要跑同步全量计算)——
+  // 否则用户高频点「AI 标注」会被 reconcile 拖成秒级卡顿。历史同义词在下次真实
+  // 增量标注时一并合并(树真的变了才需要整理)。
+  it('run(空池子):零模型调用 + info note + 结果形状不变 + 不跑质检和判据', async () => {
+    const { app, db } = makeApp();
+    upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
+    upsertItem(db, { id: 'BVX', type: 2, title: '已失效视频', invalid: true });
+    // 造出用户现在的真实形状:有效的标过了、只有失效的剩着
+    markItemTagged(db, 'BV1', '教学');
+    const s1 = ensureTag(db, '教学', null);
+    linkItemTag(db, 'BV1', s1, 'ai');
+    // 再造一棵**判据会想改动**的树:体育 + 篮球 两个**根词**挂同一批视频(重合 100%,
+    // 样本够 5)—— 旧版空池子会把它合并掉。新行为下它必须**原样不动**:空池子不整理
+    const sport = ensureTag(db, '体育', null);
+    const ball = ensureTag(db, '篮球', null);
+    for (let i = 0; i < 5; i++) {
+      upsertItem(db, { id: `BV${i}`, type: 2, title: `篮球${i}` });
+      // 它们也得标过 —— 否则 `ai_checked_at IS NULL` 会把这些**有效**条目送进增量池,
+      // 池子就不空了,runTagging 照跑。空池子必须是"有效全标完、只剩已失效"
+      markItemTagged(db, `BV${i}`, '体育');
+      linkItemTag(db, `BV${i}`, sport, 'ai');
+      linkItemTag(db, `BV${i}`, ball, 'ai');
+    }
+
+    mocks.complete.mockClear();
+    const p = await runAndSettle(app);
+    // **一个模型调用都不发** —— 空池子没有任何可标的,模型不该被请来
+    expect(mocks.complete).not.toHaveBeenCalled();
+    // 出声:一句 info 的 note 说明"没什么可标的"(日志抽屉里能看到为什么这轮无事发生)
+    const infos = p.logs.filter((l) => l.type === 'note' && l.level === 'info');
+    expect(infos.length).toBeGreaterThan(0);
+    expect(String(infos[0]!.text)).toContain('没有需要标注的条目');
+    // 没有任何 phase —— 空池子这轮打标、质检都没跑
+    expect(p.logs.some((l) => l.type === 'phase')).toBe(false);
+    // 结果形状不变(§9D.7 契约),数全为 0,变化清单也是空的(没跑质检和判据)
+    expect(p.result).toMatchObject({
+      tagged: 0, failedBatches: [], newWordCount: 0, changes: [],
+    });
+    // **判据没跑**:双向 100% 重合的两个根词原样都在 —— 空池子树没变,不整理
+    const names = listTagTree(db).map((n) => n.name);
+    expect(names).toContain('体育');
+    expect(names).toContain('篮球');
+    await app.close();
+  });
+
+  // ★ M4h Task 2 的保留面:**树变了(池子非空)就整理** —— 空池子跳过不丢功能。
+  // 同样那对 100% 重合的根词,这次池子里有一条真待标的:标注跑完,判据照常把它们合并,
+  // 耗时落进 lastReconcile(Task 1 的指标)。
+  it('run(池子非空):标注后判据照常整理 —— 空池子跳过不丢这个功能', async () => {
+    const { app, db } = makeApp();
+    mocks.complete.mockResolvedValue(JSON.stringify([{ id: 'BV9', tags: ['教学'], kind: '教学' }]));
+    // 体育 + 篮球 两根词挂同一批 5 条(重合 100%)—— 都标过水位线,不进池子;
+    // 另有 1 条真待标的 BV9,让"池子非空"
+    const sport = ensureTag(db, '体育', null);
+    const ball = ensureTag(db, '篮球', null);
+    for (let i = 0; i < 5; i++) {
+      upsertItem(db, { id: `BV${i}`, type: 2, title: `篮球${i}` });
+      markItemTagged(db, `BV${i}`, '体育');
+      linkItemTag(db, `BV${i}`, sport, 'ai');
+      linkItemTag(db, `BV${i}`, ball, 'ai');
+    }
+    upsertItem(db, { id: 'BV9', type: 2, title: 'a' });
+
+    const p = await runAndSettle(app);
+    expect(p.result!.tagged).toBe(1);
+    // 判据照跑:100% 重合的两个根词被合并(这轮真的长出了东西,树要整理)
+    const names = listTagTree(db).map((n) => n.name);
+    expect(names).toContain('体育');
+    expect(names).not.toContain('篮球');
+    // Task 1 的指标端点:总词数 / 活跃词数 / 最近一次耗时都报得出来
+    const stats = (await app.inject({ method: 'GET', url: '/api/tags/reconcile-stats' })).json() as {
+      totalTags: number; activeTags: number; reconcileMs: number | null;
+    };
+    expect(stats.reconcileMs).not.toBeNull();
+    expect(stats.totalTags).toBeGreaterThan(0);
+    expect(stats.activeTags).toBeGreaterThan(0);
     await app.close();
   });
 
@@ -117,8 +215,8 @@ describe('标注路由', () => {
     upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
     mocks.complete.mockRejectedValue(new Error('连接被拒'));
 
-    const res = await app.inject({ method: 'POST', url: '/api/tags/run' });
-    expect(sse(res.body).find((e) => e.event === 'done')!.data.failedBatches).toHaveLength(1);
+    const p = await runAndSettle(app);
+    expect(p.result!.failedBatches).toHaveLength(1);
 
     const row = db.prepare(
       `SELECT level, code, message, detail FROM events WHERE code = 'TAGGING_BATCH_FAILED'`,
@@ -129,20 +227,22 @@ describe('标注路由', () => {
     await app.close();
   });
 
-  // **第一帧必须是 progress 且带着全量分母。** 这是"一共多少个"唯一的数据源:
-  // 原来它只在 `onBatch` 里发,而那是批次完成后 —— 第一批跑完之前界面只能写
-  // "已标 0 条"(用户报的就是这个)。池子在开跑前算好、跑中不变,所以第一帧就能给。
-  it('run:第一批跑完之前先发一帧 progress,带上本轮池子的总数', async () => {
+  // **POST run 返回那一刻,total 就该带着全量分母。** 这是"一共多少个"唯一的数据源:
+  // 池子在开跑前算好、跑中不变,所以启动时就能给。模型回空(一条都标不上)时
+  // onBatch 一次都不调 —— total 是**唯一**的进度来源,必须对。
+  it('run:启动即报出本轮池子的总数(模型回空也报)', async () => {
     const { app, db } = makeApp();
     for (let i = 0; i < 20; i++) upsertItem(db, { id: `BV${i}`, type: 2, title: `题${i}` });
-    // 一条都标不上(模型回空)→ 一次 onBatch 都不会调 —— 这一帧就是**唯一**的进度来源
+    // 一条都标不上(模型回空)→ 一次 onBatch 都不会调 —— total 就是**唯一**的进度来源
     mocks.complete.mockResolvedValue('[]');
 
     const res = await app.inject({ method: 'POST', url: '/api/tags/run' });
-    const events = sse(res.body);
-    // 断言的是"第一帧"不是"某处有一帧":界面靠它把分母画出来的时刻就是这里
-    expect(events[0]!.event).toBe('progress');
-    expect(events[0]!.data).toEqual({ done: 0, total: 20, tagged: 0 });
+    // 启动响应本身就带 poolSize —— 前端第一眼就知道"一共多少个"
+    expect(res.json()).toMatchObject({ ok: true, poolSize: 20 });
+    // 轮询端点也带着同一个数,跑完 done 停在 0
+    const p = await runAndSettle(app);
+    expect(p.total).toBe(20);
+    expect(p.done).toBe(0);
     await app.close();
   });
 
@@ -150,35 +250,33 @@ describe('标注路由', () => {
     const { app, db } = makeApp();
     upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
     mocks.complete.mockResolvedValue(JSON.stringify([{ id: 'BV1', tags: ['教学'], kind: '教学' }]));
-    await app.inject({ method: 'POST', url: '/api/tags/run' });
+    await runAndSettle(app);
 
     mocks.complete.mockClear();
     mocks.complete.mockResolvedValue(JSON.stringify([{ id: 'BV1', tags: ['娱乐'], kind: '娱乐' }]));
-    const res = await app.inject({ method: 'POST', url: '/api/tags/run?scope=all' });
-    expect(sse(res.body).find((e) => e.event === 'done')!.data.tagged).toBe(1);
+    const p = await runAndSettle(app, '/api/tags/run?scope=all');
+    expect(p.result!.tagged).toBe(1);
     // 形态是**覆盖写**的(不像 item_tags 是累加)—— 重标后 kind 变成第二次的『娱乐』
     const row = db.prepare(`SELECT ai_kind FROM items WHERE id='BV1'`).get() as { ai_kind: string };
     expect(row.ai_kind).toBe('娱乐');
     await app.close();
   });
 
-  it('中止:inject signal → 已完成的批次落库不回滚,没跑的没被补成结果', async () => {
+  it('中止:run-abort → 已完成的批次落库不回滚,没跑的没被补成结果', async () => {
     const { app, db } = makeApp();
     for (let i = 0; i < 40; i++) upsertItem(db, { id: `BV${i}`, type: 2, title: `题${i}` });
 
-    // 第一批照常跑完(落库),**第二批**才模拟「客户端断开」:abort 掉 inject 的 signal,
-    // 等**路由侧**的 signal 真的 abort 之后再抛 AbortError(provider 被中断时就是抛这个)
-    // —— 不依赖事件循环先后(照 routes.test.ts 的 run-pass-2 中断用例)
+    // 第一批照常跑完(落库),**第二批**才模拟「用户点停止」:调 run-abort 中止路由侧
+    // 的 controller,等 provider 真的感知 abort 之后抛 AbortError —— 不依赖事件循环先后。
     //
     // mock 必须回**本批自己的 id**:只回固定一条的话,"标了几条"和"中止有没有生效"
     // 分不开 —— 那样无论中止与否都只落 1 条,断言就等于没测。
-    const controller = new AbortController();
     let calls = 0;
     mocks.complete.mockImplementation(
       async ({ messages, abortSignal }: { messages: { content: string }[]; abortSignal?: AbortSignal }) => {
         calls += 1;
         if (calls >= 2) {
-          controller.abort();
+          await app.inject({ method: 'POST', url: '/api/tags/run-abort' });
           if (abortSignal && !abortSignal.aborted) {
             await new Promise<void>((resolve) =>
               abortSignal.addEventListener('abort', () => resolve(), { once: true }),
@@ -191,68 +289,61 @@ describe('标注路由', () => {
       },
     );
 
-    // **不能用 res.body 断言 aborted 帧** —— 客户端自己就是那个断开的,路由侧的
-    // aborted 帧根本发不出去;而 inject 的 promise 会跟着 reject(§9D 测试同款),
-    // 不吞掉它 await 当场抛。要验的是中止的**效果**
-    await app
-      .inject({ method: 'POST', url: '/api/tags/run', signal: controller.signal })
-      .catch(() => undefined);
+    // 启动即返回;跑完(被中止)后 run-progress 的 running 也该回 false
+    const res = await app.inject({ method: 'POST', url: '/api/tags/run' });
+    expect(res.statusCode).toBe(200);
+    const p = await vi.waitFor(async () => {
+      const prog = (await app.inject({ method: 'GET', url: '/api/tags/run-progress' })).json() as {
+        running: boolean; result: { tagged: number; failedBatches: unknown[] } | null;
+      };
+      if (prog.running) throw new Error('still running');
+      return prog;
+    });
 
     // 标上了 = 水位线落了(§9F:ai_checked_at 是"标过"的唯一依据)
     const tagged = (db.prepare(`SELECT COUNT(*) AS n FROM items WHERE ai_checked_at IS NOT NULL`).get() as { n: number }).n;
     expect(tagged).toBeGreaterThan(0); // 已完成的批次保留
     expect(tagged).toBeLessThan(40); // 没跑的批次没被补成"结果"
-    // 落库的 16 条 = **第 1 批整批**,第 2 批一条没落 —— 上面两个 `>`/`<` 量的是这件事
+    expect(p.result).toBeNull(); // 中止没有结果载荷 —— 前端靠 running=false + result=null 识别"被中断"
 
     // 中止记 warn 不是 error(用户改主意不是故障)。silent 只关 stdout,events 表照写。
-    // **要 waitFor** —— 断开那一刻 inject 的 promise 就落定了,路由的收尾(记日志 → end)
-    // 是在那之后接着跑的,直接断言会读到还没写的库
     await vi.waitFor(() =>
       expect(db.prepare(`SELECT level FROM events WHERE code='TAGGING_ABORTED'`).get()).toEqual({
         level: 'warn',
       }),
     );
 
-    // 中止之后**一次调用都没再发**:40 条 / 批上限 16 = **3 批**(16+16+8),而调用停在 2
+    // 中止之后**一次调用都没再发**:40 条 / 批上限 5 = **8 批**(5+5+...),而调用停在 2
     // —— 少的正是"中止之后的那一次"。中止发生在 call 2(第 2 批)的抛出处,之后每批开工前
-    // 的守卫(tagger.ts:210)与补轮那条(:216)都看得见同一个 `signal.aborted`,于是第 3 批
-    // (剩下 8 条)一次都没发出去。
-    //
-    // **这一句的位置是承重的,不能挪到上面几个断言旁边**:"第 3 批有没有发出去"是路由在
-    // 断开**之后**才走到的地方,而 inject 的 promise 断开那一刻就落定了。实测:把 :210 和
-    // :216 都删掉,这一句放在上面那几个断言旁边时**照样绿**(那一刻读到的是 2,80ms 后才是 3);
-    // 放到 waitFor 之后才当场红(3 次)。等 TAGGING_ABORTED 落了日志 = 路由已跑完 runTagging
-    // 的收尾,这时候这个数才有意义。
-    //
-    // 它钉的是"中止后不再有调用"这个 §9D B2 契约,**不是**某一条守卫 —— 那两条互为备份,
-    // 实测:只删 :210 → 16 passed,只删 :216 → 16 passed,两条都删 → 这一句红(2≠3)。
+    // 的守卫(tagger.ts:210)与补轮那条(:216)都看得见同一个 `signal.aborted`,于是后续
+    // 批次一次都没发出去。
     expect(mocks.complete).toHaveBeenCalledTimes(2);
 
     await app.close();
   });
 
-  it('没配任何模型 → 400(不是 SSE)', async () => {
+  it('没配任何模型 → 400', async () => {
     const { app, db } = makeApp();
     db.prepare(`DELETE FROM settings`).run();
     const res = await app.inject({ method: 'POST', url: '/api/tags/run' });
     expect(res.statusCode).toBe(400);
-    expect(res.headers['content-type']).not.toContain('text/event-stream');
+    expect(res.json().reason).toContain('还没配模型');
     await app.close();
   });
 
   // §9D.7:日志四种帧。**item 帧**是"什么视频标了什么词"的唯一来源 —— 不带标题的话
   // 用户对着一个 BV 号根本认不出是哪条
-  it('run:每条视频标完发一帧 item,带着标题和标签', async () => {
+  it('run:每条视频标完记一行 item,带着标题和标签', async () => {
     const { app, db } = makeApp();
     upsertItem(db, { id: 'BV1', type: 2, title: '在新疆野外烤羊肉' });
     mocks.complete.mockResolvedValue(
       JSON.stringify([{ id: 'BV1', kind: '娱乐', domains: ['美食'], tags: ['烤羊肉'] }]),
     );
 
-    const res = await app.inject({ method: 'POST', url: '/api/tags/run' });
-    const items = sse(res.body).filter((e) => e.event === 'item');
+    const p = await runAndSettle(app);
+    const items = p.logs.filter((l) => l.type === 'item');
     expect(items).toHaveLength(1);
-    expect(items[0]!.data).toEqual({
+    expect(items[0]).toMatchObject({
       id: 'BV1', title: '在新疆野外烤羊肉', kind: '娱乐', domains: ['美食'], tags: ['烤羊肉'],
     });
     await app.close();
@@ -260,7 +351,7 @@ describe('标注路由', () => {
 
   // §9D.7:**verdict 帧**是"质检每个词判成了什么"的唯一来源。drop 和 keep 都要报 ——
   // 用户问的是"每个词怎么判的",只报动手的那些是半份日志
-  it('run:质检每判一个词发一帧 verdict', async () => {
+  it('run:质检每判一个词记一行 verdict', async () => {
     const { app, db } = makeApp();
     upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
     mocks.complete
@@ -271,9 +362,9 @@ describe('标注路由', () => {
         { name: '美食', action: 'keep' },
       ]));
 
-    const res = await app.inject({ method: 'POST', url: '/api/tags/run' });
-    const verdicts = sse(res.body).filter((e) => e.event === 'verdict');
-    expect(verdicts.map((v) => v.data)).toEqual([
+    const p = await runAndSettle(app);
+    const verdicts = p.logs.filter((l) => l.type === 'verdict');
+    expect(verdicts.map((v) => ({ name: v.name, action: v.action }))).toEqual([
       { name: 'AI', action: 'drop' },
       { name: '美食', action: 'keep' },
     ]);
@@ -282,15 +373,15 @@ describe('标注路由', () => {
 
   // §9D.7:**note 帧**是失败唯一会在过程里出声的地方 —— 整批失败此前只出现在
   // done 帧的计数里,而用户两次报的都是"它跑过了,我不知道刚才发生了什么"
-  it('run:整批失败时发一帧 warn 的 note(不能只在 done 的计数里)', async () => {
+  it('run:整批失败时记一行 warn 的 note(不能只在结果的计数里)', async () => {
     const { app, db } = makeApp();
     upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
     mocks.complete.mockRejectedValue(new Error('连接被拒'));
 
-    const res = await app.inject({ method: 'POST', url: '/api/tags/run' });
-    const notes = sse(res.body).filter((e) => e.event === 'note');
+    const p = await runAndSettle(app);
+    const notes = p.logs.filter((l) => l.type === 'note');
     expect(notes.length).toBeGreaterThan(0);
-    expect(notes.some((n) => n.data.level === 'warn' && String(n.data.text).includes('没标上'))).toBe(true);
+    expect(notes.some((n) => n.level === 'warn' && String(n.text).includes('没标上'))).toBe(true);
     await app.close();
   });
 });

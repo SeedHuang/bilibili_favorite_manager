@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { PanelRightClose, PanelRightOpen } from 'lucide-react';
 import type { Item } from '../types';
+import { API_BASE } from '../api';
 
 const coverSrc = (c: string) =>
-  `/api/cover?url=${encodeURIComponent(c.replace(/^http:\/\//, 'https://'))}`;
+  `${API_BASE}/api/cover?url=${encodeURIComponent(c.replace(/^http:\/\//, 'https://'))}`;
 
 const dur = (d: number | null) =>
   d ? `${Math.floor(d / 60)}:${String(d % 60).padStart(2, '0')}` : '—';

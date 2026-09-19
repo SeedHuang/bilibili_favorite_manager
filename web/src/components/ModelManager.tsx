@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button, Input, Select, Alert } from 'antd';
 import { Zap, KeyRound, SlidersHorizontal, Save, RefreshCw } from 'lucide-react';
-import { llmApi } from '../api';
+import { API_BASE, llmApi } from '../api';
 import type { EntryView, LlmPurpose, ModelMeta, ProviderView } from '../types';
 
 /**
@@ -70,7 +70,7 @@ async function fetchModels(
 ): Promise<{ models: ModelMeta[]; note: string }> {
   if (provider === 'ollama') {
     const res = await fetch(
-      `/api/settings/ollama-models?baseUrl=${encodeURIComponent(baseUrl)}`,
+      `${API_BASE}/api/settings/ollama-models?baseUrl=${encodeURIComponent(baseUrl)}`,
     );
     const body = (await res.json()) as {
       models?: { name: string; contextWindow: number; maxOutput: number; detail?: string }[];

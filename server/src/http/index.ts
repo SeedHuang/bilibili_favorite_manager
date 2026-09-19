@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import type Database from 'better-sqlite3';
 import type { Logger } from '../logger/index.js';
 import type { BiliClient } from '../bilibili/client.js';
+import { corsOrigin } from './cors.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerFolderRoutes } from './routes/folders.js';
 import { registerCoverRoutes } from './routes/cover.js';
@@ -51,6 +52,29 @@ export function createServer(deps: HttpDeps): FastifyInstance {
       done(err, undefined);
     }
   });
+
+  /**
+   * CORS —— **前端 dev 直连后端,不走 umi 代理**。
+   *
+   * 为什么:umi dev server 的 proxy 对 SSE 缓冲、对 POST 会整体挂(用户反复撞的
+   * "接口 pending"根因就是它)。既然后端 3001 和前端 8000 都是本机,前端直接
+   * `fetch('http://127.0.0.1:3001/api/...')` 绕开代理,后端放行跨域即可。
+   *
+   * **只回显白名单内的 origin**(cors.ts):本机工具,别让任意网页都能驱动它。
+   * 只放行本项目用的方法。
+   */
+  app.addHook('onSend', async (req, reply) => {
+    const origin = corsOrigin(req.headers.origin);
+    // 只有回显具体 origin 时才需要 Vary —— 免得中介缓存把 A 源的内容喂给 B 源
+    if (origin) {
+      reply.header('Access-Control-Allow-Origin', origin);
+      reply.header('Vary', 'Origin');
+    }
+    reply.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    reply.header('Access-Control-Allow-Headers', 'content-type');
+  });
+  // 预检请求必须**命中一条路由**,onSend 钩子才会跑 —— 加通配 OPTIONS 路由收下它们
+  app.options('*', async (_req, reply) => reply.code(204).send());
 
   app.get('/api/health', async () => {
     const folders = (db.prepare(`SELECT COUNT(*) AS n FROM folders`).get() as { n: number }).n;

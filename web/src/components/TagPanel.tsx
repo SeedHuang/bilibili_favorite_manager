@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, App as AntApp, Button, Progress, Select, Spin } from 'antd';
-import { Combine, Pencil, Check, Square, Tag, X, Trash2, ScrollText } from 'lucide-react';
+import { Combine, Pencil, Check, Square, Tag, X, Trash2, ScrollText, RefreshCw } from 'lucide-react';
 import { useRequest } from '@umijs/max';
 import { rawResult, tagApi } from '../api';
 import type { TagLogLine, TagNode, TagProgressPayload, TagRunStatus } from '../types';
@@ -37,10 +37,10 @@ export default function TagPanel() {
   const [tagStatus, setTagStatus] = useState<TagRunStatus | null>(null);
   /** 中断/完成的一句话 —— warn 色,不走顶上那个红条(§9D B4) */
   const [tagNote, setTagNote] = useState('');
-  /** 停止按钮要拿到**这次跑**的那个 controller */
-  const tagAbort = useRef<AbortController | null>(null);
-  /** 中断文案里要报"已标了多少" —— finally 会把 state 清掉,所以单独留一份(照 ChatDrawer) */
+  /** 中断文案里要报"已标了多少" —— 轮询结束会清 state,所以单独留一份(照 ChatDrawer) */
   const lastTagProgress = useRef<TagProgressPayload | null>(null);
+  /** 当前活动轮询的停止函数 —— runTag 和"重进恢复"共用一处,卸载时统一清理 */
+  const stopPollingRef = useRef<(() => void) | null>(null);
 
   // ── 标注日志(§9D.7)──────────────────────────────────
   // **缓冲区放在这一页,不在抽屉里**:关掉抽屉不能丢,而"关掉就没了"正是用户两次
@@ -50,12 +50,8 @@ export default function TagPanel() {
   const [logOpen, setLogOpen] = useState(false);
   /** 按钮角标要报的 warn 数 —— 失败不打开抽屉也要看得见 */
   const logWarn = logLines.filter((l) => l.type === 'note' && l.level === 'warn').length;
-  // **合并写**:日志帧是每条/每词一发,全库一轮几千帧 —— 一帧一 `setLogLines`
-  // 就是几千次整页重渲染,而这恰恰发生在用户**正盯着这一页**看的那段时间。
-  // 新行先攒进 ref,按固定节奏一次性倒进 state(见 runTag 里 onLog 那段)。
-  // **只推迟渲染,不丢行**:ref 攒着,后台跑完切回来也全在
-  const logPending = useRef<TagLogLine[]>([]);
-  const logFlushScheduled = useRef(false);
+  // 日志从 `run-progress` 轮询里全量取 —— 后端累积,前端 500ms 一拍替换 state,
+  // 天然就是合并写节奏(不需要 SSE 时代那套 ref + 100ms flush)。
 
   // **拉挂了必须出声**(和「规则」页那棵树的取法一致)。少了 onError,一次 500
   // 或后端没起来渲染出来的就是下面那句"词库还是空的。点上面的「AI 标注」"
@@ -70,6 +66,11 @@ export default function TagPanel() {
   const { data: changes, refresh: refreshChanges } = useRequest(() => tagApi.changes(), {
     formatResult: rawResult,
   });
+  // 词库健康度(M4h):活跃词数是整理成本的决定量,和树一起刷 —— 标注跑完、手动
+  // 合并都会改变它。拉挂了就不显示那行(和上面 status 同一个待遇:少一行,不谎报)
+  const { data: stats, refresh: refreshStats } = useRequest(() => tagApi.reconcileStats(), {
+    formatResult: rawResult,
+  });
   // 静态 Modal.confirm 拿不到 ConfigProvider 的主题,必须走 App.useApp()
   const { modal } = AntApp.useApp();
 
@@ -79,23 +80,13 @@ export default function TagPanel() {
     tagApi.status().then(setTagStatus).catch(() => {});
   }, []);
 
-  // 卸载时中止在跑的那轮标注。不作清理的话:人离开页面,SSE 还在后台排干,
-  // 而按钮已经回到空闲态 —— 再点一次就会在**同一个池子上**开出第二轮同跑。
-  // 只中止,不 setState(卸载后的 state 写无所谓,但没必要)
-  useEffect(
-    () => () => {
-      tagAbort.current?.abort();
-    },
-    [],
-  );
-
   /** 写操作的统一外壳:清错误 → 忙 → 执行 → 重拉 → 失败报错。返回成功与否 */
   const act = async (fn: () => Promise<unknown>): Promise<boolean> => {
     setError('');
     setBusy(true);
     try {
       await fn();
-      await Promise.all([refreshTree(), refreshChanges()]);
+      await Promise.all([refreshTree(), refreshChanges(), refreshStats()]);
       return true;
     } catch (e) {
       setError((e as Error).message);
@@ -115,103 +106,139 @@ export default function TagPanel() {
    *
    * `scope='missing'` 只标没标过的(增量,默认),`'all'` 全量重标(「重新标注全部」走它)。
    */
+
   /**
-   * 把攒着的日志行倒进 state —— **计时器里唯一的动作**。
-   *
-   * 为什么不在 onLog 里直接 setLogLines:那样一帧一次整页重渲染(见上面那段)。
-   * 这个函数只干"清空待写 + 追加"两件事,留给 setTimeout 一个稳定的闭包
+   * 跑完(成功/中断/失败)的收尾:落库是**逐批**的,所以都得刷新 —— 状态行要重算
+   * "已标 N/M",树和「上一轮变化」也要重拉(中断时已落库的那几批同样长在树上)。
    */
-  const flushLog = useCallback(() => {
-    logFlushScheduled.current = false;
-    if (logPending.current.length === 0) return; // 空批别碰 state
-    const batch = logPending.current;
-    logPending.current = [];
-    setLogLines((ls) => [...ls, ...batch]);
-  }, []);
+  const finishPoll = useCallback(async () => {
+    await Promise.all([
+      tagApi.status().then(setTagStatus).catch(() => {}),
+      refreshTree().catch(() => {}),
+      refreshChanges().catch(() => {}),
+      refreshStats().catch(() => {}),
+    ]);
+  }, [refreshTree, refreshChanges, refreshStats]);
+
+  /**
+   * 开始轮询 `run-progress` 并驱动界面。**`runTag` 和"重进页面恢复"都走它**。
+   *
+   * 用 `setTimeout` 递归而不是 `setInterval`:上一拍还没回来就不发下一拍,
+   * 天然不会重叠(轮询慢于 500ms 时也稳定)。
+   */
+  const startPolling = useCallback(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let stopped = false;
+    // 请求在途时被停:timer 还是 null,clearTimeout 清不掉 —— 用 stopped 挡在
+    // 重排之前,否则这一拍回来照旧 setTimeout(tick, 500),轮询永远停不下来
+    const stopTimer = () => { stopped = true; if (timer) clearTimeout(timer); };
+
+    const tick = async () => {
+      try {
+        const p = await tagApi.getRunProgress();
+        if (stopped) return;
+        setTagProgress({ done: p.done, total: p.total, tagged: p.tagged });
+        lastTagProgress.current = { done: p.done, total: p.total, tagged: p.tagged };
+        // 日志从后端累积数组全量替换。**没新行就不 set** —— 否则 500ms 一拍整棵
+        // TagTree 跟着重渲染(后端 append-only,长度没变就是没变)
+        setLogLines((prev) => (prev.length === p.logs.length ? prev : p.logs));
+
+        if (p.error) {
+          setError(p.error);
+          setTagging(false);
+          await finishPoll();
+          return;
+        }
+        if (!p.running) {
+          if (p.result) {
+            const r = p.result;
+            // `newWordCount` 是**质检的可见性**:质检只对本轮新词开口,所以"新增 900 个词、
+            // 而「标签」页的上一轮变化是空的"就是它没干活(输出被截断是一条真路,服务端会记
+            // TAGCHECK_EMPTY)。不显示的话这个信号在界面上根本不存在 —— 这个数服务端一直在
+            // 发、注释还写着"界面上要的是这轮长了多少新词",而界面从来没读过它。
+            if (r.tagged === 0 && r.failedBatches.length === 0) {
+              // **空池子没有"本轮"** —— 服务端一个模型调用都没发(池子里全是标过的,
+              // 剩下的只有已失效)。报「完成 0 条 · 新增 0 个」就是用户这次撞上的那句谎话:
+              // 它读起来像"跑过了但什么都没标上",而真相是"没什么可跑的"。分开说。
+              // (非空池子不会走到这里:模型对每批都回空的话,补两轮会把它记成失败批次 ——
+              // 所以 tagged=0 且零失败只可能是空池子)
+              setTagNote('没有需要标注的条目(有效的都标过了)');
+            } else {
+              setTagNote(
+                `本轮标注完成:${r.tagged.toLocaleString()} 条 · 新增词 ${r.newWordCount.toLocaleString()} 个` +
+                  // 失败的批次**会留在 ai_checked_at IS NULL 里** —— 下次增量自然再试一遍,
+                  // 所以说清楚而不是把它当错误(§9D B4 同款语气)
+                  (r.failedBatches.length ? ` · ${r.failedBatches.length} 批失败(没标上的下次会再试)` : '') +
+                  // 一条都没标上时,只报"N 批失败"等于没说(模型都没连上,用户完全不知道
+                  // 为什么)—— 原因才是他唯一能照着改的东西,带上第一条的
+                  (r.tagged === 0 && r.failedBatches.length ? `:${r.failedBatches[0]!.reason}` : ''),
+              );
+            }
+          } else {
+            // running=false 且 result=null = 被中止(§9D B5,停止不是错误):
+            // 标注是逐批落库的,已完成的那些已经在库里了 —— 说清"留了什么、再点会怎样"
+            const last = lastTagProgress.current as TagProgressPayload | null;
+            setTagNote(`已中断:已标 ${(last?.done ?? 0).toLocaleString()} 条 · 已完成的保留在库里,再点会接着标`);
+          }
+          setTagging(false);
+          await finishPoll();
+          return;
+        }
+      } catch {
+        // 单次轮询失败不炸 —— 下一拍再试(后端瞬断不该让界面卡死在"标注中")
+      }
+      if (stopped) return;
+      timer = setTimeout(tick, 500);
+    };
+
+    void tick();
+    return stopTimer;
+  }, [finishPoll]);
 
   const runTag = async (scope: 'missing' | 'all') => {
     setError('');
     setTagNote('');
     setTagging(true);
     setTagProgress(null);
-    // 新的一轮,日志从零开始(§9D.7)—— 上一轮的留在缓冲区里会把两轮混成一团。
-    // **ref 里的残批也一起清** —— 上一轮末尾 100ms 内可能还攒着没倒完的行,
-    // 不清的话它们会在新轮开跑后跟着第一轮 flush 冒出来,污染新日志
+    // 新的一轮,日志从零开始(§9D.7)—— 上一轮的留在 state 里会把两轮混成一团
     setLogLines([]);
-    logPending.current = [];
-    logFlushScheduled.current = false;
     lastTagProgress.current = null;
-    const controller = new AbortController();
-    tagAbort.current = controller;
+
     try {
-      const r = await tagApi.run(
-        scope,
-        (p) => {
-          setTagProgress(p);
-          lastTagProgress.current = p;
-        },
-        {
-          signal: controller.signal,
-          // 日志四种帧全进同一个缓冲区(§9D.7)。**先清空再开跑** —— 上一轮的日志
-          // 是上一轮的,留着会和这一轮混成一片分不清。
-          // 帧先进 ref,按 100ms 节奏整批倒进 state —— 一帧一 setState 的话,
-          // 全库几千帧 = 几千次整页重渲染(合并写,见上面那段注释)
-          onLog: (l) => {
-            logPending.current.push(l);
-            if (logFlushScheduled.current) return; // 已在排队,别堆计时器
-            logFlushScheduled.current = true;
-            // **固定节奏而不是 rAF**:rAF 在标签页切后台时不触发,行会一直攒到用户
-            // 切回来 —— 那正是他"回来看看跑完没"的时刻,不该让日志在那之后才挤出来。
-            // 100ms:行跟着跑动刷新不粘手,又不至于为省几次渲染把人晾着
-            setTimeout(flushLog, 100);
-          },
-        },
-      );
-      // `newWordCount` 是**质检的可见性**:质检只对本轮新词开口,所以"新增 900 个词、
-      // 而「标签」页的上一轮变化是空的"就是它没干活(输出被截断是一条真路,服务端会记
-      // TAGCHECK_EMPTY)。不显示的话这个信号在界面上根本不存在 —— 这个数服务端一直在
-      // 发、注释还写着"界面上要的是这轮长了多少新词",而界面从来没读过它。
-      setTagNote(
-        `本轮标注完成:${r.tagged.toLocaleString()} 条 · 新增词 ${r.newWordCount.toLocaleString()} 个` +
-          // 失败的批次**会留在 ai_checked_at IS NULL 里** —— 下次增量自然再试一遍,
-          // 所以说清楚而不是把它当错误(§9D B4 同款语气)
-          (r.failedBatches.length ? ` · ${r.failedBatches.length} 批失败(没标上的下次会再试)` : '') +
-          // 一条都没标上时,只报"N 批失败"等于没说(模型都没连上,用户完全不知道
-          // 为什么)—— 原因才是他唯一能照着改的东西,带上第一条的
-          (r.tagged === 0 && r.failedBatches.length ? `:${r.failedBatches[0]!.reason}` : ''),
-      );
+      // 启动即返回;真正的"跑完/中断"由轮询从 run-progress 里读到
+      await tagApi.startRun(scope);
     } catch (e) {
-      // **停止不是错误(§9D B5)**:标注是逐批落库的,已完成的那些已经在库里了 ——
-      // 说清"留了什么、再点会怎样"就够了,不用红条吓人。
-      // 两处都认:用户点停止(fetch 自己抛 AbortError),以及服务端回 `aborted` 帧
-      // (tagApi 抛 DOMException('已中止','AbortError'))。
-      if (controller.signal.aborted || (e as Error)?.name === 'AbortError') {
-        // 起跑时把它置过 null,TS 的收窄会一路带到这儿 —— 显式写回类型(照 ChatDrawer)
-        const last = lastTagProgress.current as TagProgressPayload | null;
-        setTagNote(`已中断:已标 ${(last?.done ?? 0).toLocaleString()} 条 · 已完成的保留在库里,再点会接着标`);
-      } else {
-        setError((e as Error).message);
-      }
-    } finally {
-      tagAbort.current = null;
       setTagging(false);
-      setTagProgress(null);
-      // 落库是**逐批**的,所以成功和中断都得刷新:状态行要重算"已标 N/M",树和
-      // 「上一轮变化」也要重拉 —— 中断时已落库的那几批同样长在树上。
-      //
-      // **三个都得吞掉自己的错误**:这里在 `finally` 里,调用方又是 `void runTag(...)`,
-      // 没人接住的 rejection 会直接冒成 unhandled —— 后端一挂,一次普通的刷新失败就
-      // 会变成控制台的报错。而且 `refreshChanges` 没有 `onError`,不吞的话它单独失败
-      // 就会变成"上面报着「新增词 N 个」、下面「上一轮变化」静悄悄停在旧数据"。
-      // 树那下来的错不吞也白搭:`useRequest` 的 `onError` 已经会画红条,这里吞掉
-      // 不隐藏任何东西。
-      await Promise.all([
-        tagApi.status().then(setTagStatus).catch(() => {}),
-        refreshTree().catch(() => {}),
-        refreshChanges().catch(() => {}),
-      ]);
+      setError((e as Error).message);
+      return;
     }
+    stopPollingRef.current?.();
+    stopPollingRef.current = startPolling();
   };
+
+  // **重进页面恢复**:后端可能还有一轮在跑(用户上次离开时没停,后台继续标了)。
+  // 进页面先查一次 run-progress —— 还在跑就把界面恢复成"标注中"并接管轮询。
+  // 这样用户一进来就看到真相,想停点「停止」就真停了。
+  useEffect(() => {
+    let cancelled = false;
+    // resolve 前可能已卸载 —— 用 cancelled 挡在启动轮询之前,不然泄漏一个
+    // 在已卸载组件上 setState 的轮询
+    tagApi.getRunProgress().then((p) => {
+      if (cancelled || !p.running) return;
+      setTagging(true);
+      setTagProgress({ done: p.done, total: p.total, tagged: p.tagged });
+      setLogLines(p.logs);
+      stopPollingRef.current?.();
+      stopPollingRef.current = startPolling();
+    }).catch(() => {});
+    return () => {
+      cancelled = true;
+      stopPollingRef.current?.();
+      stopPollingRef.current = null;
+    };
+  }, [startPolling]);
+  // **卸载不中止后端** —— 用户在标注跑着时关页面/切走,后台照常标完(逐批落库,
+  // 停了才是浪费已标的部分)。下次进来由上面的恢复 effect 接管。
 
   /** 「重新标注全部」= 全量重标,**会覆盖旧标注**(spec §9E.4),所以先问一句 */
   const retagAll = () =>
@@ -383,12 +410,13 @@ export default function TagPanel() {
    * `validProgress` 用 `!progress` 一把捞掉 —— 所以条不会真的画坏;但那**是它的
    * 实现细节**,不该由我们依赖,该由我们说出 0。)
    *
-   * 取**下取整**不四舍五入:199/200 舍上去就是 100% —— "还没跑完却报跑完了",
-   * 而进度条正好卡在 100% 不动(下一批还在跑),比停在 99% 更让人以为卡死。
+   * **保留小数不取整**:total 大(几千)批小时,整数百分比要攒好几批才跳 1%,
+   * 进度条看起来卡死而数字每批都动 —— 用户报的正是这个。percent 接受小数,
+   * antd 自己会画,保留两位就够平滑了。
    */
   const tagPct =
     tagProgress && tagProgress.total > 0
-      ? Math.floor((tagProgress.done / tagProgress.total) * 100)
+      ? Math.round(((tagProgress.done / tagProgress.total) * 100) * 100) / 100
       : 0;
 
   return (
@@ -417,14 +445,31 @@ export default function TagPanel() {
                 </span>
               )}
             </Button>
-            <Button
-              size="small"
-              danger={tagging}
-              icon={tagging ? <Square size={13} /> : <Tag size={13} />}
-              onClick={() => (tagging ? tagAbort.current?.abort() : void runTag('missing'))}
-            >
-              {tagging ? '停止' : 'AI 标注'}
-            </Button>
+            {/* 运行中只有一个「停止」 —— 两个"发动标注"的按钮在跑着的时候都藏着,
+                不然"已经有两个能发动的按钮"同时杵在「停止」旁边很奇怪。停止走显式
+                abort 端点(轮询版没有可 abort 的 fetch) */}
+            {tagging ? (
+              <Button
+                size="small"
+                danger
+                icon={<Square size={13} />}
+                onClick={() => {
+                  // 停止失败要出声 —— 不然用户点了"停止"却完全不知道没生效
+                  void tagApi.abortRun().catch((e) => setError((e as Error).message));
+                }}
+              >
+                停止
+              </Button>
+            ) : (
+              <>
+                <Button size="small" icon={<Tag size={13} />} onClick={() => void runTag('missing')}>
+                  AI 标注
+                </Button>
+                <Button size="small" icon={<RefreshCw size={13} />} onClick={retagAll}>
+                  重新标注全部
+                </Button>
+              </>
+            )}
           </span>
         </div>
 
@@ -453,14 +498,6 @@ export default function TagPanel() {
                 /<span className="num">{(tagStatus?.total ?? 0).toLocaleString()}</span> 条
                 {/* 分母排掉了已失效 —— 那个 M 用户数不出别的数,不说清楚就是"数字悄悄变了" */}
                 {tagStatus?.invalid ? `(另有 ${tagStatus.invalid.toLocaleString()} 条已失效,不参与标注)` : ''}
-                {' · '}
-                <Button
-                  type="link" size="small"
-                  style={{ padding: 0, fontSize: 'var(--fs-12)' }}
-                  onClick={retagAll}
-                >
-                  重新标注全部
-                </Button>
               </>
             )}
             {tagModelHint && <> · {tagModelHint}</>}
@@ -518,6 +555,14 @@ export default function TagPanel() {
             {tree?.total ?? 0} 个词
           </span>
           {busy && <Spin size="small" />}
+          {/* 词库健康度(M4h):活跃词是"挂 ≥5 条视频"的词,整理成本由它的平方决定 ——
+              这个数持续涨就是词库在膨胀的早期信号。上次整理耗时大于 5s 说明超时守卫触发过 */}
+          {stats && stats.activeTags > 0 && (
+            <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)', marginLeft: 'auto' }}>
+              活跃词 <span className="num">{stats.activeTags.toLocaleString()}</span> / {stats.totalTags.toLocaleString()}
+              {stats.reconcileMs !== null && <> · 上次整理 <span className="num">{stats.reconcileMs.toLocaleString()}</span>ms</>}
+            </span>
+          )}
         </div>
 
         {loading ? (

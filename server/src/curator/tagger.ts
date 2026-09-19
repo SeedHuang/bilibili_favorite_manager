@@ -203,6 +203,9 @@ export async function runTagging(opts: {
       // 标注是批量:一整批的输入本就大,再开着思考模式就是每条都多吐一长串推理
       thinking: false,
       ...(opts.signal ? { abortSignal: opts.signal } : {}),
+      // **单批超时:模型挂起(本地 4b OOM/卡死)不能卡死整轮** —— 超时抛错,
+      // 这批发 failedBatches 记下来继续,`running` 不会被永久钉在 true
+      timeoutMs: 180_000,
     });
     // **只收本批的 id** —— 模型编别的条目无效(和归类同款纪律)
     const got = coerceTagOutput(raw, new Set(batch.map((i) => i.id)));
@@ -228,10 +231,10 @@ export async function runTagging(opts: {
   };
 
   // 批大小:标注的输出很小(每条 ~30 token),输入才是瓶颈 —— 复用 ctx 的窗口,
-  // 但按**条数**上限 16 切(spec §9E.2 写的 16 条/批)。
+  // 但按**条数**上限切(spec §9E.2 写的是 16 条/批)。
   // 曾经的 32 站不住:它引用的实测数据("4b 超过 ~8 条会漏")量的是**8 条时**的表现,
-  // 没有谁量过 32 —— 唯一的数据点指向更小,而 16 是唯一写死的数。
-  // 模型偶尔漏条由下面那两轮补轮兜底,所以切小只多花轮次,不会漏标。
+  // 没有谁量过 32 —— 唯一的数据点指向更小。模型偶尔漏条由下面那两轮补轮兜底,
+  // 所以切小只多花轮次,不会漏标。上限回到 spec 的 16(临时压 5 排查已结束)。
   const size = Math.max(1, Math.min(16, Math.floor((opts.ctx.contextWindow - 1500) / 250)));
   for (let i = 0; i < opts.items.length; i += size) {
     if (opts.signal?.aborted) break; // §9D B2:发起新调用前先看信号

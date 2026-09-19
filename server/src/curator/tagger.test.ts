@@ -177,6 +177,35 @@ describe('runTagging', () => {
     expect(r.failedBatches).toHaveLength(0);
   });
 
+  // ★ 回归测试:用户报的「点停止停不了 / 日志不刷 / 前端不更新」一串症状,
+  //   根因是模型调用挂起时 `complete` 永不 resolve、整轮卡死、`running` 永久 true。
+  //   现在 provider 层有 timeoutMs 兜底(挂起抛"超时"),这一条验证:一批超时
+  //   记 failedBatches,**后续批次照跑**,而不是卡死整轮。
+  it('一批超时 → 记失败批次,后续批次继续(不卡死整轮)', async () => {
+    const db = openDb(':memory:');
+    // 17 条 → 两批(16 + 1,批上限回到 spec 的 16)。第一批超时,第二批正常 ——
+    // 验证"卡死整轮"被根治
+    for (let i = 0; i < 17; i++) upsertItem(db, { id: `BV${i}`, type: 2, title: `题${i}` });
+    const items = Array.from({ length: 17 }, (_, i) => item(`BV${i}`, `题${i}`));
+    // 第一次调用(第 1 批)抛超时;第 2 批(第 2 次调用)正常回自己的 id
+    mocks.complete
+      .mockRejectedValueOnce(new Error('模型调用超时(180000ms)'))
+      .mockImplementationOnce(async ({ messages }: { messages: { content: string }[] }) => {
+        const ids = [...messages[1]!.content.matchAll(/\[(BV\d+)\]/g)].map((m) => m[1]!);
+        return JSON.stringify(ids.map((id) => ({ id, kind: '娱乐', domains: ['x'], tags: ['y'] })));
+      });
+
+    const r = await runTagging({ config, ctx, items, db });
+    // 第 1 批 16 条超时 → 记 1 个失败批次,原因带"超时"
+    expect(r.failedBatches).toHaveLength(1);
+    expect(r.failedBatches[0]!.reason).toContain('超时');
+    expect(r.failedBatches[0]!.size).toBe(16);
+    // 第 2 批 1 条照常标上 —— 整轮没被第一批卡死
+    expect(r.tagged).toBe(1);
+    // 一次超时 + 一次正常 = 2 次。补轮不触发(第 2 批没漏)
+    expect(mocks.complete).toHaveBeenCalledTimes(2);
+  });
+
   it('标注写 ai_checked_at —— 增量靠它(漏了就是每次全库重标)', async () => {
     const db = openDb(':memory:');
     upsertItem(db, { id: 'BV1', type: 2, title: 'a' });

@@ -18,11 +18,10 @@ import type {
   RuleView,
   SessionDetail,
   SessionSummary,
-  TagLogLine,
-  TagProgressPayload,
-  TagRunResult,
+  TagRunProgress,
   TagRunStatus,
   TagTreeView,
+  ReconcileStats,
   TreeChange,
   WorkbenchView,
 } from './types';
@@ -38,9 +37,17 @@ export function rawResult<T>(r: T): T {
   return r;
 }
 
-/** 薄封装:所有 /api 请求。CSRF 对本机工具无意义,不处理。 */
+/**
+ * 薄封装:所有 /api 请求。CSRF 对本机工具无意义,不处理。
+ *
+ * **直连后端 3001,不走 umi 代理** —— umi dev server 的 proxy 会缓冲 SSE、
+ * 会整体挂掉(用户反复撞的"接口 pending"根因)。本机工具没有异地部署,
+ * 硬编码本机地址即可。后端在 http/index.ts 加了 CORS 放行。
+ */
+export const API_BASE = 'http://127.0.0.1:3001';
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, init);
+  const res = await fetch(`${API_BASE}${path}`, init);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     // 带上 status —— 调用方要分辨「409 需要确认」和别的失败,光有文案不够
@@ -145,7 +152,7 @@ export async function streamMessage(
   onDelta: (delta: string) => void,
   opts: { signal?: AbortSignal; onReasoning?: (delta: string) => void } = {},
 ): Promise<string> {
-  const res = await fetch(`/api/curator/sessions/${sessionId}/messages`, {
+  const res = await fetch(`${API_BASE}/api/curator/sessions/${sessionId}/messages`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ content }),
@@ -203,7 +210,7 @@ export async function classifyStream(
   onProgress: (p: ProgressPayload) => void,
   opts: { signal?: AbortSignal } = {},
 ): Promise<Pass2Response> {
-  const res = await fetch(`/api/curator/sessions/${sessionId}/run-pass-2`, {
+  const res = await fetch(`${API_BASE}/api/curator/sessions/${sessionId}/run-pass-2`, {
     method: 'POST',
     ...(opts.signal ? { signal: opts.signal } : {}),
   });
@@ -378,6 +385,9 @@ export const tagApi = {
   /** 词库树 —— 规则里选标签(§9F C11)和「标签」页都用它 */
   tree: () => api<TagTreeView>('/api/tags/tree'),
 
+  /** 词库健康度 —— 活跃词数是整理成本的决定量(M4h) */
+  reconcileStats: () => api<ReconcileStats>('/api/tags/reconcile-stats'),
+
   changes: () => api<{ changes: TreeChange[] }>('/api/tags/changes'),
 
   /**
@@ -399,67 +409,17 @@ export const tagApi = {
   remove: (id: number) => json<{ ok: true }>('DELETE', `/api/tags/${id}`),
 
   /**
-   * 跑一遍标注(SSE,照 classifyStream 的骨架)。
+   * 启动一轮标注。**启动即返回** —— 后端后台跑,前端靠 `getRunProgress` 轮询。
    *
    * `scope` 传给后端当增量口径:`missing` = 只标还没标注的,`all` = 全部重标。
-   *
-   * 中途中止(用户点停止)服务端回 `aborted` 帧 —— 这里抛 AbortError,
-   * 和 fetch 自己中止是同一种形状,调用方一个 catch 就能两处都接住。
+   * 走 `json()` 而不是裸 fetch:后端的 409(已有一轮在跑)会带 `status`,调用方才能分辨
    */
-  run: async (
-    scope: 'missing' | 'all',
-    onProgress: (p: TagProgressPayload) => void,
-    opts: {
-      signal?: AbortSignal;
-      /** 日志四种帧(§9D.7)走**同一个**回调 —— 受控联合,一判 type 就整行落地 */
-      onLog?: (l: TagLogLine) => void;
-    } = {},
-  ): Promise<TagRunResult> => {
-    const res = await fetch(`/api/tags/run?scope=${scope}`, {
-      method: 'POST',
-      ...(opts.signal ? { signal: opts.signal } : {}),
-    });
-    // 没配模型时后端回的是 **400 + JSON body,不是 SSE** —— 同样按普通错误抛。
-    // 不先拦这一下的话它会掉进下面的流解析,用户只会看到一句"服务端没有返回流",
-    // 而真正该说的是后端给的那句"还没配模型"(照 classifyStream 的写法)。
-    if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as { reason?: string };
-      throw new Error(body.reason ?? `请求失败 ${res.status}`);
-    }
-    if (!res.body) throw new Error('服务端没有返回流');
+  startRun: (scope: 'missing' | 'all') =>
+    json<{ ok: true; poolSize: number }>('POST', `/api/tags/run?scope=${scope}`),
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let done: TagRunResult | null = null;
-    let failure: string | null = null;
+  /** 拉当前这一轮标注的实时状态 —— 前端轮询就靠它 */
+  getRunProgress: () => api<TagRunProgress>('/api/tags/run-progress'),
 
-    for (;;) {
-      const { done: eof, value } = await reader.read();
-      if (eof) break;
-      buffer += decoder.decode(value, { stream: true });
-      // SSE 以空行分隔事件;最后一段可能不完整,留在 buffer 里等下一个 chunk
-      const events = buffer.split('\n\n');
-      buffer = events.pop() ?? '';
-      for (const block of events) {
-        const event = /^event: (.+)$/m.exec(block)?.[1] ?? 'message';
-        const data = /^data: (.*)$/m.exec(block)?.[1];
-        if (!data) continue;
-        if (event === 'progress') onProgress(JSON.parse(data) as TagProgressPayload);
-        else if (event === 'done') done = JSON.parse(data) as TagRunResult;
-        else if (event === 'aborted') throw new DOMException('已中止', 'AbortError');
-        else if (event === 'error') failure = (JSON.parse(data) as { reason?: string }).reason ?? '标注失败';
-        else if (event === 'phase' || event === 'item' || event === 'verdict' || event === 'note') {
-          // 服务端帧载荷里没有 type —— 受控联合的判别字段在这里补上(展开顺序:
-          // 先 type 后 data,data 里没有同名键,type 不会被盖掉)
-          const log = JSON.parse(data) as Record<string, unknown>;
-          opts.onLog?.({ type: event, ...log } as TagLogLine);
-        }
-      }
-    }
-
-    if (failure) throw new Error(failure);
-    if (!done) throw new Error('服务端没有返回标注结果');
-    return done;
-  },
+  /** 中止正在跑的那一轮。幂等 —— 没在跑也返回 ok */
+  abortRun: () => json<{ ok: true }>('POST', '/api/tags/run-abort'),
 };

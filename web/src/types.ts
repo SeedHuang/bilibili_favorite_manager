@@ -311,6 +311,26 @@ export interface TagProgressPayload {
   tagged: number;
 }
 
+/**
+ * 轮询版标注的实时状态 —— `GET /api/tags/run-progress` 一次拉全。
+ *
+ * `running=false` 且 `result` 非空 = 正常跑完;`running=false` 且 `result=null`
+ * = 被中止或失败(看 `error`)。`logs` 是这一轮的全部日志行 —— 前端每次轮询全量
+ * 替换(TagPanel 按长度短路,没新行不重渲染)。
+ */
+export interface TagRunProgress {
+  running: boolean;
+  scope: 'missing' | 'all' | null;
+  done: number;
+  total: number;
+  tagged: number;
+  failedBatches: FailedBatch[];
+  /** 跑完才有;中止/失败为 null */
+  result: Pick<TagRunResult, 'tagged' | 'failedBatches' | 'newWordCount' | 'changes'> | null;
+  error: string | null;
+  logs: TagLogLine[];
+}
+
 // ── M4g 追加:标注日志(§9D.7)─────────────────────────────
 // 四种帧只在 SSE 流里活,不落库(和进度一个待遇 —— §9D 定的"进度只活在 SSE 里")。
 // 一个受控联合而不是四个接口:抽屉只关心"哪一行是什么形状",按 type 一判就能整行落地。
@@ -366,6 +386,14 @@ export interface TagNode {
 export interface TagTreeView {
   tree: TagNode[];
   total: number;
+}
+
+/** 词库健康度(M4h):活跃词数是整理成本的决定量,持续涨就是在膨胀 */
+export interface ReconcileStats {
+  totalTags: number;
+  activeTags: number;
+  reconcileMs: number | null;
+  lastRunAt: number | null;
 }
 
 /** 一轮整理对树做了什么 —— 「标签」页顶部的清单(§9F C10) */

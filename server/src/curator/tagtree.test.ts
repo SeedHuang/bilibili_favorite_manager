@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { openDb } from '../db/index.js';
 import { upsertItem } from '../db/repo/items.js';
 import { ensureTag, linkItemTag, listTagTree } from '../db/repo/tags.js';
-import { reconcile, coverageMap } from './tagtree.js';
+import { reconcile, reconcileWithBudget, coverageMap, MIN_SAMPLE } from './tagtree.js';
 
 /**
  * 建 n 条视频,每条挂 tagIds 里的全部标签。
@@ -24,7 +24,8 @@ describe('coverageMap', () => {
       [1, new Set(['a', 'b', 'c', 'd'])],
       [2, new Set(['a', 'b'])],
     ]);
-    const m = coverageMap(sets);
+    // minSample=1:测试夹具的集合都很小,传 1 让它们全够样本(生产传 MIN_SAMPLE 剪枝)
+    const m = coverageMap(sets, 1);
     expect(m.get('1,2')).toBe(0.5); // |1∩2| / |1| = 2/4
     expect(m.get('2,1')).toBe(1);   // |2∩1| / |2| = 2/2
   });
@@ -34,7 +35,22 @@ describe('coverageMap', () => {
       [1, new Set(['a'])],
       [2, new Set(['b'])],
     ]);
-    expect(coverageMap(sets).size).toBe(0);
+    expect(coverageMap(sets, 1).size).toBe(0);
+  });
+
+  it('样本不足的词被跳过 —— 性能剪枝不改变判据结论', () => {
+    const sets = new Map<number, ReadonlySet<string>>([
+      [1, new Set(['a', 'b', 'c'])],       // 够样本
+      [2, new Set(['a', 'b'])],            // 够样本
+      [3, new Set(['a'])],                 // 样本不足(1 < 2)
+    ]);
+    const m = coverageMap(sets, 2);
+    // 1 和 2 照算
+    expect(m.get('1,2')).toBe(2 / 3);
+    // 涉及 3 的对不出现 —— 它样本不足,判据本来就不判它
+    expect(m.has('1,3')).toBe(false);
+    expect(m.has('3,1')).toBe(false);
+    expect(m.has('2,3')).toBe(false);
   });
 });
 
@@ -148,6 +164,7 @@ describe('reconcile', () => {
     const yi = ensureTag(db, '乙', null);
     const bing = ensureTag(db, '丙', null); // 根
 
+
     // 甲 / 乙 双向 90% → 合并,乙 被并进甲(平局时保留先建的那个)
     seed(db, 18, [jia, yi], 0);      // 共享的 18 条
     seed(db, 2, [jia], 100);         // 甲 独有 → |甲| = 20、cover(甲→乙) = 18/20 = 0.9
@@ -178,5 +195,95 @@ describe('reconcile', () => {
     expect(db.prepare(`SELECT parent_id FROM tags WHERE id = ?`).get(bing))
       .toEqual({ parent_id: jia });
     expect(db.prepare(`SELECT id FROM tags WHERE id = ?`).get(yi)).toBeUndefined();
+  });
+
+  // ── M4h:运行预算(Task 3)与统计下限自适应(Task 4)─────────
+  //
+  // 造 n 个**互不重叠**的活跃词(各挂 10 条自己的视频)—— spec §1.5 的真实形态。
+  // 词与词毫无交集 → 判据全不触发,性能由活跃词数的 O(n²) 配对决定。
+  function seedActive(db: ReturnType<typeof openDb>, n: number, wordOffset = 0): void {
+    for (let i = 0; i < n; i++) {
+      const t = ensureTag(db, `词${i + wordOffset}`, null);
+      for (let j = 0; j < 10; j++) {
+        const id = `BV${i + wordOffset}_${j}`;
+        upsertItem(db, { id, type: 2, title: id });
+        linkItemTag(db, id, t, 'ai');
+      }
+    }
+  }
+
+  it('预算:3000 活跃词在默认 5s 内正常跑完,timedOut=false', () => {
+    const db = openDb(':memory:');
+    seedActive(db, 3000);
+    const t0 = Date.now();
+    const r = reconcileWithBudget(db);
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(r.timedOut).toBe(false);
+    expect(r.changes).toEqual([]); // 互不重叠,没有可整理的
+  });
+
+  it('预算:10000 活跃词超时收手 —— ≤5s 返回、timedOut=true、已做的保留', () => {
+    const db = openDb(':memory:');
+    seedActive(db, 10000);
+    const t0 = Date.now();
+    const r = reconcileWithBudget(db, { budgetMs: 2000 });
+    const took = Date.now() - t0;
+    expect(r.timedOut).toBe(true);
+    expect(took).toBeLessThan(6000); // 收手,不占死事件循环(留快照本身的余量)
+    // 快照构建和配对在 deadline 处 break,部分整理的 changes 照常返回(这里没有可整理的)
+    expect(r.changes).toEqual([]);
+  });
+
+  it('预算超时:部分整理安全收手 —— 已做的保留,库不崩、不多不少', () => {
+    const db = openDb(':memory:');
+    // 两个 100% 重合的词(可合并)+ 大量活跃词把时间撑爆
+    const a = ensureTag(db, '路飞', null);
+    const b = ensureTag(db, '鲁夫', null);
+    seed(db, 10, [a, b]);
+    seedActive(db, 4000, 1000);
+    const r = reconcileWithBudget(db, { budgetMs: 1000 });
+    expect(r.timedOut).toBe(true);
+    // 清单里点名的每个合并都必须**真的落了库**(部分整理不丢已做的;
+    // 快照期烧光预算时判据拿不到完整覆盖率,清单为空也是合法的部分整理)
+    for (const c of r.changes) {
+      expect(db.prepare(`SELECT id FROM tags WHERE name = ?`).get(c.from)).toBeDefined();
+    }
+    // 库完好:起步词都在 —— 快照期烧光预算时合并可能根本没轮到(清单为空是合法的
+    // 部分整理),剩下的下一轮自会补上
+    expect(db.prepare(`SELECT COUNT(*) n FROM tags WHERE name IN ('路飞','鲁夫')`).get())
+      .toMatchObject({ n: 2 });
+  });
+
+  it('统计下限自适应:未超 3000 用默认 5,超了提到 10', () => {
+    // 未超阈值:默认 MIN_SAMPLE=5 —— 3 条样本的重合照样不判,行为和从前一致
+    const small = openDb(':memory:');
+    const a = ensureTag(small, '小词', null);
+    const b = ensureTag(small, '大词', null);
+    seed(small, 50, [b]);
+    seed(small, 3, [a, b], 100);
+    expect(reconcile(small)).toEqual([]);
+
+    // 超 4000 个活跃词:下限自动翻倍 —— 挂 5~9 条的词不进计算(更保守的统计)
+    const big = openDb(':memory:');
+    for (let i = 0; i < 4000; i++) {
+      const t = ensureTag(big, `词${i}`, null);
+      for (let j = 0; j < 7; j++) {
+        const id = `BV${i}_${j}`;
+        upsertItem(big, { id, type: 2, title: id });
+        linkItemTag(big, id, t, 'ai');
+      }
+    }
+    // 全库活跃词都只有 7 条:下限提到 10 后**没有词够样本** → 快速空跑、无变化
+    const t0 = Date.now();
+    // limitRaised 报给调用方记 log.event(不再靠 console)——
+    // 未超阈值的 small 库不触发,超阈值的 big 库触发
+    const smallR = reconcileWithBudget(small);
+    expect(smallR.limitRaised).toBe(false);
+    const r = reconcileWithBudget(big);
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(r.changes).toEqual([]);
+    expect(r.limitRaised).toBe(true);
+    // 双保险:常量本身就是 5 —— 这条断言挡住"有人顺手改了 MIN_SAMPLE"的静默分叉
+    expect(MIN_SAMPLE).toBe(5);
   });
 });

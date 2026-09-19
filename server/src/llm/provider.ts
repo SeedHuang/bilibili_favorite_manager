@@ -130,23 +130,73 @@ export async function complete(opts: {
    * 每批吐一长串推理,输出 token 涨数倍、整体变慢(spec §3 末)。
    */
   thinking?: boolean;
+  /**
+   * 单次模型调用的超时(ms)。**没有这个,本地 4b 挂起(OOM/卡死/网络黑洞)时
+   * `generateText` 永不 resolve** —— 整轮标注卡死、`running` 永久 true、
+   * 用户点停止 abort 不生效(用户报的正是这一串)。超时触发 = 抛错,调用方把
+   * 这批记失败继续,而不是卡死整轮。只给批量路径传,聊天不传(聊到一半被砍
+   * 是打断,不是超时)。
+   */
+  timeoutMs?: number;
 }): Promise<string> {
   const { instructions, rest } = splitPrompt(opts.messages);
-  const { text } = await generateText({
-    model: languageModel(opts.config),
-    ...(instructions ? { instructions } : {}),
-    messages: rest,
-    // `@ai-sdk/deepseek` 原生认这个键(3.0.44:`providerOptions.deepseek.thinking.type`,
-    // 缺省 `enabled`)。**判 undefined,而不是给个默认值** —— 缺省的语义是
-    // "这个参数一个字都不出现",聊天那条路的请求因此和加开关之前逐字一致
-    ...(opts.thinking === undefined
-      ? {}
-      : { providerOptions: { deepseek: { thinking: { type: opts.thinking ? 'enabled' : 'disabled' } } } }),
-    // **省了这行,用户点停止就只是浏览器断开,provider 照样把 token 生成完** ——
-    // "钱花了、结果没人接"。AI SDK 原生接受 signal,透传即可
-    ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
-  });
-  return text;
+  // 超时与用户中止**合成一个 signal**:AI SDK 只认一个 abortSignal。超时 abort 时
+  // 抛的错和用户中止一样是 AbortError,但调用方靠**自己的 controller** 分辨 ——
+  // 路由的 controller(用户停)没 aborted,所以超时会走"记失败批次"而不是"中止"。
+  // 但光靠 abort 不够 —— SDK 的 abort 只在中途检查,`doGenerate` 的 promise 挂起
+  // 时不 settle,abort 根本轮不到。所以超时用 `Promise.race` 在**这一层**拦:
+  // 到点直接 reject,同时 abort 合成 controller 给 SDK 一个清理的机会。
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let raceTimer: ReturnType<typeof setTimeout> | undefined;
+  let onCallerAbort: (() => void) | undefined;
+  let signal = opts.abortSignal;
+  if (opts.timeoutMs !== undefined) {
+    const c = new AbortController();
+    if (opts.abortSignal?.aborted) c.abort();
+    else {
+      // listener 存下来、finally 里 remove —— 同一轮多个批共享同一个 signal,
+      // 不清理的话每批都挂一个监听,一长串跑完就超出 EventTarget 的默认上限
+      onCallerAbort = () => c.abort();
+      opts.abortSignal?.addEventListener('abort', onCallerAbort);
+    }
+    timer = setTimeout(() => c.abort(), opts.timeoutMs);
+    signal = c.signal;
+  }
+  try {
+    const call = generateText({
+      model: languageModel(opts.config),
+      ...(instructions ? { instructions } : {}),
+      messages: rest,
+      // `@ai-sdk/deepseek` 原生认这个键(3.0.44:`providerOptions.deepseek.thinking.type`,
+      // 缺省 `enabled`)。**判 undefined,而不是给个默认值** —— 缺省的语义是
+      // "这个参数一个字都不出现",聊天那条路的请求因此和加开关之前逐字一致
+      ...(opts.thinking === undefined
+        ? {}
+        : { providerOptions: { deepseek: { thinking: { type: opts.thinking ? 'enabled' : 'disabled' } } } }),
+      // **省了这行,用户点停止就只是浏览器断开,provider 照样把 token 生成完** ——
+      // "钱花了、结果没人接"。AI SDK 原生接受 signal,透传即可
+      ...(signal ? { abortSignal: signal } : {}),
+    });
+    const { text } = opts.timeoutMs === undefined
+      ? await call
+      : await Promise.race([
+          call,
+          // 到点不 resolve → 直接以"超时"收场(不装成用户中止的 AbortError)
+          // handle 存下来 finally 里清 —— 正常路径(model 先回)不清的话这个 timer
+          // 会一直挂到超时点,空占 Node 的定时器队列
+          new Promise<never>((_, reject) => {
+            raceTimer = setTimeout(
+              () => reject(new Error(`模型调用超时(${opts.timeoutMs}ms)`)),
+              opts.timeoutMs,
+            );
+          }),
+        ]);
+    return text;
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (raceTimer) clearTimeout(raceTimer);
+    if (onCallerAbort) opts.abortSignal?.removeEventListener('abort', onCallerAbort);
+  }
 }
 
 /**
