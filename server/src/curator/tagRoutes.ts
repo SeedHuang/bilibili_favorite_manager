@@ -21,7 +21,7 @@ import { listWorkFolders } from '../db/repo/workbench.js';
 import { shapeItem } from '../http/routes/items.js';
 import { runTagging } from './tagger.js';
 import {
-  listTagTree, mergeTags, setTagParent, renameTag, deleteTag, clearTagLibrary, normalizeTagName,
+  listTagTree, countUncheckedTags, mergeTags, setTagParent, renameTag, deleteTag, clearTagLibrary, normalizeTagName,
   subtreeSets, tagScale, type TagNode,
 } from '../db/repo/tags.js';
 import { runTagCheck } from './tagcheck.js';
@@ -52,7 +52,7 @@ const TAGCHECK_TIMEOUT_MS = 180_000;
  */
 const currentCheck: {
   running: boolean;
-  scope: 'all' | 'new' | null;
+  scope: 'all' | 'continue' | null;
   done: number;
   total: number;
   result: { dropped: number; merged: number; moved: number; checked: number } | null;
@@ -63,12 +63,6 @@ const currentCheck: {
   running: false, scope: null, done: 0, total: 0,
   result: null, error: null, logs: [], controller: null,
 };
-
-/**
- * 上一轮标注长出的新词 —— 手动质检 scope='new' 用它(不然"只查这次新的"没词可查)。
- * 单进程内存变量,和 lastReconcile 同一个理由:标注一次只跑一轮。
- */
-let lastRunNewWords: string[] = [];
 
 /**
  * 「这次改动不合法」的哨兵 —— PATCH 路由用它把两种失败分开。
@@ -141,7 +135,8 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
   app.get('/api/tags/reconcile-stats', async () => {
     // 活跃词的口径和 reconcile 用同一个下限 —— 硬编码会静默分叉
     const { totalTags, activeTags } = tagScale(db, MIN_SAMPLE);
-    return { totalTags, activeTags, reconcileMs: lastReconcile.ms, lastRunAt: lastReconcile.at };
+    // unchecked = 质检台账的欠账数(checked_at IS NULL)—— 用户随时看得到欠了多少
+    return { totalTags, activeTags, unchecked: countUncheckedTags(db), reconcileMs: lastReconcile.ms, lastRunAt: lastReconcile.at };
   });
 
   // ── 进度查询 / 中止 ─────────────────────────────────
@@ -179,9 +174,9 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
   });
 
   /**
-   * 手动质检(spec M4h 扩展)。scope 选范围:
-   * - 'new':只检本轮新词(fresh 闸门,老词不碰)
-   * - 'all':检全库词,绕过 fresh(老词可能被删,不可逆 —— 弹窗已明示风险)
+   * 手动质检(spec 2026-09-19-tag-checked-at)。scope 选范围:
+   * - 'continue':只检未质检的(tags.checked_at IS NULL,含历史欠账 + 新长出来的词)
+   * - 'all':检全库词,强制重检(老词可能被删,不可逆 —— 弹窗已明示风险)
    *
    * **启动即返回 + 后台跑** —— 和 /api/tags/run 同一套 UX:前端轮询
    * check-progress 看进度,日志抽屉看每条判定和理由,run-abort 能停。
@@ -193,11 +188,11 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
       console.log('[tags/check] 拒绝:已有任务在跑 run=' + currentRun.running + ' check=' + currentCheck.running);
       return reply.code(409).send({ ok: false, reason: '已有标注/质检在跑 —— 先等它跑完或停止' });
     }
-    // scope 显式校验:没传或传别的都 400 —— 前端弹窗永远传一个,不许静默落 new
+    // scope 显式校验:没传或传别的都 400 —— 前端弹窗永远传一个,不许静默落 continue
     const scope = (req.body as { scope?: string })?.scope;
-    if (scope !== 'all' && scope !== 'new') {
+    if (scope !== 'all' && scope !== 'continue') {
       console.log('[tags/check] 拒绝:scope 非法', String(scope));
-      return reply.code(400).send({ ok: false, reason: 'scope 只能是 all 或 new' });
+      return reply.code(400).send({ ok: false, reason: 'scope 只能是 continue 或 all' });
     }
     const checker = readLlmSettings(db, 'tagcheck');
     if (!checker) {
@@ -228,12 +223,9 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
       const r = await runTagCheck({
         config: checker.config,
         tree: listTagTree(db),
-        // scope='new' 用上一轮标注的新词(还没跑过标注就是空数组 → 零批早退,合理:没有"这次新的"可查);
-        // scope='all' 待检词由 allTags 决定,newNames 用不上
-        newNames: scope === 'new' ? lastRunNewWords : [],
+        scope,
         db,
         log,
-        allTags: scope === 'all',
         signal: controller.signal,
         timeoutMs: TAGCHECK_TIMEOUT_MS,
         // 每批判完刷进度 + 判定/理由逐条进日志(onVerdict/onNote 见 runTagCheck)
@@ -260,7 +252,7 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
           kind: 'merge',
           from: '（手动质检）',
           to: '',
-          detail: `范围 ${scope === 'all' ? '全部审查' : '只查新的'} · 合并 ${r.merged} 组 · 挪位 ${r.moved} 个 · 剔除泛词 ${r.dropped} 个`,
+          detail: `范围 ${scope === 'all' ? '全部审查' : '继续质检'} · 合并 ${r.merged} 组 · 挪位 ${r.moved} 个 · 剔除泛词 ${r.dropped} 个`,
         }]));
       }
       currentCheck.result = r;
@@ -375,11 +367,6 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
         return;
       }
 
-      // 上一轮新词落给手动质检 scope='new' 用。**必须在空池子早退之前赋值** ——
-      // 空池子 = "这轮没长出新的",旧词名若留在表里,别名回落会让 merge 判定
-      // 误并到无关的活词(不可逆)
-      lastRunNewWords = r.newWords;
-
       // 空池子(本轮一条都没标)→ **树没变,跳过质检和整理**(M4h Task 2)。
       // reconcile 是同步全量计算,词库大时空池子的高频点击也会把它拖成秒级卡顿;
       // 而它整理的历史同义词在下次真实增量标注时一并合并(树真的变了才需要整理)。
@@ -417,12 +404,12 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
         note('warn', '没配「标签质检」模型 —— 跳过质检,这轮泛词闸门没跑');
       } else {
         try {
-          console.log(`[tags/run] 打标完成,共 ${r.tagged} 条 —— 开始质检(${checker.config.model}),新词 ${r.newWords.length} 个`);
+          console.log(`[tags/run] 打标完成,共 ${r.tagged} 条 —— 开始质检(${checker.config.model}),待检 ${countUncheckedTags(db)} 个词`);
           frame('phase', { phase: 'check', provider: checker.config.provider, model: checker.config.model });
           check = await runTagCheck({
             config: checker.config,
             tree: listTagTree(db),
-            newNames: r.newWords,
+            scope: 'continue',
             db,
             // 质检"一个词都没判回来"要出声 —— 那个失败看起来和"什么都没变"一模一样
             log,

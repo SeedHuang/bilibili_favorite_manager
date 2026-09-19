@@ -203,7 +203,8 @@ CREATE TABLE IF NOT EXISTS tags (
   name       TEXT NOT NULL,
   norm       TEXT NOT NULL,
   parent_id  INTEGER REFERENCES tags(id),
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  checked_at INTEGER
 );
 -- **norm 全局唯一**(C4):一个名字在整棵树里只有一处。
 -- 父**不**参与唯一性 —— 允许"不同父下同名"会造出两个 \`篮球\`、两个 \`露营\`,

@@ -394,6 +394,8 @@ export interface TagTreeView {
 export interface ReconcileStats {
   totalTags: number;
   activeTags: number;
+  /** 质检台账的欠账数(checked_at IS NULL)—— 「待检 N」读它 */
+  unchecked: number;
   reconcileMs: number | null;
   lastRunAt: number | null;
 }
@@ -410,7 +412,7 @@ export interface TagCheckProgressPayload {
  */
 export interface TagCheckProgress {
   running: boolean;
-  scope: 'all' | 'new' | null;
+  scope: 'all' | 'continue' | null;
   done: number;
   total: number;
   result: { dropped: number; merged: number; moved: number; checked: number } | null;

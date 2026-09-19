@@ -212,7 +212,9 @@ describe('reconcile', () => {
     }
   }
 
-  it('预算:3000 活跃词在默认 5s 内正常跑完,timedOut=false', () => {
+  // 基准测试的 vitest 超时放宽到 30s —— 被测的预算守卫本身是 5s/2s 级,
+  // 但测试默认 5s 超时比它还短,机器一抖(并行 worker、慢盘)就把守卫测试错杀成超时
+  it('预算:3000 活跃词在默认 5s 内正常跑完,timedOut=false', { timeout: 30_000 }, () => {
     const db = openDb(':memory:');
     seedActive(db, 3000);
     const t0 = Date.now();
@@ -222,7 +224,7 @@ describe('reconcile', () => {
     expect(r.changes).toEqual([]); // 互不重叠,没有可整理的
   });
 
-  it('预算:10000 活跃词超时收手 —— ≤5s 返回、timedOut=true、已做的保留', () => {
+  it('预算:10000 活跃词超时收手 —— ≤5s 返回、timedOut=true、已做的保留', { timeout: 30_000 }, () => {
     const db = openDb(':memory:');
     seedActive(db, 10000);
     const t0 = Date.now();

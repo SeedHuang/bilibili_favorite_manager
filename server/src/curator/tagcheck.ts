@@ -1,9 +1,9 @@
 /**
  * 标签质检(spec §9F C8)—— flash 在这一整条链路里**唯一**的出场点。
  *
- * 分界线:本地模型做生产,flash 只当质检员,而且**只对新的东西开口**。
- * 每轮**一次调用** —— 本轮所有新词进同一个 prompt。之后每轮新词趋近于零,开销也趋近于零,
- * 所以挂在每轮末尾是划算的。
+ * 分界线:本地模型做生产,flash 只当质检员,而且**只对没质检过的词开口**。
+ * 每轮**一次调用** —— 本轮待检的词(checked_at IS NULL)进同一个 prompt。之后欠账清零,
+ * 开销也趋近于零,所以挂在每轮末尾是划算的。
  *
  * ⚠️ 首轮可能有 500-1500 个新词挤进**同一个** prompt(§9F.4 那张成本表估的
  * "10-30 次"是按分批算的,不是规范条款)。**这个规模问题挂着未决**:要不要切批是
@@ -23,7 +23,8 @@ import type { Logger } from '../logger/index.js';
 import { parseJsonArray } from './parse.js';
 import type { ChatMessage } from '../llm/context.js';
 import {
-  findTag, listTagsWithParent, mergeTags, normalizeTagName, setTagParent, deleteTag, type TagNode,
+  findTag, listTagsWithParent, listUncheckedTags, markTagChecked, mergeTags, normalizeTagName,
+  setTagParent, deleteTag, type TagNode,
 } from '../db/repo/tags.js';
 
 export const CHECK_SYSTEM = `你是标签词库的质检员。用户给你一棵标签树和一批词,判断每个词该怎么办,并给出一句理由。
@@ -96,7 +97,6 @@ function renderTree(nodes: readonly TagNode[], depth = 0): string {
 export async function runTagCheck(opts: {
   config: ModelConfig;
   tree: readonly TagNode[];
-  newNames: readonly string[];
   db: Database.Database;
   /** 只为「一个词都没判回来」那条告警 —— 可选:测试和纯调用的地方不必造一个 */
   log?: Logger;
@@ -106,7 +106,7 @@ export async function runTagCheck(opts: {
    * 判了却没动手的那些(§9D.7)—— 路由拿它发 `note` 帧。
    *
    * 这正是用户最想看见、而此前**一个字都看不到**的一类:模型判了「AI」该 drop,
-   * 而它不在本轮新词里(闸门)、或者规范名查不到(别名)—— 两种都是**静默跳过**。
+   * 而规范名查不到(别名)、或者 merge/move 的目标不存在 —— 都是**静默跳过**。
    * 界面上"质检判了个词然后什么都没发生"和"质检根本没跑"长得一模一样。
    */
   onNote?: (level: 'info' | 'warn', text: string) => void;
@@ -119,26 +119,30 @@ export async function runTagCheck(opts: {
    * complete 永不 resolve,`currentRun.running` 被永久钉在 true,后续 run 全 409。
    */
   timeoutMs?: number;
-  /** 手动全库质检:true 时检全库、绕过 fresh 闸门(默认 false = 只检本轮新词) */
-  allTags?: boolean;
+  /** 质检范围:'continue' = 只检未质检的(checked_at IS NULL,含历史欠账+新词);
+   *  'all' = 强制全库重检。默认 'continue'。 */
+  scope?: 'continue' | 'all';
 }): Promise<{ dropped: number; merged: number; moved: number; checked: number }> {
   const { db } = opts;
   // 分批大小:200 词/批。词多时一次全送会淹没模型 → 0 判定(TAGCHECK_EMPTY 根因)
   const TAGCHECK_BATCH = 200;
-  const allNames = opts.allTags
+  const allNames = opts.scope === 'all'
     ? listTagsWithParent(db).map((r) => r.name)   // 全库词名
-    : [...opts.newNames];
+    : listUncheckedTags(db);                       // 未质检的(含欠账+新词)
+  // **送检名单就是 continue 的边界** —— prompt 里摆着整棵树,模型可能捎带对已盖章的
+  // 老词回 verdict;applyVerdict 会照单执行,包括不可逆的 drop。continue 承诺的是
+  // "只检未质检的",这个承诺要靠这道闸兑现( scope='all' 候选集=全库,不加限制)
+  const allowed = opts.scope === 'all' ? null : new Set(allNames.map(normalizeTagName));
 
   const known = new Set<string>();
   const collect = (nodes: readonly TagNode[]) => {
     for (const n of nodes) { known.add(n.name); collect(n.children); }
   };
   collect(opts.tree);
-  const fresh = opts.allTags ? null : new Set(allNames.map(normalizeTagName));
 
   // 闸门:没词可判就一次 LLM 都不调。checked=0 让调用方分得清「没得检」和「检完没事」
   if (allNames.length === 0) {
-    opts.onNote?.('info', opts.allTags ? '词库是空的 —— 没有词可判' : '本轮没有新词可判 —— 质检无事发生');
+    opts.onNote?.('info', opts.scope === 'all' ? '词库是空的 —— 没有词可判' : '没有待质检的词 —— 账已清');
     return { dropped: 0, merged: 0, moved: 0, checked: 0 };
   }
 
@@ -149,14 +153,12 @@ export async function runTagCheck(opts: {
   let dropped = 0, merged = 0, moved = 0;
   /** 一条判定落到库上(闸门/动作/计数/onVerdict 全在这)—— 每批 coerce 完**当场执行** */
   const applyVerdict = (v: TagVerdict) => {
-    // **老词一律不碰** —— 但 allTags=true(手动全库质检)时放开(fresh 为 null)。
-    // 比较走归一化,树里存的是显示名("NBA"),模型可能吐 "nba"
-    if (fresh && !fresh.has(normalizeTagName(v.name))) {
-      // 跳过也得出声(§9D.7)—— 一句"判了但没动它"比一个字都没有诚实
-      opts.onNote?.('warn', `质检判了「${v.name}」,但它不是本轮的新词 —— 按规矩没动它`);
+    // **候选集闸门**(continue):verdict 的词不在送检名单里 → 按规矩没动它。
+    // 树整体进了 prompt,模型捎带判到已盖章老词是不可逆 drop 的入口 —— 这道闸挡住它
+    if (allowed && !allowed.has(normalizeTagName(v.name))) {
+      opts.onNote?.('warn', `质检判了「${v.name}」,但它不在本次送检名单里 —— 按规矩没动它`);
       return;
     }
-
     if (v.action === 'drop') {
       // **drop 只认规范名**(`tags.norm`),不查别名表。
       //
@@ -205,6 +207,7 @@ export async function runTagCheck(opts: {
       const parentId = findTag(db, normalizeTagName(v.target));
       // 闸在 setTagParent 里(唯一收口):false = 这次挂父不合法 → 留原位
       if (parentId !== null && setTagParent(db, id, parentId)) {
+        markTagChecked(db, id);
         moved++;
         opts.onVerdict?.(v);
       } else {
@@ -214,6 +217,8 @@ export async function runTagCheck(opts: {
     }
     // 落到这里的是 **keep**(没有目标的 merge/move 在 coerceVerdicts 里已经退回 keep 了)。
     // keep 也是它做的决定 —— 用户问的正是"每个词判成了什么",只报动手的那些是半份日志
+    // (走到了这里说明 id 非空 —— merge/move 的 id===null 分支已提前 return)
+    markTagChecked(db, id);
     opts.onVerdict?.(v);
   };
 

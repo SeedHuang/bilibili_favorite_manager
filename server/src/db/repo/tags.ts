@@ -169,6 +169,30 @@ export function tagScale(
   return { totalTags, activeTags };
 }
 
+/**
+ * 质检台账:判过即盖章(NULL = 从没被质检判定过)。
+ *
+ * 「继续质检」的账本 —— 新词建出即待检,判定过(含 keep)不再重复检;自动质检
+ * 失败漏掉的词仍是 NULL,下次继续质检接得住(内存变量 lastRunNewWords 会丢会覆盖,
+ * 这个账本在库里,重启不丢、漏检不吞)。
+ */
+export function markTagChecked(db: Database.Database, id: number): void {
+  db.prepare(`UPDATE tags SET checked_at = ? WHERE id = ?`).run(Date.now(), id);
+}
+
+/** 待检词数(checked_at IS NULL)—— 只数不取名,给健康度行用 */
+export function countUncheckedTags(db: Database.Database): number {
+  return (db.prepare(`SELECT COUNT(*) n FROM tags WHERE checked_at IS NULL`).get() as {
+    n: number;
+  }).n;
+}
+
+/** 待检词名(checked_at IS NULL)—— 「继续质检」的待检来源 */
+export function listUncheckedTags(db: Database.Database): string[] {
+  return (db.prepare(`SELECT name FROM tags WHERE checked_at IS NULL`).all() as
+    { name: string }[]).map((r) => r.name);
+}
+
 /** 整棵树。count 用 tagCounts,不递归求和 */
 export function listTagTree(db: Database.Database): TagNode[] {
   const rows = db

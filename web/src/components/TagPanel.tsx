@@ -359,7 +359,7 @@ export default function TagPanel() {
 
   /** 手动质检:弹窗单选范围。「全部审查」会删模型判定为泛词的词,不可逆,默认不选 */
   const confirmTagCheck = () => {
-    let scope: 'all' | 'new' = 'new';
+    let scope: 'continue' | 'all' = 'continue';
     modal.confirm({
       title: '词库质检',
       content: (
@@ -368,17 +368,17 @@ export default function TagPanel() {
             跑一遍质检,模型会逐个判定词的去向 —— 泛词该删、重复词该并、归错层的该挪。
           </div>
           {/* 非受控(照 confirmClearTags 的 Input):content 只在调用时求值一次,
-              value 绑定会把 'new' 冻结进不可变 element,inst.update 也换不走 ——
+              value 绑定会把 'continue' 冻结进不可变 element,inst.update 也换不走 ——
               onChange 只更新闭包 scope 供 onOk 读。defaultValue 补上默认勾选
               (非受控下缺了它,初始一个都不勾) */}
           <Radio.Group
-            defaultValue="new"
+            defaultValue="continue"
             onChange={(e) => {
               scope = e.target.value;
             }}
           >
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <Radio value="new">只查这次新的 —— 只对这一轮 AI 标注新长出来的词判定,不碰已有词</Radio>
+              <Radio value="continue">继续质检 —— 检所有还没质检过的词(之前漏的 + 这次新长的)</Radio>
               <Radio value="all">
                 全部审查 —— 对词库里所有词判定,包括已有词。模型可能把挂得多的大类词
                 判为"泛词"而删掉。<b style={{ color: 'var(--warn)' }}>删词不可逆</b>,慎选
@@ -781,10 +781,16 @@ export default function TagPanel() {
           </span>
           {busy && <Spin size="small" />}
           {/* 词库健康度(M4h):活跃词是"挂 ≥5 条视频"的词,整理成本由它的平方决定 ——
-              这个数持续涨就是词库在膨胀的早期信号。上次整理耗时大于 5s 说明超时守卫触发过 */}
-          {stats && stats.activeTags > 0 && (
+              这个数持续涨就是词库在膨胀的早期信号。上次整理耗时大于 5s 说明超时守卫触发过。
+              外层条件必须含 unchecked:新词批量长出时 activeTags 可能还是 0,而待检数
+              恰恰在那个时刻最该被看见(只 guard 活跃词部分,别把待检一起藏了) */}
+          {stats && (stats.activeTags > 0 || stats.unchecked > 0) && (
             <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)', marginLeft: 'auto' }}>
-              活跃词 <span className="num">{stats.activeTags.toLocaleString()}</span> / {stats.totalTags.toLocaleString()}
+              {stats.activeTags > 0 && (
+                <>活跃词 <span className="num">{stats.activeTags.toLocaleString()}</span> / {stats.totalTags.toLocaleString()}</>
+              )}
+              {/* 待检 N = 质检台账的欠账数 —— 用户随时看得到「继续质检」还欠多少活 */}
+              {stats.unchecked > 0 && <> · 待检 <span className="num">{stats.unchecked.toLocaleString()}</span></>}
               {stats.reconcileMs !== null && <> · 上次整理 <span className="num">{stats.reconcileMs.toLocaleString()}</span>ms</>}
             </span>
           )}

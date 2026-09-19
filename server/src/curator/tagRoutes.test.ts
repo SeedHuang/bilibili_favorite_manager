@@ -61,6 +61,7 @@ async function checkAndSettle(app: Awaited<ReturnType<typeof makeApp>>['app']) {
       running: boolean;
       result: { dropped: number; merged: number; moved: number; checked: number } | null;
       error: string | null;
+      logs: { type: string; [k: string]: unknown }[];
     };
     if (p.running) throw new Error('still running');
     return p;
@@ -69,6 +70,7 @@ async function checkAndSettle(app: Awaited<ReturnType<typeof makeApp>>['app']) {
     running: boolean;
     result: { dropped: number; merged: number; moved: number; checked: number } | null;
     error: string | null;
+    logs: { type: string; [k: string]: unknown }[];
   };
 }
 
@@ -473,50 +475,60 @@ describe('标注路由', () => {
     await app.close();
   });
 
-  // 手动质检端点:scope='new' 只检新词;scope='all' 检全库。
-  // 端点是**启动即返回 + 后台跑**,结果从 check-progress 轮询拿
-  it('tagcheck:scope=new 走 fresh 闸门,scope=all 绕开', async () => {
+  // 手动质检端点:端点是**启动即返回 + 后台跑**,结果从 check-progress 轮询拿。
+  // 台账语义:continue 只检未盖章的(checked_at IS NULL),判定过(含 keep)就清账。
+  it('tagcheck:continue 检未质检的词(检完清账),scope=all 检全库', async () => {
     const { app, db } = makeApp();
     ensureTag(db, '美食', null);
     ensureTag(db, '露营', null);
-    // 两种 scope 模型都判 drop 美食
-    mocks.complete.mockResolvedValue(JSON.stringify([{ name: '美食', action: 'drop' }]));
+    // 模型判 美食 drop、露营 keep —— keep 也是判定,同样盖章(两词都清账)
+    mocks.complete.mockResolvedValue(JSON.stringify([
+      { name: '美食', action: 'drop' },
+      { name: '露营', action: 'keep' },
+    ]));
 
-    // scope=new:美食不是本轮新词(lastRunNewWords 里没有它 —— 模块级变量可能带着
-    // 其他测试残留的词,所以只断言"美食不被删",不钉 checked 的具体数)
-    const r1 = await app.inject({ method: 'POST', url: '/api/tags/tagcheck', payload: { scope: 'new' } });
+    // continue:两个词都未盖章,都被送检,美食被删
+    const r1 = await app.inject({ method: 'POST', url: '/api/tags/tagcheck', payload: { scope: 'continue' } });
     expect(r1.statusCode).toBe(200);
     const p1 = await checkAndSettle(app);
-    expect(p1.result).toMatchObject({ dropped: 0 });
-    expect(db.prepare(`SELECT id FROM tags WHERE name='美食'`).get()).toBeTruthy();
+    expect(p1.result).toMatchObject({ dropped: 1, checked: 2 });
+    expect(db.prepare(`SELECT id FROM tags WHERE name='美食'`).get()).toBeUndefined();
 
-    // scope=all:检全库 → 美食被删
+    // scope=all:强制全库重检。美食已删,全库里只剩露营 —— checked:1
     mocks.complete.mockClear();
     const r2 = await app.inject({ method: 'POST', url: '/api/tags/tagcheck', payload: { scope: 'all' } });
     expect(r2.statusCode).toBe(200);
     const p2 = await checkAndSettle(app);
-    expect(p2.result).toMatchObject({ dropped: 1, checked: 2 }); // 全库=美食+露营
-    expect(db.prepare(`SELECT id FROM tags WHERE name='美食'`).get()).toBeUndefined();
+    expect(p2.result).toMatchObject({ dropped: 0, checked: 1 });
+    expect(db.prepare(`SELECT id FROM tags WHERE name='露营'`).get()).toBeTruthy();
     // 记了 TAGCHECK_MANUAL
     expect(db.prepare(`SELECT code FROM events WHERE code='TAGCHECK_MANUAL'`).get()).toBeTruthy();
+
+    // 台账核心:该盖的章都盖了 → 再跑 continue 无账可查,checked:0 且出声说清
+    mocks.complete.mockClear();
+    const r3 = await app.inject({ method: 'POST', url: '/api/tags/tagcheck', payload: { scope: 'continue' } });
+    expect(r3.statusCode).toBe(200);
+    const p3 = await checkAndSettle(app);
+    expect(p3.result).toMatchObject({ checked: 0 });
+    const notes = p3.logs.filter((l) => l.type === 'note');
+    expect(notes.some((n) => String(n.text).includes('没有待质检的词'))).toBe(true);
     await app.close();
   });
 
-  // ★ scope='new' 查的是**上一轮标注长出的新词**(lastRunNewWords)—— 上面那条用例只建老词、
-  //   从没跑过标注,lastRunNewWords=[] 一路空跑,没钉住这条接线。这里先跑一轮标注让
-  //   lastRunNewWords 有值,再 scope='new',模型判 drop 就该真的删掉那个词。
-  it('tagcheck:scope=new 检上一轮标注的新词(不是空跑)', async () => {
+  // ★ 台账的核心诉求:标注长出的新词(自动质检那轮没判回来 = 欠账,未盖章)
+  //   下次「继续质检」必须接得住 —— 不靠内存变量(重启即丢、下轮新词会覆盖欠账)
+  it('tagcheck:continue 接住历史欠账 —— 标注长出的未盖章词下次能查到', async () => {
     const { app, db } = makeApp();
     upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
-    // 第一轮标注:模型标出「教学」→ 新建这个词 → lastRunNewWords=['教学']
-    // (run 里标注后还有自动质检一次调用,同样回这份结果 —— 对「教学」是无操作,不影响断言)
+    // 第一轮标注:模型标出「教学」→ 新建这个词(未盖章 → continue 的待检)
+    // (run 里标注后还有自动质检一次调用,同样回这份结果 —— 对「教学」是无操作,欠账成立)
     mocks.complete.mockResolvedValue(JSON.stringify([{ id: 'BV1', tags: ['教学'], kind: '教学' }]));
     await runAndSettle(app);
 
-    // 手动质检 scope=new,模型判「教学」drop → 应真的删掉(它是上一轮新词,过 fresh 闸门)
+    // 手动质检 scope=continue,模型判「教学」drop → 应真的删掉(它未盖章,在待检名单里)
     mocks.complete.mockClear();
     mocks.complete.mockResolvedValue(JSON.stringify([{ name: '教学', action: 'drop' }]));
-    const r = await app.inject({ method: 'POST', url: '/api/tags/tagcheck', payload: { scope: 'new' } });
+    const r = await app.inject({ method: 'POST', url: '/api/tags/tagcheck', payload: { scope: 'continue' } });
     expect(r.statusCode).toBe(200);
     const p = await checkAndSettle(app);
     expect(p.result).toMatchObject({ dropped: 1, checked: 1 });
@@ -524,12 +536,12 @@ describe('标注路由', () => {
     await app.close();
   });
 
-  it('tagcheck:scope 没传或传非法值 → 400(不许静默落 new)', async () => {
+  it('tagcheck:scope 没传或传非法值 → 400(不许静默落 continue)', async () => {
     const { app, db } = makeApp();
     // 没传 scope
     const r1 = await app.inject({ method: 'POST', url: '/api/tags/tagcheck', payload: {} });
     expect(r1.statusCode).toBe(400);
-    expect(r1.json().reason).toContain('scope 只能是 all 或 new');
+    expect(r1.json().reason).toContain('scope 只能是 continue 或 all');
     // 非法值
     const r2 = await app.inject({ method: 'POST', url: '/api/tags/tagcheck', payload: { scope: 'bogus' } });
     expect(r2.statusCode).toBe(400);

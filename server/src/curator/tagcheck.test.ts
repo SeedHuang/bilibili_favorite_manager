@@ -1,9 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { openDb } from '../db/index.js';
-import { upsertItem } from '../db/repo/items.js';
 import { Logger } from '../logger/index.js';
 import {
-  addAlias, ensureTag, itemTagIds, linkItemTag, listTagTree, normalizeTagName, findTag,
+  addAlias, ensureTag, listTagTree, listUncheckedTags, markTagChecked, normalizeTagName, findTag,
 } from '../db/repo/tags.js';
 
 const mocks = vi.hoisted(() => ({ complete: vi.fn() }));
@@ -47,6 +46,18 @@ describe('coerceVerdicts', () => {
   });
 });
 
+// ── 质检台账(checked_at)─────────────────────────────
+describe('质检台账', () => {
+  it('新词建出即待检(checked_at NULL);盖章后不再待检', async () => {
+    const db = openDb(':memory:');
+    const a = ensureTag(db, '甲', null);
+    ensureTag(db, '乙', null);
+    expect(listUncheckedTags(db)).toEqual(expect.arrayContaining(['甲', '乙']));
+    markTagChecked(db, a);
+    expect(listUncheckedTags(db)).toEqual(['乙']);
+  });
+});
+
 describe('runTagCheck', () => {
   it('drop 的词从词库里删掉 —— 子节点提一级,不铲整棵', async () => {
     const db = openDb(':memory:');
@@ -58,9 +69,11 @@ describe('runTagCheck', () => {
         { name: '美食', action: 'keep' },
       ]),
     );
-    const r = await runTagCheck({ config, tree: listTagTree(db), newNames: ['AI'], db });
+    const r = await runTagCheck({ config, tree: listTagTree(db), db });
     expect(r.dropped).toBe(1);
     expect(listTagTree(db).map((n) => n.name)).toEqual(['美食']);
+    // 判过即盖章:活下来的美食不再待检
+    expect(listUncheckedTags(db)).toEqual([]);
   });
 
   it('merge 走的词把名字留给目标(别名表记住)', async () => {
@@ -70,7 +83,7 @@ describe('runTagCheck', () => {
     mocks.complete.mockResolvedValue(
       JSON.stringify([{ name: '鲁夫', action: 'merge', target: '路飞' }]),
     );
-    await runTagCheck({ config, tree: listTagTree(db), newNames: ['鲁夫'], db });
+    await runTagCheck({ config, tree: listTagTree(db), db });
     expect(findTag(db, normalizeTagName('鲁夫'))).toBe(keep);
     expect(db.prepare(`SELECT id FROM tags WHERE id = ?`).get(drop)).toBeUndefined();
   });
@@ -89,10 +102,9 @@ describe('runTagCheck', () => {
         { name: '露营', action: 'move', target: '户外' },
       ]),
     );
-    const r = await runTagCheck({
-      config, tree: listTagTree(db), newNames: ['AI', '鲁夫', '露营'], db,
-    });
-    expect(r).toEqual({ dropped: 1, merged: 1, moved: 1, checked: 3 });
+    const r = await runTagCheck({ config, tree: listTagTree(db), db });
+    // checked = 送出去的总数:continue 送**全部未质检的**(5 个),判定只回了 3 个
+    expect(r).toEqual({ dropped: 1, merged: 1, moved: 1, checked: 5 });
     // 计数器动了 **而且库里真的换了父** —— 只动计数器、不落库的话这条会挂
     const camp = findTag(db, normalizeTagName('露营'));
     expect(db.prepare(`SELECT parent_id FROM tags WHERE id = ?`).get(camp)).toEqual({
@@ -107,7 +119,7 @@ describe('runTagCheck', () => {
     const keep = ensureTag(db, '路飞', null);
     addAlias(db, '鲁夫', keep); // 鲁夫 = 路飞 的旧写法,只在别名表里
     mocks.complete.mockResolvedValue(JSON.stringify([{ name: '鲁夫', action: 'drop' }]));
-    const r = await runTagCheck({ config, tree: listTagTree(db), newNames: ['鲁夫'], db });
+    const r = await runTagCheck({ config, tree: listTagTree(db), db });
     expect(r.dropped).toBe(0);
     expect(findTag(db, normalizeTagName('路飞'))).toBe(keep);
   });
@@ -116,53 +128,54 @@ describe('runTagCheck', () => {
     const db = openDb(':memory:');
     ensureTag(db, '露营', null);
     mocks.complete.mockResolvedValue(JSON.stringify([]));
-    const r = await runTagCheck({ config, tree: listTagTree(db), newNames: ['露营'], db });
+    const r = await runTagCheck({ config, tree: listTagTree(db), db });
     expect(r.dropped).toBe(0);
     expect(listTagTree(db)).toHaveLength(1);
   });
 
-  it('newNames 为空 → 一次 LLM 都不调(闸门在函数里)', async () => {
+  it('所有词都盖了章(没有待检)→ 一次 LLM 都不调(闸门在函数里)', async () => {
     const db = openDb(':memory:');
-    ensureTag(db, '美食', null);
-    await runTagCheck({ config, tree: listTagTree(db), newNames: [], db });
+    const food = ensureTag(db, '美食', null);
+    markTagChecked(db, food);
+    await runTagCheck({ config, tree: listTagTree(db), db });
     expect(mocks.complete).not.toHaveBeenCalled();
   });
 
   // §9D.7:check 的 phase 帧先于本函数发出,「质检」块头已经挂上了 —— 闸门早退若不出声,
-  // 用户看到的就是一个"跑了吗?判了啥?"的裸块头。**info 不是 warn**:无新词本来就该无事发生
-  it('newNames 为空 → 发一条 info 的 note(块头不能裸着)', async () => {
+  // 用户看到的就是一个"跑了吗?判了啥?"的裸块头。**info 不是 warn**:无待检词本来就该无事发生
+  it('没有待检词 → 发一条 info 的 note(块头不能裸着)', async () => {
     const db = openDb(':memory:');
-    ensureTag(db, '美食', null);
+    const food = ensureTag(db, '美食', null);
+    markTagChecked(db, food);
     const notes: { level: 'info' | 'warn'; text: string }[] = [];
-    await runTagCheck({ config, tree: listTagTree(db), newNames: [], db, onNote: (level, text) => notes.push({ level, text }) });
-    expect(notes).toEqual([{ level: 'info', text: '本轮没有新词可判 —— 质检无事发生' }]);
+    await runTagCheck({ config, tree: listTagTree(db), db, onNote: (level, text) => notes.push({ level, text }) });
+    expect(notes).toEqual([{ level: 'info', text: '没有待质检的词 —— 账已清' }]);
   });
 
-  it('**只动本轮新词** —— 判到树里的老词也一个字不动', async () => {
+  // fresh 闸门退役后的接替者:**已质检的词不重复检** —— 「continue 范围本身有界」靠
+  // checked_at 账本实现,不再靠事后拦截
+  it('已质检的词不重复检(scope=continue 只送未盖章的)', async () => {
     const db = openDb(':memory:');
-    // 美食 = 上一轮建的**老词**(有视频挂着);露营 = 本轮的新词
+    // 美食 = 上一轮检过的(已盖章);露营 = 待检
     const food = ensureTag(db, '美食', null);
     ensureTag(db, '露营', null);
-    upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
-    linkItemTag(db, 'BV1', food, 'ai');
+    markTagChecked(db, food);
 
     // prompt 里摆着**整棵树**,而 CHECK_SYSTEM 自己的例子就是「AI」「视频」「教程」
-    // —— 点着老词说 drop/merge 是这条链路里最容易发生的事。而 drop 删节点、merge
-    // 并节点:两个都不可逆,两个都不经用户确认。所以闸门只能是"这个名字在不在
-    // **本轮新词**里"(spec C8 ①②③ 说的都是"新词"),不是"在不在树里"。
+    // —— 点着盖章老词说 drop/merge 的话,模型连被问都没被问过它。但 mock 只回露营
+    // 的判定:美食根本不在送检名单里(下面断言 prompt),判定落库也无从谈起
     mocks.complete.mockResolvedValue(
-      JSON.stringify([
-        { name: '美食', action: 'drop' },
-        { name: '美食', action: 'merge', target: '露营' },
-        { name: '露营', action: 'keep' },
-      ]),
+      JSON.stringify([{ name: '露营', action: 'keep' }]),
     );
-    const r = await runTagCheck({ config, tree: listTagTree(db), newNames: ['露营'], db });
+    const r = await runTagCheck({ config, tree: listTagTree(db), db });
 
     expect(r).toEqual({ dropped: 0, merged: 0, moved: 0, checked: 1 });
-    // 节点还在 —— 而且它挂的视频还在(merge 会把 item_tags 一起搬走)
-    expect(db.prepare(`SELECT id FROM tags WHERE id = ?`).get(food)).toEqual({ id: food });
-    expect(itemTagIds(db, ['BV1']).get('BV1')).toEqual([food]);
+    // 美食没被送检:**待判定的词**那一段只有露营 —— 盖章的词不在送检名单里
+    // (prompt 的树形部分当然还有美食 —— 那是给模型的参照,不是送检名单)
+    const prompt = mocks.complete.mock.calls[0]![0].messages[1]!.content as string;
+    const batchSection = prompt.split('## 待判定的词')[1] ?? '';
+    expect(batchSection).toContain('露营');
+    expect(batchSection).not.toContain('美食');
   });
 
   it('一个词都没判回来 → 出声(不能长得像"什么都没变")', async () => {
@@ -171,13 +184,12 @@ describe('runTagCheck', () => {
     // 被截断的数组 —— 真实成因是输出撞上服务商默认上限(`provider.ts` 没设 maxOutputTokens)
     mocks.complete.mockResolvedValue('[{"name":"露营","action":"ke');
     const log = new Logger(db, { silent: true });
-    await runTagCheck({ config, tree: listTagTree(db), newNames: ['露营'], db, log });
+    await runTagCheck({ config, tree: listTagTree(db), db, log });
     const rows = db.prepare(`SELECT message FROM events WHERE code = 'TAGCHECK_EMPTY'`).all() as
       { message: string }[];
     // 单批 0 判定告警(判定改当场执行后,批循环内的空批告警是唯一一处 —— 总闸门已并进去)
     expect(rows).toHaveLength(1);
-    // 说清"几个词送出去了" —— 光说"什么都没判"没有可行动的信息。
-    // 词数来自 allNames(它已含 newNames 或全库词),所以 scope='all' 空 newNames 时也报得对
+    // 说清"几个词送出去了" —— 光说"什么都没判"没有可行动的信息
     expect(rows[0]!.message).toContain('1 个词送出去');
   });
 
@@ -186,7 +198,7 @@ describe('runTagCheck', () => {
     ensureTag(db, '露营', null);
     mocks.complete.mockResolvedValue(JSON.stringify([]));
     await expect(
-      runTagCheck({ config, tree: listTagTree(db), newNames: ['露营'], db }),
+      runTagCheck({ config, tree: listTagTree(db), db }),
     ).resolves.toEqual({ dropped: 0, merged: 0, moved: 0, checked: 1 });
   });
 
@@ -209,31 +221,21 @@ describe('runTagCheck', () => {
       ]))
       .mockResolvedValueOnce(JSON.stringify(names.slice(400).map((n) => ({ name: n, action: 'keep' }))));
 
-    const r = await runTagCheck({ config, tree: listTagTree(db), newNames: names, db });
+    const r = await runTagCheck({ config, tree: listTagTree(db), db });
     expect(mocks.complete).toHaveBeenCalledTimes(3); // 3 批,不是 1 次塞 450
     expect(r.dropped).toBe(1);
     // 词300 被删
     expect(findTag(db, normalizeTagName('词300'))).toBeNull();
   });
 
-  // allTags=true:检全库,绕过 fresh 闸门 —— 老词也能被 drop
-  it('allTags=true 时老词也能被处理(绕过 fresh 闸门)', async () => {
+  // scope=all:强制全库重检 —— 老词(已盖章的)也能被 drop
+  it('scope=all 时老词也能被处理(全库重检)', async () => {
     const db = openDb(':memory:');
-    ensureTag(db, '美食', null); // 老词
+    const food = ensureTag(db, '美食', null);
+    markTagChecked(db, food); // 老词已盖章 —— all 也不看账本,照送
     mocks.complete.mockResolvedValue(JSON.stringify([{ name: '美食', action: 'drop' }]));
-    // 传 allTags: true,newNames 空(全库检,不是本轮新词)
-    const r = await runTagCheck({ config, tree: listTagTree(db), newNames: [], db, allTags: true });
+    const r = await runTagCheck({ config, tree: listTagTree(db), db, scope: 'all' });
     expect(r.dropped).toBe(1);
     expect(listTagTree(db)).toHaveLength(0);
-  });
-
-  // allTags=false(默认):老词 drop 被 fresh 闸门挡住(既有行为)
-  it('allTags 默认 false:老词 drop 仍被 fresh 闸门挡住', async () => {
-    const db = openDb(':memory:');
-    ensureTag(db, '美食', null);
-    mocks.complete.mockResolvedValue(JSON.stringify([{ name: '美食', action: 'drop' }]));
-    const r = await runTagCheck({ config, tree: listTagTree(db), newNames: ['新词'], db }); // 美食不是本轮新词
-    expect(r.dropped).toBe(0);
-    expect(listTagTree(db)).toHaveLength(1);
   });
 });

@@ -1,6 +1,7 @@
 # Spec:词级质检台账(checked_at)—— 「继续质检所有未完成」
 
-> 状态:待实施。本文件由对话确认后写成,供新 session 按此实施。
+> 状态:**已实施(2026-09-19)**。改动在工作区待用户提交(全局规则:AI 不 commit)。
+> 验证:server 785 测试全绿 + 双端 typecheck 干净。手动验收清单见 spec 第三节。
 > 关联代码:`server/src/db/schema.ts`、`server/src/db/repo/tags.ts`、
 > `server/src/curator/tagcheck.ts`、`server/src/curator/tagRoutes.ts`、`web/src/components/TagPanel.tsx`。
 
