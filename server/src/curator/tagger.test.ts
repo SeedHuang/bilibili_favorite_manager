@@ -183,10 +183,10 @@ describe('runTagging', () => {
   //   记 failedBatches,**后续批次照跑**,而不是卡死整轮。
   it('一批超时 → 记失败批次,后续批次继续(不卡死整轮)', async () => {
     const db = openDb(':memory:');
-    // 6 条 → 两批(5 + 1,批上限是 TAG_BATCH_CAP=5)。第一批超时,第二批正常 ——
+    // 17 条 → 两批(16 + 1,批上限 TAG_BATCH_CAP=16)。第一批超时,第二批正常 ——
     // 验证"卡死整轮"被根治
-    for (let i = 0; i < 6; i++) upsertItem(db, { id: `BV${i}`, type: 2, title: `题${i}` });
-    const items = Array.from({ length: 6 }, (_, i) => item(`BV${i}`, `题${i}`));
+    for (let i = 0; i < 17; i++) upsertItem(db, { id: `BV${i}`, type: 2, title: `题${i}` });
+    const items = Array.from({ length: 17 }, (_, i) => item(`BV${i}`, `题${i}`));
     // 第一次调用(第 1 批)抛超时;第 2 批(第 2 次调用)正常回自己的 id
     mocks.complete
       .mockRejectedValueOnce(new Error('模型调用超时(180000ms)'))
@@ -196,10 +196,10 @@ describe('runTagging', () => {
       });
 
     const r = await runTagging({ config, ctx, items, db });
-    // 第 1 批 5 条超时 → 记 1 个失败批次,原因带"超时"
+    // 第 1 批 16 条超时 → 记 1 个失败批次,原因带"超时"
     expect(r.failedBatches).toHaveLength(1);
     expect(r.failedBatches[0]!.reason).toContain('超时');
-    expect(r.failedBatches[0]!.size).toBe(5);
+    expect(r.failedBatches[0]!.size).toBe(16);
     // 第 2 批 1 条照常标上 —— 整轮没被第一批卡死
     expect(r.tagged).toBe(1);
     // 一次超时 + 一次正常 = 2 次。补轮不触发(第 2 批没漏)
