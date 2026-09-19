@@ -303,8 +303,10 @@ export default function TagPanel() {
           </div>
           {/* 非受控(照 confirmClearTags 的 Input):content 只在调用时求值一次,
               value 绑定会把 'new' 冻结进不可变 element,inst.update 也换不走 ——
-              onChange 只更新闭包 scope 供 onOk 读 */}
+              onChange 只更新闭包 scope 供 onOk 读。defaultValue 补上默认勾选
+              (非受控下缺了它,初始一个都不勾) */}
           <Radio.Group
+            defaultValue="new"
             onChange={(e) => {
               scope = e.target.value;
             }}
