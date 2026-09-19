@@ -187,4 +187,51 @@ describe('runTagCheck', () => {
       runTagCheck({ config, tree: listTagTree(db), newNames: ['露营'], db }),
     ).resolves.toEqual({ dropped: 0, merged: 0, moved: 0 });
   });
+
+  // 分批:>200 个词不一次全送 —— 每次调用只送 ≤200 个
+  it('超过 200 个词分批调模型,verdicts 累积', async () => {
+    const db = openDb(':memory:');
+    // 造 450 个词(3 批:200 + 200 + 50)
+    const names: string[] = [];
+    for (let i = 0; i < 450; i++) {
+      const n = `词${i}`;
+      names.push(n);
+      ensureTag(db, n, null);
+    }
+    // 每次调用回一批:第一批全 keep,第二批一个 drop,第三批 keep
+    mocks.complete
+      .mockResolvedValueOnce(JSON.stringify(names.slice(0, 200).map((n) => ({ name: n, action: 'keep' }))))
+      .mockResolvedValueOnce(JSON.stringify([
+        ...names.slice(200, 400).map((n) => ({ name: n, action: 'keep' })),
+        { name: '词300', action: 'drop' },
+      ]))
+      .mockResolvedValueOnce(JSON.stringify(names.slice(400).map((n) => ({ name: n, action: 'keep' }))));
+
+    const r = await runTagCheck({ config, tree: listTagTree(db), newNames: names, db });
+    expect(mocks.complete).toHaveBeenCalledTimes(3); // 3 批,不是 1 次塞 450
+    expect(r.dropped).toBe(1);
+    // 词300 被删
+    expect(findTag(db, normalizeTagName('词300'))).toBeNull();
+  });
+
+  // allTags=true:检全库,绕过 fresh 闸门 —— 老词也能被 drop
+  it('allTags=true 时老词也能被处理(绕过 fresh 闸门)', async () => {
+    const db = openDb(':memory:');
+    ensureTag(db, '美食', null); // 老词
+    mocks.complete.mockResolvedValue(JSON.stringify([{ name: '美食', action: 'drop' }]));
+    // 传 allTags: true,newNames 空(全库检,不是本轮新词)
+    const r = await runTagCheck({ config, tree: listTagTree(db), newNames: [], db, allTags: true });
+    expect(r.dropped).toBe(1);
+    expect(listTagTree(db)).toHaveLength(0);
+  });
+
+  // allTags=false(默认):老词 drop 被 fresh 闸门挡住(既有行为)
+  it('allTags 默认 false:老词 drop 仍被 fresh 闸门挡住', async () => {
+    const db = openDb(':memory:');
+    ensureTag(db, '美食', null);
+    mocks.complete.mockResolvedValue(JSON.stringify([{ name: '美食', action: 'drop' }]));
+    const r = await runTagCheck({ config, tree: listTagTree(db), newNames: ['新词'], db }); // 美食不是本轮新词
+    expect(r.dropped).toBe(0);
+    expect(listTagTree(db)).toHaveLength(1);
+  });
 });

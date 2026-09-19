@@ -23,16 +23,22 @@ import type { Logger } from '../logger/index.js';
 import { parseJsonArray } from './parse.js';
 import type { ChatMessage } from '../llm/context.js';
 import {
-  findTag, mergeTags, normalizeTagName, setTagParent, deleteTag, type TagNode,
+  findTag, listTagsWithParent, mergeTags, normalizeTagName, setTagParent, deleteTag, type TagNode,
 } from '../db/repo/tags.js';
 
-export const CHECK_SYSTEM = `你是标签词库的质检员。用户给你一棵标签树和一批**新出现的词**,判断每个词该怎么办。
+export const CHECK_SYSTEM = `你是标签词库的质检员。用户给你一棵标签树和一批词,判断每个词该怎么办。
 
-- **drop**:这个词太泛,没有区分力,不该存在于词库里。典型:"AI""视频""教程""分享""合集"。
-  判断标准是:它能不能把一类内容和其他内容**分开**?分不开就是 drop。
-- **merge**:它其实是已有某个词的另一种写法(译名差异、简写、同义词)。填 target 为已有的那个词。
-- **move**:它该挂在另一个已有词下面。填 target 为父节点。
-- **keep**:没问题,它是个有区分力的具体词。
+- **drop**(太泛,删掉):这个词不能把一类内容和其它内容**分开**。
+  该删的例:"AI""视频""教程""分享""合集""超清" —— 几乎每条都挂,没有区分力。
+  不该删的例:"露营"(只挂户外内容)、"烤羊肉"(只挂美食内容) —— 能分开一类,留着。
+- **merge**(同义,并入已有词):它是已有词的另一种写法(译名/简写/同义词)。
+  该并的例:"鲁夫"→"路飞","漫威"→"Marvel"。
+  不该并的例:"露营"和"烤羊肉" —— 意思不同,并了反而丢信息。
+- **move**(归错层,挪位):它该挂在另一个已有词下面。
+  该挪的例:"篮球"该挂到"体育"下。
+  不该挪的例:"露营"挂在根上 —— 它是独立大类,不归任何词管。
+- **keep**(留):没问题。
+  该留的例:"露营""烤羊肉""NBA"。
 
 **拿不准就 keep** —— 漏掉一个泛词只是让树脏一点,误删一个好词是丢掉信息。
 只输出 JSON 数组:[{"name":"AI","action":"drop"},{"name":"鲁夫","action":"merge","target":"路飞"}]`;
@@ -107,56 +113,54 @@ export async function runTagCheck(opts: {
    * complete 永不 resolve,`currentRun.running` 被永久钉在 true,后续 run 全 409。
    */
   timeoutMs?: number;
+  /** 手动全库质检:true 时检全库、绕过 fresh 闸门(默认 false = 只检本轮新词) */
+  allTags?: boolean;
 }): Promise<{ dropped: number; merged: number; moved: number }> {
   const { db } = opts;
-  // 闸门:**没有新词就一次 LLM 都不调** —— 所以放在每轮末尾是免费的
-  if (opts.newNames.length === 0) {
-    // 早退也得出声(§9D.7)—— **info 不是 warn**:这一轮没长出任何新词,本来就该
-    // 无事发生,这不是岔子。但 check 的 phase 帧已经发出去了(路由先发 phase 再调本函数),
-    // 一个「质检」块头底下挂零行,不解释就是"它跑了吗?判了啥?" —— 一句"没有可判的"补上
-    opts.onNote?.('info', '本轮没有新词可判 —— 质检无事发生');
-    return { dropped: 0, merged: 0, moved: 0 };
-  }
+  // 分批大小:200 词/批。词多时一次全送会淹没模型 → 0 判定(TAGCHECK_EMPTY 根因)
+  const TAGCHECK_BATCH = 200;
+  const allNames = opts.allTags
+    ? listTagsWithParent(db).map((r) => r.name)   // 全库词名
+    : [...opts.newNames];
 
+  const verdicts: TagVerdict[] = [];
   const known = new Set<string>();
   const collect = (nodes: readonly TagNode[]) => {
     for (const n of nodes) { known.add(n.name); collect(n.children); }
   };
   collect(opts.tree);
+  const fresh = opts.allTags ? null : new Set(allNames.map(normalizeTagName));
 
-  // 闸门:**只有本轮的新词归它管**(spec C8 ①②③ 说的都是"定每个**新词**在树里的位置")。
-  //
-  // 少这一句的话它的权力是**整个词库**:`coerceVerdicts` 只校验 target 是不是已知名,
-  // 对 `name` 毫无限制,于是一句"drop 美食"就能删掉一个用了三个月的词 —— 而 drop 和
-  // merge 是本文件里**唯一两个不可逆**的动作,做完不通知也不确认。
-  // 这不是假想的路径:`renderTree` 把整棵树摆在模型眼前,而 `CHECK_SYSTEM` 自己的
-  // drop 例子就是「AI」「视频」「教程」「分享」「合集」—— 正是 §9F.0 说会从第一轮的
-  // `domains` 里漏进来的那批词。模型照着例子点名老词,闸门是开着的。
-  const fresh = new Set(opts.newNames.map(normalizeTagName));
+  // 闸门:没词可判就一次 LLM 都不调
+  if (allNames.length === 0) {
+    opts.onNote?.('info', '本轮没有新词可判 —— 质检无事发生');
+    return { dropped: 0, merged: 0, moved: 0 };
+  }
 
-  const messages: ChatMessage[] = [
-    { role: 'system', content: CHECK_SYSTEM },
-    {
-      role: 'user',
-      content:
-        `## 现有标签树\n${renderTree(opts.tree) || '(空)'}\n\n` +
-        `## 本轮新出现的词(${opts.newNames.length} 个)\n${opts.newNames.join('、')}\n\n` +
-        `请逐个判定。`,
-    },
-  ];
-
-  const verdicts = coerceVerdicts(
-    // 批量判断:关思考模式(Task 0)。它要的是"照格式吐 JSON",不是"想清楚"
-    await complete({
-      config: opts.config,
-      messages,
-      thinking: false,
-      ...(opts.signal ? { abortSignal: opts.signal } : {}),
-      // 质检也要超时 —— 不然质检模型挂起同样把整轮 running 钉死在 true(tagger 同款)
-      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
-    }),
-    known,
-  );
+  for (let i = 0; i < allNames.length; i += TAGCHECK_BATCH) {
+    const batch = allNames.slice(i, i + TAGCHECK_BATCH);
+    console.log(`[tags/check] 批 ${Math.floor(i / TAGCHECK_BATCH) + 1}/${Math.ceil(allNames.length / TAGCHECK_BATCH)} 送 ${batch.length} 个词`);
+    const messages: ChatMessage[] = [
+      { role: 'system', content: CHECK_SYSTEM },
+      {
+        role: 'user',
+        content:
+          `## 现有标签树\n${renderTree(opts.tree) || '(空)'}\n\n` +
+          `## 待判定的词(${batch.length} 个)\n${batch.join('、')}\n\n` +
+          `请逐个判定。`,
+      },
+    ];
+    verdicts.push(...coerceVerdicts(
+      await complete({
+        config: opts.config,
+        messages,
+        thinking: false,
+        ...(opts.signal ? { abortSignal: opts.signal } : {}),
+        ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+      }),
+      known,
+    ));
+  }
 
   /**
    * **判回来 0 条,不等于"这批词都没问题"。**
@@ -183,8 +187,9 @@ export async function runTagCheck(opts: {
 
   let dropped = 0, merged = 0, moved = 0;
   for (const v of verdicts) {
-    // **老词一律不碰** —— 比较走归一化,树里存的是显示名("NBA"),模型可能吐 "nba"
-    if (!fresh.has(normalizeTagName(v.name))) {
+    // **老词一律不碰** —— 但 allTags=true(手动全库质检)时放开(fresh 为 null)。
+    // 比较走归一化,树里存的是显示名("NBA"),模型可能吐 "nba"
+    if (fresh && !fresh.has(normalizeTagName(v.name))) {
       // 跳过也得出声(§9D.7)—— 一句"判了但没动它"比一个字都没有诚实
       opts.onNote?.('warn', `质检判了「${v.name}」,但它不是本轮的新词 —— 按规矩没动它`);
       continue;
