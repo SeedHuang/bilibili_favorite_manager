@@ -387,6 +387,23 @@ export function deleteTag(db: Database.Database, id: number): void {
 }
 
 /**
+ * 清空整棵词库树 + 条目水位线 —— 「清空标注」按钮的后端(M4h 后测试辅助)。
+ *
+ * 单事务,幂等。连词库一起清:tags / item_tags / tag_aliases(item_tags、tag_aliases
+ * 靠 FK 级联带走)+ items 的 ai_kind / ai_checked_at(回「未标注」)+ 规则里的 tag 条件。
+ *
+ * **顺序不能反**:规则条件必须在删 tags 之前移除(§9F C16)——
+ * 反了的话规则里留一串死 id,静默失效,用户看不出自己的规则已经断了。
+ */
+export function clearTagLibrary(db: Database.Database): void {
+  db.transaction(() => {
+    rewriteRuleTagIds(db, () => null);
+    db.prepare(`DELETE FROM tags`).run();
+    db.prepare(`UPDATE items SET ai_kind = NULL, ai_checked_at = NULL`).run();
+  })();
+}
+
+/**
  * 词库树的封顶(C2/C6):最深 4 层(根算第 1 层)。
  *
  * 为什么封顶:模型和判据都可能越走越深(`体育/篮球/NBA/湖人/詹姆斯`),而一棵

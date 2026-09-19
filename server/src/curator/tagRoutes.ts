@@ -21,7 +21,7 @@ import { listWorkFolders } from '../db/repo/workbench.js';
 import { shapeItem } from '../http/routes/items.js';
 import { runTagging } from './tagger.js';
 import {
-  listTagTree, mergeTags, setTagParent, renameTag, deleteTag, normalizeTagName,
+  listTagTree, mergeTags, setTagParent, renameTag, deleteTag, clearTagLibrary, normalizeTagName,
   subtreeSets, tagScale, type TagNode,
 } from '../db/repo/tags.js';
 import { runTagCheck } from './tagcheck.js';
@@ -125,6 +125,19 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
   app.post('/api/tags/run-abort', async () => {
     // 没有在跑的就当无事发生 —— 幂等,反复点停止不炸
     currentRun.controller?.abort();
+    return { ok: true };
+  });
+
+  /**
+   * 清空标注(M4h 后测试辅助)。**高危、不可撤销** —— 前端必须二次确认(输入「清空」文字)。
+   * 连词库树一起清,所有条目回「未标注」,规则里的 tag 条件一并移除。
+   */
+  app.post('/api/tags/clear-tags', async (req, reply) => {
+    if (currentRun.running) {
+      return reply.code(409).send({ ok: false, reason: '标注跑着不能清空 —— 先等它跑完或停止' });
+    }
+    clearTagLibrary(db);
+    log.event({ level: 'info', category: 'llm', code: 'TAGS_CLEARED', message: '词库树 + 条目标注已清空' });
     return { ok: true };
   });
 

@@ -384,6 +384,76 @@ describe('标注路由', () => {
     expect(notes.some((n) => n.level === 'warn' && String(n.text).includes('没标上'))).toBe(true);
     await app.close();
   });
+
+  // ★ M4h 之后的新测试辅助:一键回到「从没标过」,测「继续标注」性能用。
+  // 清空的是**整棵词库树**(tags + item_tags + tag_aliases)+ items 水位线 + 规则里的 tag 条件。
+  it('clear-tags:清掉词库树、水位线、规则 tag 条件;幂等', async () => {
+    const { app, db } = makeApp();
+    // 造一个词 + 挂载 + 标注过 + 一条规则引用它
+    const tag = ensureTag(db, '美食', null);
+    upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
+    linkItemTag(db, 'BV1', tag, 'ai');
+    markItemTagged(db, 'BV1', '美食');
+    // 规则条件引用这个 tag id —— C16 说删 tag 必须清掉,否则规则静默失效
+    db.prepare(
+      `INSERT INTO work_folders (id, origin_id, name, created_at) VALUES (1, NULL, 'x', 0)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO work_folder_rules (folder_id, conditions_json, origin, updated_at)
+       VALUES (1, ?, 'user', 0)`,
+    ).run(JSON.stringify([{ field: 'tag', any: [String(tag)] }]));
+
+    const res = await app.inject({ method: 'POST', url: '/api/tags/clear-tags' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+
+    // 词库树空了(级联带走了 item_tags / tag_aliases)
+    expect(db.prepare(`SELECT COUNT(*) n FROM tags`).get()).toEqual({ n: 0 });
+    expect(db.prepare(`SELECT COUNT(*) n FROM item_tags`).get()).toEqual({ n: 0 });
+    // 水位线清了 → 回「未标注」
+    expect(db.prepare(`SELECT ai_checked_at FROM items WHERE id='BV1'`).get()).toEqual({ ai_checked_at: null });
+    // 规则里的 tag 条件被移除
+    const rule = db.prepare(`SELECT conditions_json FROM work_folder_rules WHERE folder_id=1`).get() as { conditions_json: string };
+    expect(rule.conditions_json).not.toContain('tag');
+    // 记了 TAGS_CLEARED
+    expect(db.prepare(`SELECT code FROM events WHERE code='TAGS_CLEARED'`).get()).toBeTruthy();
+
+    // 幂等:再清一遍也 ok
+    const res2 = await app.inject({ method: 'POST', url: '/api/tags/clear-tags' });
+    expect(res2.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('clear-tags:标注跑着时拒绝(409)', async () => {
+    const { app, db } = makeApp();
+    // 没有公开端点能直接造"正在跑"的状态,只能靠真实标注跑起来:
+    // 用一个不 resolve 的 mock 让 complete 挂起,currentRun.running 停在 true
+    upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
+    let release!: () => void;
+    // 只让**第一次**(打标)挂起;release 之后 tagcheck 还会再调一次 complete,
+    // 那次得照常 resolve —— 否则 running 永远回不了 false,测试收不了尾
+    let call = 0;
+    mocks.complete.mockImplementation(
+      () => {
+        call += 1;
+        if (call === 1) {
+          return new Promise((res) => { release = () => res(JSON.stringify([{ id: 'BV1', tags: ['x'], kind: 'x' }])); });
+        }
+        return Promise.resolve(JSON.stringify([]));
+      },
+    );
+    const runRes = await app.inject({ method: 'POST', url: '/api/tags/run' });
+    expect(runRes.statusCode).toBe(200);
+    // complete 没 resolve → currentRun.running 仍 true;这时 clear 该 409
+    const clearRes = await app.inject({ method: 'POST', url: '/api/tags/clear-tags' });
+    expect(clearRes.statusCode).toBe(409);
+    release(); // 放行,免得 pending promise 卡住测试
+    await vi.waitFor(async () => {
+      const p = (await app.inject({ method: 'GET', url: '/api/tags/run-progress' })).json() as { running: boolean };
+      if (p.running) throw new Error('still running');
+    });
+    await app.close();
+  });
 });
 
 describe('标签树路由', () => {
