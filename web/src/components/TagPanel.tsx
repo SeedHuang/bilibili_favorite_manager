@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, App as AntApp, Button, Input, Progress, Select, Spin } from 'antd';
-import { Combine, Pencil, Check, Square, Tag, X, Trash2, ScrollText, RefreshCw, Eraser } from 'lucide-react';
+import { Alert, App as AntApp, Button, Input, Progress, Radio, Select, Spin } from 'antd';
+import { Combine, Pencil, Check, Square, Tag, X, Trash2, ScrollText, RefreshCw, Eraser, ScanSearch } from 'lucide-react';
 import { useRequest } from '@umijs/max';
 import { rawResult, tagApi } from '../api';
 import type { TagLogLine, TagNode, TagProgressPayload, TagRunStatus } from '../types';
@@ -291,6 +291,44 @@ export default function TagPanel() {
     });
   };
 
+  /** 手动质检:弹窗单选范围。「全部审查」会删模型判定为泛词的词,不可逆,默认不选 */
+  const confirmTagCheck = () => {
+    let scope: 'all' | 'new' = 'new';
+    const inst = modal.confirm({
+      title: '词库质检',
+      content: (
+        <div style={{ fontSize: 13 }}>
+          <div style={{ color: 'var(--text-dim)', marginBottom: 10 }}>
+            跑一遍质检,模型会逐个判定词的去向 —— 泛词该删、重复词该并、归错层的该挪。
+          </div>
+          <Radio.Group
+            value={scope}
+            onChange={(e) => {
+              scope = e.target.value;
+              inst.update({});
+            }}
+          >
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <Radio value="new">只查这次新的 —— 只对这一轮 AI 标注新长出来的词判定,不碰已有词</Radio>
+              <Radio value="all">
+                全部审查 —— 对词库里所有词判定,包括已有词。模型可能把挂得多的大类词
+                判为"泛词"而删掉。<b style={{ color: 'var(--warn)' }}>删词不可逆</b>,慎选
+              </Radio>
+            </div>
+          </Radio.Group>
+        </div>
+      ),
+      okText: '开始质检',
+      cancelText: '算了',
+      onOk: async () => {
+        await act(async () => {
+          const r = await tagApi.tagcheck(scope);
+          setTagNote(`质检完成:删 ${r.dropped} · 合 ${r.merged} · 挪 ${r.moved}`);
+        });
+      },
+    });
+  };
+
   const toggle = (id: number) =>
     setExpanded((s) => {
       const next = new Set(s);
@@ -522,6 +560,10 @@ export default function TagPanel() {
                     </Button>
                   ),
                 )}
+                {/* 词库质检:手动触发,弹窗选范围(全部 / 只查新的) */}
+                <Button size="small" icon={<ScanSearch size={13} />} onClick={confirmTagCheck}>
+                  词库质检
+                </Button>
                 {/* 清空标注:高危、连词库树一起清,必须输入「清空」二字才可确定 */}
                 <Button size="small" danger icon={<Eraser size={13} />} onClick={confirmClearTags}>
                   清空标注

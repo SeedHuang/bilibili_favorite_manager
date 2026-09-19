@@ -425,4 +425,10 @@ export const tagApi = {
 
   /** 清空标注(M4h 后测试辅助)—— 连词库树一起清,高危,前端要二次确认 */
   clearTags: () => json<{ ok: true }>('POST', '/api/tags/clear-tags'),
+
+  /** 手动质检(M4h 扩展)—— scope: all 全库 / new 只查本轮新词 */
+  tagcheck: (scope: 'all' | 'new') =>
+    json<{ ok: true; scope: 'all' | 'new'; dropped: number; merged: number; moved: number }>(
+      'POST', '/api/tags/tagcheck', { scope },
+    ),
 };
