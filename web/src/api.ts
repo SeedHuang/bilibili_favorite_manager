@@ -426,9 +426,9 @@ export const tagApi = {
   /** 清空标注(M4h 后测试辅助)—— 连词库树一起清,高危,前端要二次确认 */
   clearTags: () => json<{ ok: true }>('POST', '/api/tags/clear-tags'),
 
-  /** 手动质检(M4h 扩展)—— scope: all 全库 / new 只查本轮新词 */
+  /** 手动质检(M4h 扩展)—— scope: all 全库 / new 只查本轮新词;checked=实际送检词数(0=没得检) */
   tagcheck: (scope: 'all' | 'new') =>
-    json<{ ok: true; scope: 'all' | 'new'; dropped: number; merged: number; moved: number }>(
+    json<{ ok: true; scope: 'all' | 'new'; dropped: number; merged: number; moved: number; checked: number }>(
       'POST', '/api/tags/tagcheck', { scope },
     ),
 };

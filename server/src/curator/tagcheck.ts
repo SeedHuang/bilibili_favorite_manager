@@ -115,7 +115,7 @@ export async function runTagCheck(opts: {
   timeoutMs?: number;
   /** 手动全库质检:true 时检全库、绕过 fresh 闸门(默认 false = 只检本轮新词) */
   allTags?: boolean;
-}): Promise<{ dropped: number; merged: number; moved: number }> {
+}): Promise<{ dropped: number; merged: number; moved: number; checked: number }> {
   const { db } = opts;
   // 分批大小:200 词/批。词多时一次全送会淹没模型 → 0 判定(TAGCHECK_EMPTY 根因)
   const TAGCHECK_BATCH = 200;
@@ -131,26 +131,32 @@ export async function runTagCheck(opts: {
   collect(opts.tree);
   const fresh = opts.allTags ? null : new Set(allNames.map(normalizeTagName));
 
-  // 闸门:没词可判就一次 LLM 都不调
+  // 闸门:没词可判就一次 LLM 都不调。checked=0 让调用方分得清「没得检」和「检完没事」
   if (allNames.length === 0) {
     opts.onNote?.('info', opts.allTags ? '词库是空的 —— 没有词可判' : '本轮没有新词可判 —— 质检无事发生');
-    return { dropped: 0, merged: 0, moved: 0 };
+    return { dropped: 0, merged: 0, moved: 0, checked: 0 };
   }
 
+  // 树的 prompt 前缀整轮不变(改动要等批次跑完才落库),循环外算一次 —— 全库 60 批
+  // 每批重渲染 12000 行的树字符串是白烧 CPU
+  const treeText = renderTree(opts.tree) || '(空)';
+
   for (let i = 0; i < allNames.length; i += TAGCHECK_BATCH) {
+    const batchNo = Math.floor(i / TAGCHECK_BATCH) + 1;
+    const batchTotal = Math.ceil(allNames.length / TAGCHECK_BATCH);
     const batch = allNames.slice(i, i + TAGCHECK_BATCH);
-    console.log(`[tags/check] 批 ${Math.floor(i / TAGCHECK_BATCH) + 1}/${Math.ceil(allNames.length / TAGCHECK_BATCH)} 送 ${batch.length} 个词`);
+    console.log(`[tags/check] 批 ${batchNo}/${batchTotal} 送 ${batch.length} 个词`);
     const messages: ChatMessage[] = [
       { role: 'system', content: CHECK_SYSTEM },
       {
         role: 'user',
         content:
-          `## 现有标签树\n${renderTree(opts.tree) || '(空)'}\n\n` +
+          `## 现有标签树\n${treeText}\n\n` +
           `## 待判定的词(${batch.length} 个)\n${batch.join('、')}\n\n` +
           `请逐个判定。`,
       },
     ];
-    verdicts.push(...coerceVerdicts(
+    const batchVerdicts = coerceVerdicts(
       await complete({
         config: opts.config,
         messages,
@@ -159,7 +165,16 @@ export async function runTagCheck(opts: {
         ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       }),
       known,
-    ));
+    );
+    verdicts.push(...batchVerdicts);
+    // 每批判完都报数 —— 分批后单批输出被截断(0 判定)会被其他批的非零总数掩盖,
+    // 不在这里出声的话用户看到的就是" apparently 干净"的一轮
+    console.log(`[tags/check] 批 ${batchNo}/${batchTotal} 判定 ${batchVerdicts.length} 个`);
+    if (batchVerdicts.length === 0) {
+      const why = `第 ${batchNo}/${batchTotal} 批一个词都没判回来:${batch.length} 个词送出去、0 条判定 —— 这批可能被截断了,按"都没问题"处理了`;
+      opts.log?.event({ level: 'warn', category: 'llm', code: 'TAGCHECK_EMPTY', message: why });
+      opts.onNote?.('warn', why);
+    }
   }
 
   /**
@@ -254,5 +269,5 @@ export async function runTagCheck(opts: {
     // keep 也是它做的决定 —— 用户问的正是"每个词判成了什么",只报动手的那些是半份日志
     opts.onVerdict?.(v);
   }
-  return { dropped, merged, moved };
+  return { dropped, merged, moved, checked: allNames.length };
 }

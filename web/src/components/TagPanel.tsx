@@ -323,11 +323,25 @@ export default function TagPanel() {
       ),
       okText: '开始质检',
       cancelText: '算了',
-      onOk: async () => {
-        await act(async () => {
-          const r = await tagApi.tagcheck(scope);
-          setTagNote(`质检完成:删 ${r.dropped} · 合 ${r.merged} · 挪 ${r.moved}`);
-        });
+      onOk: () => {
+        // **不锁界面等它** —— 全库质检是最长几分钟的 LLM 调用,把用户关在弹窗里
+        // 转圈(runTag 不走 act() 的同一个理由)。确定即关弹窗,结果落 tagNote
+        setTagNote(scope === 'all' ? '词库质检进行中(全部审查)……' : '词库质检进行中(只查新的)……');
+        void tagApi.tagcheck(scope)
+          .then((r) => {
+            // checked=0 = 根本没词可检(没跑过标注/库是空的),和"检完都没问题"必须分开说
+            if (r.checked === 0) {
+              setTagNote('质检完成 —— 没有可检的词(还没跑过标注,或词库是空的)');
+            } else {
+              setTagNote(`质检完成(查了 ${r.checked} 个词):删 ${r.dropped} · 合 ${r.merged} · 挪 ${r.moved}`);
+            }
+          })
+          .then(() => Promise.all([
+            refreshTree().catch(() => {}),
+            refreshChanges().catch(() => {}),
+            refreshStats().catch(() => {}),
+          ]))
+          .catch((e) => setError((e as Error).message));
       },
     });
   };

@@ -92,7 +92,7 @@ describe('runTagCheck', () => {
     const r = await runTagCheck({
       config, tree: listTagTree(db), newNames: ['AI', '鲁夫', '露营'], db,
     });
-    expect(r).toEqual({ dropped: 1, merged: 1, moved: 1 });
+    expect(r).toEqual({ dropped: 1, merged: 1, moved: 1, checked: 3 });
     // 计数器动了 **而且库里真的换了父** —— 只动计数器、不落库的话这条会挂
     const camp = findTag(db, normalizeTagName('露营'));
     expect(db.prepare(`SELECT parent_id FROM tags WHERE id = ?`).get(camp)).toEqual({
@@ -159,7 +159,7 @@ describe('runTagCheck', () => {
     );
     const r = await runTagCheck({ config, tree: listTagTree(db), newNames: ['露营'], db });
 
-    expect(r).toEqual({ dropped: 0, merged: 0, moved: 0 });
+    expect(r).toEqual({ dropped: 0, merged: 0, moved: 0, checked: 1 });
     // 节点还在 —— 而且它挂的视频还在(merge 会把 item_tags 一起搬走)
     expect(db.prepare(`SELECT id FROM tags WHERE id = ?`).get(food)).toEqual({ id: food });
     expect(itemTagIds(db, ['BV1']).get('BV1')).toEqual([food]);
@@ -174,7 +174,11 @@ describe('runTagCheck', () => {
     await runTagCheck({ config, tree: listTagTree(db), newNames: ['露营'], db, log });
     const rows = db.prepare(`SELECT message FROM events WHERE code = 'TAGCHECK_EMPTY'`).all() as
       { message: string }[];
-    expect(rows).toHaveLength(1);
+    // **两条**:单批 0 判定一条(分批后单批截断会被其他批的非零总数掩盖,必须单独报)
+    // + 总计 0 条一条(总闸门)。单批数 = 总数(只有一批),两条都说"1 个词送出去"
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.message).toContain('1 个词送出去');
+    expect(rows[1]!.message).toContain('1 个词送出去');
     // 说清"几个词送出去了" —— 光说"什么都没判"没有可行动的信息。
     // 词数来自 allNames(它已含 newNames 或全库词),所以 scope='all' 空 newNames 时也报得对
     expect(rows[0]!.message).toContain('1 个词送出去');
@@ -186,7 +190,7 @@ describe('runTagCheck', () => {
     mocks.complete.mockResolvedValue(JSON.stringify([]));
     await expect(
       runTagCheck({ config, tree: listTagTree(db), newNames: ['露营'], db }),
-    ).resolves.toEqual({ dropped: 0, merged: 0, moved: 0 });
+    ).resolves.toEqual({ dropped: 0, merged: 0, moved: 0, checked: 1 });
   });
 
   // 分批:>200 个词不一次全送 —— 每次调用只送 ≤200 个
