@@ -43,6 +43,12 @@ const CHANGES_KEY = 'tags.lastChanges';
 const lastReconcile: { ms: number | null; at: number | null } = { ms: null, at: null };
 
 /**
+ * 上一轮标注长出的新词 —— 手动质检 scope='new' 用它(不然"只查这次新的"没词可查)。
+ * 单进程内存变量,和 lastReconcile 同一个理由:标注一次只跑一轮。
+ */
+let lastRunNewWords: string[] = [];
+
+/**
  * 「这次改动不合法」的哨兵 —— PATCH 路由用它把两种失败分开。
  *
  * 那个事务里两类失败必须走不同状态码:**用户输入不合法**是 400,**库真出故障**是 500。
@@ -157,16 +163,26 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
       return reply.code(400).send({ ok: false, reason: '还没配「标签质检」模型 —— 先去「授权」页配一个' });
     }
     const t0 = Date.now();
-    const r = await runTagCheck({
-      config: checker.config,
-      tree: listTagTree(db),
-      newNames: [],                        // 手动质检:待检词由 allTags 决定
-      db,
-      log,
-      allTags: scope === 'all',
-      // 无 signal:手动质检是独立请求,没有 run 的 controller
-      timeoutMs: 180_000,
-    });
+    let r;
+    try {
+      r = await runTagCheck({
+        config: checker.config,
+        tree: listTagTree(db),
+        // scope='new' 用上一轮标注的新词(还没跑过标注就是空数组 → 零批早退,合理:没有"这次新的"可查);
+        // scope='all' 待检词由 allTags 决定,newNames 用不上
+        newNames: scope === 'new' ? lastRunNewWords : [],
+        db,
+        log,
+        allTags: scope === 'all',
+        // 无 signal:手动质检是独立请求,没有 run 的 controller
+        timeoutMs: 180_000,
+      });
+    } catch (e) {
+      // 手动质检失败要出声 + 回 500 —— 不能静默返回"删 0 合 0 挪 0"(看起来像"什么都没检"但其实是挂了)
+      const message = (e as Error)?.message ?? String(e);
+      log.event({ level: 'warn', category: 'llm', code: 'TAGCHECK_FAILED', message });
+      return reply.code(500).send({ ok: false, reason: `质检失败:${message}` });
+    }
     console.log(`[tags/check] 手动质检完成 scope=${scope} 耗时 ${Date.now() - t0}ms`);
     log.event({ level: 'info', category: 'llm', code: 'TAGCHECK_MANUAL', message: `手动质检:${scope}` });
     return { ok: true, scope, ...r };
@@ -280,6 +296,9 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
       // ── 跑完自动整理(§9F C8 + C9 + C10)────────────────
       // 顺序不能反:先质检(定新词的归宿、剔泛词),再让数据说话(合并/挂父)。
       // 反过来判据会把证据吃掉 —— 详见 tagtree.ts 开头那段。
+
+      // 上一轮新词落给手动质检 scope='new' 用(没词也记 —— 空数组意味着"这轮没长出新的")
+      lastRunNewWords = r.newWords;
 
       /**
        * **质检用的是「标签质检」那个用途的模型,不是打标那个。**
