@@ -188,6 +188,7 @@ export async function runTagging(opts: {
 
   /** 一次调用标一批;返回标到的 id 集合。调用的原料由 pending 提供(补轮时是"缺的那些") */
   const askOnce = async (batch: readonly ItemRow[]): Promise<Set<string>> => {
+    const t0 = Date.now();
     const messages: ChatMessage[] = [
       { role: 'system', content: TAG_SYSTEM },
       {
@@ -227,6 +228,8 @@ export async function runTagging(opts: {
       });
       out.add(o.id);
     }
+    // 每批完成打一行到服务端控制台 —— 让用户能看着它在跑(请求/进度/阶段全可见)
+    console.log(`[tags/tagger] 批 ${done + out.size}/${total} 耗时 ${Date.now() - t0}ms 标了 ${out.size} 条`);
     return out;
   };
 

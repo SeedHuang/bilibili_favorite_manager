@@ -157,11 +157,13 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
     // 增量口径用 **Set** 不是 `listUntaggedItemIds().includes()`:后者是全库 O(n²) 扫,
     // 3250 条真跑起来是秒级的卡顿
     const untagged = new Set(listUntaggedItemIds(db));
+    console.log(`[tags/run] 请求到达 scope=${scope} 未标注=${untagged.size}`);
     // **两条腿都排除已失效**:`scope='missing'` 靠上面的 Set(它已经不带 invalid 了),
     // 但 `scope='all'` 是直接拿全表 —— 不加这句,「重新标注全部」会把 300 条
     // 「已失效视频」占位符也喂给模型,一个没标题没简介的条目模型什么都标不出来,
     // 白花一轮调用(还记一批失败)。invalid 在 items 上一直有、界面上也一直有徽标
     const pool = allItems().filter((i) => (scope === 'all' || untagged.has(i.id)) && i.invalid === 0);
+    console.log(`[tags/run] 池子算完 poolSize=${pool.length} —— 启动即返回,后台跑`);
 
     // **启动即返回** —— 后台跑,前端靠轮询 run-progress 看进度
     reply.send({ ok: true, poolSize: pool.length });
@@ -267,6 +269,7 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
         note('warn', '没配「标签质检」模型 —— 跳过质检,这轮泛词闸门没跑');
       } else {
         try {
+          console.log(`[tags/run] 打标完成,共 ${r.tagged} 条 —— 开始质检(${checker.config.model}),新词 ${r.newWords.length} 个`);
           frame('phase', { phase: 'check', provider: checker.config.provider, model: checker.config.model });
           check = await runTagCheck({
             config: checker.config,
@@ -308,6 +311,7 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
       // 连 done 帧一起带崩(质检那步是包着的,这里不包就是两套待遇)。
       // 超时也是 warn 但不当作失败(M4h Task 3):部分整理已落库,差的下一轮补
       const t0 = Date.now();
+      console.log(`[tags/run] 质检完成(剔 ${check.dropped}/合 ${check.merged}/挪 ${check.moved})—— 开始判据整理`);
       try {
         const { changes: treeChanges, timedOut, limitRaised } = reconcileWithBudget(db);
         changes.push(...treeChanges);
