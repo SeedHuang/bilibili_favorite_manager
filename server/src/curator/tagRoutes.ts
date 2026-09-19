@@ -141,6 +141,37 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
     return { ok: true };
   });
 
+  /**
+   * 手动质检(spec M4h 扩展)。scope 选范围:
+   * - 'new':只检本轮新词(fresh 闸门,老词不碰)
+   * - 'all':检全库词,绕过 fresh(老词可能被删,不可逆 —— 弹窗已明示风险)
+   * 同步执行;标注跑着时 409。
+   */
+  app.post('/api/tags/tagcheck', async (req, reply) => {
+    if (currentRun.running) {
+      return reply.code(409).send({ ok: false, reason: '标注跑着不能质检 —— 先等它跑完或停止' });
+    }
+    const scope = (req.body as { scope?: string })?.scope === 'all' ? 'all' : 'new';
+    const checker = readLlmSettings(db, 'tagcheck');
+    if (!checker) {
+      return reply.code(400).send({ ok: false, reason: '还没配「标签质检」模型 —— 先去「授权」页配一个' });
+    }
+    const t0 = Date.now();
+    const r = await runTagCheck({
+      config: checker.config,
+      tree: listTagTree(db),
+      newNames: [],                        // 手动质检:待检词由 allTags 决定
+      db,
+      log,
+      allTags: scope === 'all',
+      // 无 signal:手动质检是独立请求,没有 run 的 controller
+      timeoutMs: 180_000,
+    });
+    console.log(`[tags/check] 手动质检完成 scope=${scope} 耗时 ${Date.now() - t0}ms`);
+    log.event({ level: 'info', category: 'llm', code: 'TAGCHECK_MANUAL', message: `手动质检:${scope}` });
+    return { ok: true, scope, ...r };
+  });
+
   app.post('/api/tags/run', async (req, reply) => {
     // 已经在跑就拒掉 —— 轮询版没有"再开一条连接同跑"的可能(那是 SSE 时代的坑),
     // 但两个标签页同时点还是可能撞上,守一道

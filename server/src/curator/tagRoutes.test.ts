@@ -454,6 +454,59 @@ describe('标注路由', () => {
     });
     await app.close();
   });
+
+  // 手动质检端点:scope='new' 只检新词;scope='all' 检全库
+  it('tagcheck:scope=new 走 fresh 闸门,scope=all 绕开', async () => {
+    const { app, db } = makeApp();
+    ensureTag(db, '美食', null);
+    ensureTag(db, '露营', null);
+    // 两种 scope 模型都判 drop 美食
+    mocks.complete.mockResolvedValue(JSON.stringify([{ name: '美食', action: 'drop' }]));
+
+    // scope=new:美食不是本轮新词(没传 newWords),被 fresh 闸门挡住 → 不删
+    const r1 = await app.inject({ method: 'POST', url: '/api/tags/tagcheck', payload: { scope: 'new' } });
+    expect(r1.statusCode).toBe(200);
+    expect(r1.json()).toMatchObject({ ok: true, scope: 'new', dropped: 0 });
+    expect(db.prepare(`SELECT id FROM tags WHERE name='美食'`).get()).toBeTruthy();
+
+    // scope=all:检全库 → 美食被删
+    mocks.complete.mockClear();
+    const r2 = await app.inject({ method: 'POST', url: '/api/tags/tagcheck', payload: { scope: 'all' } });
+    expect(r2.statusCode).toBe(200);
+    expect(r2.json()).toMatchObject({ ok: true, scope: 'all', dropped: 1 });
+    expect(db.prepare(`SELECT id FROM tags WHERE name='美食'`).get()).toBeUndefined();
+    // 记了 TAGCHECK_MANUAL
+    expect(db.prepare(`SELECT code FROM events WHERE code='TAGCHECK_MANUAL'`).get()).toBeTruthy();
+    await app.close();
+  });
+
+  it('tagcheck:标注跑着时拒绝(409)', async () => {
+    const { app, db } = makeApp();
+    upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
+    let release!: () => void;
+    // 只让**第一次**(打标)挂起;release 之后质检还会再调一次 complete,
+    // 那次得照常 resolve(回空)—— 否则 running 永远回不了 false,测试收不了尾
+    let call = 0;
+    mocks.complete.mockImplementation(
+      () => {
+        call += 1;
+        if (call === 1) {
+          return new Promise((res) => { release = () => res(JSON.stringify([{ id: 'BV1', tags: ['x'], kind: 'x' }])); });
+        }
+        return Promise.resolve(JSON.stringify([]));
+      },
+    );
+    const runRes = await app.inject({ method: 'POST', url: '/api/tags/run' });
+    expect(runRes.statusCode).toBe(200);
+    const tagRes = await app.inject({ method: 'POST', url: '/api/tags/tagcheck', payload: { scope: 'all' } });
+    expect(tagRes.statusCode).toBe(409);
+    release();
+    await vi.waitFor(async () => {
+      const p = (await app.inject({ method: 'GET', url: '/api/tags/run-progress' })).json() as { running: boolean };
+      if (p.running) throw new Error('still running');
+    });
+    await app.close();
+  });
 });
 
 describe('标签树路由', () => {
