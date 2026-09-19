@@ -263,9 +263,10 @@ export default function TagPanel() {
             性能时,用它回到「从没标过」的状态。
           </div>
           <div style={{ color: 'var(--text-dim)', marginBottom: 4 }}>输入「清空」以确认:</div>
+          {/* 受控 bug:value 绑的是闭包变量不是 state,modal 重渲染会把它重置成初始值,
+              用户打的字被 React 还原 → 「清空」永远打不进去。改非受控,onChange 照常累积 */}
           <Input
             autoFocus
-            value={typed}
             onChange={(e) => {
               typed = e.target.value;
               inst.update({ okButtonProps: { disabled: typed !== '清空' } });
@@ -501,7 +502,9 @@ export default function TagPanel() {
               </Button>
             ) : (
               <>
-                {runButtons(tagStatus?.tagged ?? 0, tagStatus?.total ?? 0).map((b) =>
+                {/* tagStatus 取数前(null)兜底成 primary —— 不然 runButtons(0,0) 返回 []
+                    → 只剩「清空标注」,首页连「AI 标注」都没有 */}
+                {(tagStatus ? runButtons(tagStatus.tagged, tagStatus.total) : ['primary']).map((b) =>
                   b === 'retag' ? (
                     <Button key="retag" size="small" icon={<RefreshCw size={13} />} onClick={retagAll}>
                       重新标注全部
