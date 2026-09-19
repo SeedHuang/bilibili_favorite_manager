@@ -285,17 +285,20 @@ export default function TagPanel() {
     const tick = async () => {
       try {
         const p = await tagApi.getCheckProgress();
+        console.log('[check-poll] tick', JSON.stringify({ running: p.running, done: p.done, total: p.total, logs: p.logs?.length, error: p.error }));
         if (stopped) return;
         setCheckProgress({ done: p.done, total: p.total });
         setLogLines((prev) => (prev.length === p.logs.length ? prev : p.logs));
 
         if (p.error) {
+          console.log('[check-poll] 出错收尾', p.error);
           setError(p.error);
           setChecking(false);
           await finishPoll();
           return;
         }
         if (!p.running) {
+          console.log('[check-poll] 跑完收尾', JSON.stringify(p.result));
           if (p.result) {
             const r = p.result;
             // checked=0 = 根本没词可检(没跑过标注/库空),和"检完都没问题"分开说
@@ -388,12 +391,16 @@ export default function TagPanel() {
       cancelText: '算了',
       onOk: () => {
         // 照 runTag:启动即返回,进度/判定/理由靠轮询 check-progress,日志抽屉全程可见
+        console.log('[check-ui] 点了开始质检 scope=' + scope + ' —— 进入运行态,启动轮询');
         setError('');
         setTagNote('');
         setLogLines([]);
         setChecking(true);
         setCheckProgress(null);
-        tagApi.tagcheck(scope).catch((e) => {
+        tagApi.tagcheck(scope).then(() => {
+          console.log('[check-ui] 后端已接受启动(tagcheck 返回 ok)');
+        }).catch((e) => {
+          console.log('[check-ui] 启动失败', String(e));
           setChecking(false);
           setError((e as Error).message);
           return;

@@ -186,19 +186,24 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
    * check-progress 看进度,日志抽屉看每条判定和理由,run-abort 能停。
    */
   app.post('/api/tags/tagcheck', async (req, reply) => {
+    console.log('[tags/check] 请求到达', JSON.stringify((req.body ?? {}) as object));
     // **双向守卫**:标注在跑、或另一个手动质检在跑,都拒 —— 两边会改同一棵树
     if (currentRun.running || currentCheck.running) {
+      console.log('[tags/check] 拒绝:已有任务在跑 run=' + currentRun.running + ' check=' + currentCheck.running);
       return reply.code(409).send({ ok: false, reason: '已有标注/质检在跑 —— 先等它跑完或停止' });
     }
     // scope 显式校验:没传或传别的都 400 —— 前端弹窗永远传一个,不许静默落 new
     const scope = (req.body as { scope?: string })?.scope;
     if (scope !== 'all' && scope !== 'new') {
+      console.log('[tags/check] 拒绝:scope 非法', String(scope));
       return reply.code(400).send({ ok: false, reason: 'scope 只能是 all 或 new' });
     }
     const checker = readLlmSettings(db, 'tagcheck');
     if (!checker) {
+      console.log('[tags/check] 拒绝:没配质检模型');
       return reply.code(400).send({ ok: false, reason: '还没配「标签质检」模型 —— 先去「授权」页配一个' });
     }
+    console.log('[tags/check] 启动 scope=' + scope + ' —— 初始化状态,启动即返回');
 
     // 初始化这轮质检的状态 + 启动即返回
     const controller = new AbortController();
@@ -231,9 +236,19 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
         signal: controller.signal,
         timeoutMs: TAGCHECK_TIMEOUT_MS,
         // 每批判完刷进度 + 判定/理由逐条进日志(onVerdict/onNote 见 runTagCheck)
-        onBatch: (p) => { currentCheck.done = p.done; currentCheck.total = p.total; },
-        onVerdict: (v) => frame('verdict', v),
-        onNote: (level, text) => frame('note', { level, text }),
+        onBatch: (p) => {
+          currentCheck.done = p.done;
+          currentCheck.total = p.total;
+          console.log(`[tags/check] 进度 ${p.done}/${p.total}`);
+        },
+        onVerdict: (v) => {
+          console.log(`[tags/check] 判定「${v.name}」${v.action}${v.target ? `→${v.target}` : ''}${v.reason ? `(${v.reason})` : ''}`);
+          frame('verdict', v);
+        },
+        onNote: (level, text) => {
+          console.log(`[tags/check] note(${level}) ${text}`);
+          frame('note', { level, text });
+        },
       });
       console.log(`[tags/check] 手动质检完成 scope=${scope} 耗时 ${Date.now() - t0}ms`);
       log.event({ level: 'info', category: 'llm', code: 'TAGCHECK_MANUAL', message: `手动质检(${scope}):查 ${r.checked} · 删 ${r.dropped} · 合 ${r.merged} · 挪 ${r.moved}` });
