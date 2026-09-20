@@ -228,4 +228,31 @@ CREATE TABLE IF NOT EXISTS item_tags (
   PRIMARY KEY (item_id, tag_id)
 );
 CREATE INDEX IF NOT EXISTS idx_item_tags_tag ON item_tags(tag_id);
+
+-- ── 夹子方案生成(2026-09-20)──────────────────────────────
+-- 方案头。CHECK(id=1) 钉死全局唯一一份:重新生成 = 整体覆盖。
+-- 和 work_state 同一招 —— 把"全局一份"钉在数据库层,不靠应用代码自觉。
+CREATE TABLE IF NOT EXISTS folder_proposals (
+  id              INTEGER PRIMARY KEY CHECK (id = 1),
+  level           INTEGER,
+  uncovered_count INTEGER,
+  status          TEXT NOT NULL,        -- 'idle' | 'generating' | 'ready'
+  created_at      INTEGER
+);
+
+-- 草稿夹子。conditions_json 与 RuleCondition[] 同形,采纳后即普通规则。
+-- 生成成功才写草稿,但 generating 半路失败会留下旧草稿 —— 所以清旧草稿的
+-- 责任在 startProposal(事务里删),不在这张表的 FK:它只保证删方案头时带走草稿。
+CREATE TABLE IF NOT EXISTS folder_proposal_folders (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  proposal_id       INTEGER NOT NULL REFERENCES folder_proposals(id) ON DELETE CASCADE,
+  name              TEXT NOT NULL,
+  reason            TEXT,
+  conditions_json   TEXT NOT NULL,
+  hit_count         INTEGER NOT NULL,
+  weak              INTEGER NOT NULL DEFAULT 0,
+  status            TEXT NOT NULL,      -- 'pending' | 'adopted' | 'discarded'
+  adopted_folder_id INTEGER REFERENCES work_folders(id) ON DELETE SET NULL,
+  created_at        INTEGER NOT NULL
+);
 `;
