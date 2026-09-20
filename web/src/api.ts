@@ -12,6 +12,8 @@ import type {
   Pass1Response,
   Pass2Response,
   ProgressPayload,
+  ProposalDraftView,
+  ProposalInfo,
   ProviderView,
   RuleCondition,
   RuleSuggestion,
@@ -376,6 +378,17 @@ export const rulesApi = {
 
   /** 让 AI 看看规则 —— 建议**不落库**,刷新就没了 */
   suggest: () => json<{ suggestions: RuleSuggestion[] }>('POST', '/api/rules/suggest'),
+};
+
+// ── 夹子方案生成 ─────────────────────────────────────────
+
+export const proposalsApi = {
+  generate: (level: number) => json<{ ok: true }>('POST', '/api/proposals/generate', { level }),
+  current: () => api<{ proposal: ProposalInfo | null; drafts: ProposalDraftView[] }>('/api/proposals/current'),
+  adopt: (draftId: number, name?: string) =>
+    json<{ ok: true; folderId: number }>('POST', '/api/proposals/adopt', { draftId, name }),
+  adoptAll: () => json<{ ok: true; results: { draftId: number; folderId: number }[] }>('POST', '/api/proposals/adopt-all'),
+  discard: (draftId: number) => json<{ ok: true }>('POST', '/api/proposals/discard', { draftId }),
 };
 
 // ── M4e:条目 AI 标注 ────────────────────────────────────

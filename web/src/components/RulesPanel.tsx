@@ -1,8 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
 import { App as AntApp, Button, Select, Tooltip } from 'antd';
-import { Bot, Check, ChevronDown, ChevronRight, Pencil, Plus, Trash2, X, Zap } from 'lucide-react';
-import { rulesApi, tagApi } from '../api';
-import type { DryRun, RuleCondition, RuleField, RuleSuggestion, RuleView, TagNode } from '../types';
+import { Bot, Check, ChevronDown, ChevronRight, Pencil, Plus, Sparkles, Trash2, X, Zap } from 'lucide-react';
+import { proposalsApi, rulesApi, tagApi } from '../api';
+import type {
+  DryRun,
+  ProposalDraftView,
+  ProposalInfo,
+  RuleCondition,
+  RuleField,
+  RuleSuggestion,
+  RuleView,
+  TagNode,
+} from '../types';
 import { useAssistant } from './assistant';
 
 /**
@@ -47,6 +56,21 @@ function ago(ts: number): string {
   return `${Math.floor(s / 86400)} 天前`;
 }
 
+// ── 夹子方案生成 ──────────────────────────────────────────
+// 10 档名称与定义 —— 与后端 LEVELS 同源(spec §阶梯表);前端不引 server 模块,两份常量
+const LEVEL_NAMES: { level: number; name: string; hint: string }[] = [
+  { level: 1, name: '专精', hint: '同一具体事物的同一用法/技巧' },
+  { level: 2, name: '工具', hint: '同一个具体事物/工具' },
+  { level: 3, name: '方案', hint: '解决同一问题的同类工具' },
+  { level: 4, name: '方向', hint: '同一技术路线/方法论' },
+  { level: 5, name: '领域', hint: '同一领域' },
+  { level: 6, name: '邻域', hint: '领域+紧邻领域' },
+  { level: 7, name: '大类', hint: '同一大类' },
+  { level: 8, name: '行业', hint: '同一行业' },
+  { level: 9, name: '生活', hint: '生活大领域' },
+  { level: 10, name: '全收', hint: '全库归成几大主题' },
+];
+
 export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: number | null }) {
   const { modal } = AntApp.useApp();
   const [rules, setRules] = useState<RuleView[]>([]);
@@ -64,6 +88,46 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
   const [suggesting, setSuggesting] = useState(false);
   /** 调用**成功但没建议**时的一句话 —— 不然面板整个消失,看着像按钮没反应 */
   const [suggestNote, setSuggestNote] = useState('');
+
+  const [proposal, setProposal] = useState<ProposalInfo | null>(null);
+  const [drafts, setDrafts] = useState<ProposalDraftView[]>([]);
+  const [genLevel, setGenLevel] = useState(5);
+  const [generating, setGenerating] = useState(false);
+
+  const loadProposal = useCallback(async () => {
+    const cur = await proposalsApi.current();
+    setProposal(cur.proposal);
+    setDrafts(cur.drafts);
+    setGenerating(cur.proposal?.status === 'generating');
+    return cur.proposal?.status;
+  }, []);
+
+  useEffect(() => { void loadProposal().catch((e) => setError((e as Error).message)); }, [loadProposal]);
+
+  // 轮询:generating 时每 3s;照 tags 那套,不搞 SSE
+  useEffect(() => {
+    if (!generating) return;
+    const t = setInterval(() => {
+      void loadProposal()
+        .then((s) => { if (s && s !== 'generating') setGenerating(false); })
+        .catch(() => {}); // 轮询失败静默,下一轮再试
+    }, 3000);
+    return () => clearInterval(t);
+  }, [generating, loadProposal]);
+
+  const generate = () => {
+    modal.confirm({
+      title: `按「${LEVEL_NAMES[genLevel - 1].name}」(${genLevel} 档)生成夹子方案?`,
+      content: '未采纳的旧草稿会被覆盖;生成花一次模型调用,结果不可复现。',
+      okText: '生成', cancelText: '算了',
+      onOk: async () => {
+        setError('');
+        await proposalsApi.generate(genLevel);
+        setGenerating(true);
+        await loadProposal();
+      },
+    });
+  };
 
   const reload = useCallback(async () => {
     setRules(await rulesApi.list());
@@ -188,6 +252,39 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
           {error}
         </div>
       )}
+
+      {/* ── 夹子方案生成:面板顶部、AI 建议栏之上 ── */}
+      <div className="hud-panel" style={{ padding: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span className="hud-label">夹子方案</span>
+          <Select
+            size="small" value={genLevel} onChange={setGenLevel} style={{ width: 150 }}
+            disabled={generating}
+            options={LEVEL_NAMES.map((l) => ({ value: l.level, label: `${l.level} · ${l.name}` }))}
+          />
+          <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
+            {LEVEL_NAMES[genLevel - 1].hint} · 数字越大分得越粗
+          </span>
+          <Button
+            size="small" type="primary" icon={<Sparkles size={13} />}
+            loading={generating} disabled={busy} style={{ marginLeft: 'auto' }}
+            onClick={generate}
+          >
+            {generating ? '生成中…' : '生成方案'}
+          </Button>
+        </div>
+        {proposal?.status === 'ready' && (
+          <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)', marginTop: 6 }}>
+            方案({proposal.level} 档) · {drafts.filter((d) => d.status === 'pending').length} 个待审
+            · 未挂词条目 {proposal.uncoveredCount} 条不参与
+            {drafts.some((d) => d.status === 'pending') && (
+              <Button size="small" type="link" disabled={busy} onClick={() => act(async () => { await proposalsApi.adoptAll(); })}>
+                全部采纳
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* ── AI 的建议:置顶且单独一栏 —— 它是"待你处理"的东西(§9C.4 规矩 2)── */}
       {(suggestions.length > 0 || suggesting || suggestNote) && (
@@ -445,6 +542,60 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
             </div>
           );
         })}
+
+        {drafts.filter((d) => d.status === 'pending').map((d) => (
+          <div key={`draft-${d.id}`} style={{ borderBottom: '1px solid var(--rule)', background: 'rgba(120,119,255,0.06)' }}>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'baseline', padding: '7px 4px' }}>
+              <span style={{ width: 150, flex: 'none', display: 'flex', alignItems: 'center', gap: 5, fontSize: 'var(--fs-13)' }}>
+                {/* 草稿标 —— 用户要求:一眼区分草稿与真夹子 */}
+                <Tooltip title="AI 方案草稿 —— 采纳后变成真夹子">
+                  <Sparkles size={12} style={{ color: 'var(--ai)', flex: 'none' }} />
+                </Tooltip>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</span>
+              </span>
+              <span style={{ flex: 1, minWidth: 0, fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
+                {d.reason || '(AI 没给理由)'}
+                {d.weak && <span style={{ color: 'var(--warning, #d4a017)' }}> · ⚠ 规则偏弱:概念压了很多条目,关键词捞不满</span>}
+              </span>
+              <span className="num" style={{ width: 64, flex: 'none', textAlign: 'right', fontSize: 'var(--fs-12)', color: 'var(--accent)' }}>
+                {d.hitCount}
+              </span>
+              <span style={{ width: 44, flex: 'none', textAlign: 'center', fontSize: 12 }}>
+                <span style={{ color: 'var(--ai)' }}>🤖</span>
+              </span>
+              <span style={{ width: 68, flex: 'none' }} />
+            </div>
+            {/* 证据行:样本标题 */}
+            <div style={{ padding: '0 4px 8px 26px', fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
+              {d.sampleTitles.length > 0 && <div style={{ marginBottom: 4 }}>命中样本:{d.sampleTitles.slice(0, 5).join(' / ')}</div>}
+              <Button size="small" type="primary" icon={<Check size={12} />} disabled={busy}
+                onClick={() => act(async () => { await proposalsApi.adopt(d.id); })}>
+                采纳
+              </Button>
+              <Button size="small" icon={<Pencil size={12} />} disabled={busy}
+                onClick={() => {
+                  modal.confirm({
+                    title: '改名后采纳',
+                    content: (
+                      <input id="draft-rename" defaultValue={d.name}
+                        style={{ width: '100%', padding: 6, border: '1px solid var(--rule)', borderRadius: 4 }} />
+                    ),
+                    okText: '采纳', cancelText: '算了',
+                    onOk: async () => {
+                      const el = document.getElementById('draft-rename') as HTMLInputElement | null;
+                      await act(async () => { await proposalsApi.adopt(d.id, el?.value ?? undefined); });
+                    },
+                  });
+                }}>
+                改名采纳
+              </Button>
+              <Button size="small" type="text" danger icon={<X size={12} />} disabled={busy}
+                onClick={() => act(async () => { await proposalsApi.discard(d.id); })}>
+                丢弃
+              </Button>
+            </div>
+          </div>
+        ))}
       </div>
 
       <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>

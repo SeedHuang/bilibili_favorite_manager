@@ -449,3 +449,23 @@ export interface FolderProfile {
   /** 和这个夹子不搭的条目 id(零参数判据) */
   outliers: string[];
 }
+
+// ── 夹子方案生成 ─────────────────────────────────────────
+export interface ProposalInfo {
+  level: number | null;
+  uncoveredCount: number;
+  status: 'idle' | 'generating' | 'ready';
+  createdAt: number | null;
+}
+
+export interface ProposalDraftView {
+  id: number;
+  name: string;
+  reason: string;
+  conditions: RuleCondition[];
+  hitCount: number;
+  weak: boolean;
+  status: 'pending' | 'adopted' | 'discarded';
+  adoptedFolderId: number | null;
+  sampleTitles: string[];
+}
