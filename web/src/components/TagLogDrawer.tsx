@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button, Drawer } from 'antd';
 import { ArrowDown, Eraser } from 'lucide-react';
-import type { TagLogLine } from '../types';
+import type { TagLogLine, TreeChange } from '../types';
 
 /**
  * 「AI 标注」的日志抽屉(spec §9D.7)。
@@ -19,6 +19,7 @@ export default function TagLogDrawer({
   lines,
   onClear,
   waiting,
+  changes,
 }: {
   open: boolean;
   onClose: () => void;
@@ -27,6 +28,8 @@ export default function TagLogDrawer({
   onClear: () => void;
   /** 有任务(标注/质检)在跑但日志还没内容 —— 空态要说"正在等模型",不能说"还没跑过" */
   waiting?: boolean;
+  /** 「上一轮变化」清单 —— 收进抽屉(浏览合并进标签页),顶部不再放独立面板 */
+  changes?: TreeChange[];
 }) {
   const [follow, setFollow] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -81,6 +84,22 @@ export default function TagLogDrawer({
         </div>
       }
     >
+      {changes && changes.length > 0 && (
+        <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--rule)', flex: 'none' }}>
+          <div className="hud-label" style={{ marginBottom: 6, color: 'var(--accent)' }}>上一轮变化</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 'var(--fs-12)', maxHeight: 180, overflowY: 'auto' }}>
+            {changes.map((c, i) => (
+              <div key={i} style={{ display: 'flex', gap: 8 }}>
+                <span style={{ color: c.kind === 'merge' ? 'var(--ok)' : 'var(--accent)', flex: 'none' }}>
+                  {c.kind === 'merge' ? '→' : '↑'}
+                </span>
+                <span>{c.from}{c.to ? ` → ${c.to}` : ''}</span>
+                <span style={{ color: 'var(--text-dim)' }}>{c.detail}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       <div
         ref={scrollRef}
         onScroll={(e) => {

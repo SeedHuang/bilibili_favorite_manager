@@ -1,20 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, App as AntApp, Button, Input, Progress, Radio, Select, Spin } from 'antd';
 import { Combine, Pencil, Check, Square, Tag, X, Trash2, ScrollText, RefreshCw, Eraser, ScanSearch } from 'lucide-react';
-import { useRequest } from '@umijs/max';
+import { useRequest, useSearchParams } from '@umijs/max';
 import { rawResult, tagApi } from '../api';
-import type { TagCheckProgressPayload, TagLogLine, TagNode, TagProgressPayload, TagRunStatus } from '../types';
+import type { Item, TagCheckProgressPayload, TagLogLine, TagNode, TagProgressPayload, TagRunStatus } from '../types';
 import TagTree from './TagTree';
 import TagLogDrawer from './TagLogDrawer';
+import TagItemPane from './TagItemPane';
+import ContextPane from './ContextPane';
 import { runButtons } from '../utils/tagRunButtons';
 
 /**
- * 词库治理 —— 四层:顶上「AI 标注」(这一跑长出下面的一切)、「树的变化」清单、
- * 那棵树、行内操作。
+ * 词库治理 + 按词看视频 —— 顶上「AI 标注」横栏(锁顶),下面一行三列:
+ * 树列(300px,自己滚)| TagItemPane(选中的词 → 视频墙)| ContextPane(详情)。
+ * 整页锁死(overflow:hidden),滚动只发生在各列内部 —— 不然树一长就把详情栏顶出屏。
  *
  * **这一页不做自动整理** —— 整理在标注跑完时自动发生(§9F C10)。这里只有
  * "按下这一跑"、"看它变成了什么"和"手动纠正"。用户的原话是"我不想管",所以不设审批闸;
  * 但结构必须**看得见**在长什么,这一页就是那个"看得见"。
+ *
+ * 选中的词存 URL(`?tag=`):刷新和后退键都还在原地,树列的「清除」按钮把它抹掉。
  */
 export default function TagPanel() {
   // state 全放在取数前面 —— 下面那个 `onError` 要写 `setError`,把它写在声明上面
@@ -24,6 +29,17 @@ export default function TagPanel() {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [editing, setEditing] = useState<number | null>(null);
   const [draft, setDraft] = useState('');
+
+  // ── 树选中(照 BrowsePanel)── 存 URL 不放 state:刷新/后退都在原地。
+  // 选中条目的详情 ContextPane 要,角标的排除名 findName 要,都在这一层收口。
+  const [params, setParams] = useSearchParams();
+  const tagId = Number(params.get('tag')) || null;
+  const [selectedItem, setSelectedItem] = useState<Item | null>(null);
+  // tagId 是 URL 派生的:后退/前进或粘贴 ?tag= 都会改它而不走 pick ——
+  // 旧选中项已不属于当前词,清掉,别让详情栏挂着上一个词下的视频
+  useEffect(() => { setSelectedItem(null); }, [tagId]);
+  /** 选中项的标签列表 —— TagItemPane 手里有 tagsOf,由它上报(它取数它报数) */
+  const [selectedItemTags, setSelectedItemTags] = useState<string[]>([]);
 
   // ── AI 标注(spec §9E C8)── **专用开关、不碰 `busy`**。
   // 共用 busy 会让"标注跑着"把改名/合并/删除全锁死,反过来也一样 —— §9D.5 已经踩过一次。
@@ -420,6 +436,12 @@ export default function TagPanel() {
       return next;
     });
 
+  /** 选词(照 BrowsePanel)。页码归零由 TagItemPane 的 key={tagId} 重挂载做,这里不管 */
+  const pick = (id: number) => {
+    setSelectedItem(null);
+    setParams({ tag: String(id) });
+  };
+
   /**
    * **没有"新建词"入口** —— 这是刻意的。
    *
@@ -504,6 +526,9 @@ export default function TagPanel() {
   const walk = (nodes: TagNode[]) => { for (const n of nodes) { flat.push(n); walk(n.children); } };
   walk(tree?.tree ?? []);
 
+  // 选中词的名字(从树里查)—— 角标要排除它(自己不算"别的词"),空态要用它
+  const currentTagName = tree?.tree ? findName(tree.tree, tagId) : null;
+
   const actions = (node: TagNode) =>
     // 标注/质检在跑时不渲染行内操作 —— 两边都会改同一棵树,跑了改名/合并/删除
     // 会让轮询回来看到的世界和界面动作打架
@@ -586,13 +611,13 @@ export default function TagPanel() {
       : 0;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: 12 }}>
       {error && <Alert type="error" showIcon closable message={error} onClose={() => setError('')} />}
 
-      {/* ── AI 标注(spec §9E C8)置顶:树和「上一轮变化」都是这一跑长出来的,入口就该在它们上面。
+      {/* ── AI 标注(spec §9E C8)置顶:树是这一跑长出来的,入口就该在它上面。
           两态(§9D B1):空闲 = 开始增量,运行中 = 停止。**不绑 busy** ——
           它自己在跑的时候,下面的改名/合并/删除照样能点(§9D.5) ── */}
-      <div className="hud-panel" style={{ padding: 12 }}>
+      <div className="hud-panel" style={{ padding: 12, flex: 'none' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span className="hud-label">AI 标注</span>
           <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
@@ -747,45 +772,26 @@ export default function TagPanel() {
         )}
       </div>
 
-      <div className="hud-panel" style={{ padding: 12 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-          <span className="hud-label">上一轮变化</span>
-          <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
-            每轮标注跑完自动整理一次,结果是这些 —— 不需要你确认
-          </span>
-        </div>
-        {(changes?.changes ?? []).length === 0 ? (
-          <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
-            还没有跑过标注,或者上一轮什么都没变
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 'var(--fs-12)' }}>
-            {changes!.changes.map((c, i) => (
-              <div key={i} style={{ display: 'flex', gap: 8 }}>
-                <span style={{ color: c.kind === 'merge' ? 'var(--ok)' : 'var(--accent)', flex: 'none' }}>
-                  {c.kind === 'merge' ? '→' : '↑'}
-                </span>
-                <span>{c.from}{c.to ? ` → ${c.to}` : ''}</span>
-                <span style={{ color: 'var(--text-dim)' }}>{c.detail}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div className="hud-panel" style={{ padding: 12 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-          <span className="hud-label">词库</span>
-          <span className="num" style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
-            {tree?.total ?? 0} 个词
-          </span>
-          {busy && <Spin size="small" />}
+      {/* ── 行容器:树列 | 视频墙 | 详情栏,三列同高,滚动各自负责 ── */}
+      <div style={{ display: 'flex', gap: 12, flex: 1, minHeight: 0, alignItems: 'stretch' }}>
+        {/* 树列 —— **树自己滚**(TagTree 包在内滚容器里),不顶飞别的模块。
+            头部行(标题/词数/健康度/清除)flex:none,树长了先压缩的是滚动区 */}
+        <div className="hud-panel" style={{ width: 300, flex: 'none', padding: 12, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, flex: 'none' }}>
+            <span className="hud-label">词库</span>
+            <span className="num" style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
+              {tree?.total ?? 0} 个词
+            </span>
+            {busy && <Spin size="small" />}
           {/* 词库健康度(M4h):活跃词是"挂 ≥5 条视频"的词,整理成本由它的平方决定 ——
               这个数持续涨就是词库在膨胀的早期信号。上次整理耗时大于 5s 说明超时守卫触发过。
               外层条件必须含 unchecked:新词批量长出时 activeTags 可能还是 0,而待检数
               恰恰在那个时刻最该被看见(只 guard 活跃词部分,别把待检一起藏了) */}
           {stats && (stats.activeTags > 0 || stats.unchecked > 0) && (
-            <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)', marginLeft: 'auto' }}>
+            // **必须可收缩**(flex:1 + minWidth:0)—— 这行最长能到三四百 px,300px 列里
+            // 撑不动:写死 flex:'none' 会把行挤溢出,DOM 末尾的「清除」按钮被列的
+            // overflow:hidden 裁掉,选着词时清除入口直接消失。长文案让它截断,别顶人。
+            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
               {stats.activeTags > 0 && (
                 <>活跃词 <span className="num">{stats.activeTags.toLocaleString()}</span> / {stats.totalTags.toLocaleString()}</>
               )}
@@ -794,37 +800,84 @@ export default function TagPanel() {
               {stats.reconcileMs !== null && <> · 上次整理 <span className="num">{stats.reconcileMs.toLocaleString()}</span>ms</>}
             </span>
           )}
+            {/* 清除选中(照 BrowsePanel):抹掉 URL 上的 tag,右侧回到空态。
+                只在选着的时候显示 —— 没选中就没有"清除"可言 */}
+            {tagId !== null && (
+              <button
+                type="button"
+                onClick={() => { setSelectedItem(null); setParams({}); }}
+                style={{
+                  marginLeft: 'auto', border: 'none', background: 'none', cursor: 'pointer',
+                  color: 'var(--text-dim)', fontSize: 'var(--fs-12)',
+                }}
+              >
+                清除
+              </button>
+            )}
+          </div>
+
+          {loading ? (
+            <div style={{ padding: 20, textAlign: 'center' }}><Spin /></div>
+          ) : (tree?.tree ?? []).length === 0 ? (
+            // 拉失败时那句"点一次 AI 标注"是**照它做要花钱**的建议,不能挂在一次
+            // 失败的取数上(红条已经在上面了)
+            <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-dim)', fontSize: 'var(--fs-13)', flex: 'none' }}>
+              {treeError
+                ? '词库没拉下来 —— 看上面那条报错'
+                : '词库还是空的。点上面的「AI 标注」,它会自己长出来'}
+            </div>
+          ) : (
+            // **树自己滚** —— 树长了只滚这一块,不会把详情栏顶出屏
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+              <TagTree
+                nodes={tree!.tree}
+                expanded={expanded}
+                selectedId={tagId}
+                onToggleExpand={toggle}
+                onSelect={pick}
+                renderActions={actions}
+              />
+            </div>
+          )}
         </div>
 
-        {loading ? (
-          <div style={{ padding: 20, textAlign: 'center' }}><Spin /></div>
-        ) : (tree?.tree ?? []).length === 0 ? (
-          // 拉失败时那句"点一次 AI 标注"是**照它做要花钱**的建议,不能挂在一次
-          // 失败的取数上(红条已经在上面了)
-          <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-dim)', fontSize: 'var(--fs-13)' }}>
-            {treeError
-              ? '词库没拉下来 —— 看上面那条报错'
-              : '词库还是空的。点上面的「AI 标注」,它会自己长出来'}
-          </div>
-        ) : (
-          <TagTree
-            nodes={tree!.tree}
-            expanded={expanded}
-            onToggleExpand={toggle}
-            renderActions={actions}
-          />
-        )}
+        {/* 中列:选中的词 → 视频墙。tagsOf 在它手里,详情栏要的由它 onTagsOf 上报。
+            key={tagId}:切词重挂载,page/error state 归位,不用「新词+旧页码」先打一次废请求 */}
+        <TagItemPane
+          key={tagId}
+          tagId={tagId}
+          selectedId={selectedItem?.id ?? null}
+          excludeTag={currentTagName}
+          onSelect={setSelectedItem}
+          onTagsOf={setSelectedItemTags}
+        />
+
+        {/* tags 由 TagItemPane 上报,不再像浏览页那样自己从 data 里捞 —— 取数在那边 */}
+        <ContextPane item={selectedItem} tags={selectedItemTags} />
       </div>
 
       {/* 日志抽屉(§9D.7)。**开/关由这一页管** —— 按钮在这里,抽屉自己开就跟它脱节了。
-          缓冲区和清空也在这里:`onClear` 清的是这一页手里的 state,关抽屉再开不丢 */}
+          缓冲区和清空也在这里:`onClear` 清的是这一页手里的 state,关抽屉再开不丢。
+          「上一轮变化」收进抽屉(浏览合并进标签页):顶部不再有独立面板,数据从这传 */}
       <TagLogDrawer
         open={logOpen}
         onClose={() => setLogOpen(false)}
         lines={logLines}
         onClear={() => setLogLines([])}
         waiting={tagging || checking}
+        changes={changes?.changes ?? []}
       />
     </div>
   );
+}
+
+/** 树里按 id 找名字(只用于角标的排除名 —— 排除的是"当前选中的词") */
+function findName(nodes: TagNode[], id: number | null): string | null {
+  if (id === null) return null;
+  for (const n of nodes) {
+    if (n.id === id) return n.name;
+    const hit = findName(n.children, id);
+    if (hit) return hit;
+  }
+  return null;
 }

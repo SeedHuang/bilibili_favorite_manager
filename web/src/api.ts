@@ -397,9 +397,9 @@ export const tagApi = {
    * `foldersOf` / `tagsOf` 是**同级字段**:夹子归属和标签都不在 item 里,
    * 因为 shapeItem 只走一个出口(见服务端那条注释)。
    */
-  items: (id: number, page = 1) =>
+  items: (id: number, page = 1, pageSize = 60) =>
     api<{ items: Item[]; total: number; foldersOf: Record<string, { id: number; title: string }[]>; tagsOf: Record<string, string[]> }>(
-      `/api/tags/${id}/items?page=${page}&pageSize=60`,
+      `/api/tags/${id}/items?page=${page}&pageSize=${pageSize}`,
     ),
 
   merge: (fromId: number, toId: number) => json<{ ok: true }>('POST', '/api/tags/merge', { fromId, toId }),

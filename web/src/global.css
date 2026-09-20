@@ -135,6 +135,33 @@
   background: rgba(14, 14, 23, 0.85);
 }
 
+/* 词角标(浏览合并进标签页):封面左上角,半透明深底 + accent。
+   右上角已被「已失效」角标占用,左上角避让。 */
+.cover-card__tags {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  display: flex;
+  gap: 4px;
+  /* 右侧预留 56px:右上角是「已失效」角标的地盘,两者同 z-index、
+     DOM 在后画在上面 —— 不预留的话 3 个词角标 + 长词会真叠到角标底下 */
+  max-width: calc(100% - 56px);
+  overflow: hidden;
+}
+.cover-card__tag {
+  font-size: 11px;
+  padding: 1px 5px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  background: rgba(14, 14, 23, 0.85);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* flex 子项默认 min-width:auto,不归零的话 ellipsis 永远不生效,长词是硬裁切 */
+  min-width: 0;
+}
+
 /* ── M4:AI 助手 ─────────────────────────────────────── */
 
 /* 「工作中」的转动环。全局的 prefers-reduced-motion 规则会把动画压到 0.001ms,

@@ -22,6 +22,8 @@ export default function ItemGrid({
   onPage,
   selectedId,
   onSelect,
+  badgesOf,
+  emptyText,
 }: {
   items: Item[];
   total: number;
@@ -30,6 +32,10 @@ export default function ItemGrid({
   onPage: (p: number) => void;
   selectedId?: string | null;
   onSelect?: (item: Item) => void;
+  /** 封面左上角的词角标 —— 调用方算好每条要显示什么(最多 3 个 + "+N") */
+  badgesOf?: Record<string, string[]>;
+  /** 空态文案 —— 缺省保持原文案(总览页语境) */
+  emptyText?: string;
 }) {
   if (items.length === 0) {
     return (
@@ -42,7 +48,7 @@ export default function ItemGrid({
           fontSize: 'var(--fs-13)',
         }}
       >
-        选择左侧收藏夹,或在上方搜索
+        {emptyText ?? '选择左侧收藏夹,或在上方搜索'}
       </div>
     );
   }
@@ -67,6 +73,13 @@ export default function ItemGrid({
                     <span className="cover-card__up">{it.upperName ?? '未知 UP'}</span>
                     <span className="cover-card__dur">{dur(it.duration)}</span>
                   </div>
+                  {(badgesOf?.[it.id] ?? []).length > 0 && (
+                    <div className="cover-card__tags">
+                      {badgesOf![it.id].map((t) => (
+                        <span key={t} className="cover-card__tag">{t}</span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="cover-card__thumb" />

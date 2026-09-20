@@ -1,7 +1,7 @@
 import { App as AntApp, ConfigProvider, theme as antdTheme } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { Link, Outlet, useLocation } from '@umijs/max';
-import { Compass, FolderHeart, Filter, KeyRound, Tags, Wand2 } from 'lucide-react';
+import { FolderHeart, Filter, KeyRound, Tags, Wand2 } from 'lucide-react';
 import { AssistantProvider } from '../components/assistant';
 import AIAssistantIcon from '../components/AIAssistantIcon';
 import ChatDrawer from '../components/ChatDrawer';
@@ -18,7 +18,6 @@ export default function Layout() {
     { to: '/curator', label: '整理', en: 'CURATOR', icon: Wand2 },
     { to: '/rules', label: '规则', en: 'RULES', icon: Filter },
     { to: '/tag', label: '标签', en: 'TAGS', icon: Tags },
-    { to: '/browse', label: '浏览', en: 'BROWSE', icon: Compass },
     { to: '/auth', label: '授权', en: 'AUTH', icon: KeyRound },
   ];
 

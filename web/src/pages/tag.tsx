@@ -8,7 +8,7 @@ import TagPanel from '../components/TagPanel';
  */
 export default function TagPage() {
   return (
-    <div style={{ height: '100%', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div style={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <span className="hud-label" style={{ color: 'var(--accent)' }}>标签</span>
         <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
@@ -16,7 +16,6 @@ export default function TagPage() {
         </span>
       </div>
       <TagPanel />
-      <div style={{ height: 56, flex: 'none' }} aria-hidden />
     </div>
   );
 }
