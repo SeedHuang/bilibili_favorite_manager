@@ -1,5 +1,16 @@
 // server/src/curator/proposal.ts
+import type Database from 'better-sqlite3';
+import type { Logger } from '../logger/index.js';
 import type { RuleCondition } from '../db/repo/rules.js';
+import type { ItemRow } from '../db/repo/items.js';
+import { complete } from '../llm/provider.js';
+import { readLlmSettings } from '../llm/config.js';
+import { parseLooseJson } from './parse.js';
+import {
+  startProposal, saveDrafts, gatherInputs,
+} from '../db/repo/proposals.js';
+import { tagNamesById, subtreeSets, itemTagIds } from '../db/repo/tags.js';
+import { matchAll, toRuleItem } from './rules.js';
 
 /**
  * 夹子方案生成 —— prompt 组装 + AI 输出裁判(纯函数,无 IO)。
@@ -117,3 +128,88 @@ export function validateFolders(raw: unknown, ctx: FolderCtx): ValidFolder[] {
   }
   return out;
 }
+
+// ── 生成主流程 ────────────────────────────────────────────
+
+export const GENERATE_TIMEOUT_MS = 300_000;
+
+/**
+ * 一轮生成。**先落 generating 再干活**(刷新/断线状态不丢),错误回 idle。
+ * 裁判顺序:validateFolders(结构)→ matchAll 实跑(命中 0 丢)→ 偏弱对账。
+ */
+export async function runGeneration(db: Database.Database, log: Logger, level: number): Promise<void> {
+  const llm = readLlmSettings(db, 'rules');
+  if (!llm) { // 路由已拦,这里兜底(异步路径里没人接 400)
+    log.event({ level: 'error', category: 'llm', code: 'PROPOSAL_NO_LLM', message: '生成方案时模型配置消失' });
+    return;
+  }
+  startProposal(db, level);
+  try {
+    const inputs = gatherInputs(db, level);
+    const prompt = buildPrompt({ ...inputs, level });
+    const raw = await complete({
+      config: llm.config,
+      messages: [
+        { role: 'system', content: prompt.system },
+        { role: 'user', content: prompt.user },
+      ],
+      thinking: false,
+      timeoutMs: GENERATE_TIMEOUT_MS,
+    });
+
+    // 结构裁判:knownNames = 现有工作夹子名 + 词表里同名也当重名(防 AI 起名和词重)
+    const nameOf = tagNamesById(db);
+    const workNames = new Set(
+      (db.prepare(`SELECT name FROM work_folders`).all() as { name: string }[]).map((r) => r.name),
+    );
+    for (const n of nameOf.values()) workNames.add(n);
+    const validTagIds = new Set([...nameOf.keys()]);
+    const folders = validateFolders(parseLooseJson(raw), { validTagIds, knownNames: workNames });
+
+    // 实跑命中 + 偏弱对账
+    const items = db.prepare(`SELECT * FROM items`).all() as ItemRow[];
+    const tagsOf = itemTagIds(db);
+    const subtree = subtreeSets(db);
+    const uncoveredCount = inputs.uncoveredCount;
+
+    const drafts: DraftShape[] = [];
+    for (const f of folders) {
+      const conditions: RuleCondition[] = [];
+      if (f.tagIds.length) conditions.push({ field: 'tag', any: f.tagIds.map(String) });
+      if (f.keywords.length) conditions.push({ field: 'title', any: f.keywords });
+      const probe = [{ folderId: 0, conditions, origin: 'ai' as const, updatedAt: 0 }];
+      const matched = matchAll(
+        items.map((i) => ({ ...toRuleItem(i), tagIds: tagsOf.get(i.id) ?? [] })),
+        probe, { subtree },
+      );
+      if (matched.size === 0) {
+        log.event({ level: 'info', category: 'llm', code: 'PROPOSAL_DRAFT_DROPPED', message: `「${f.name}」命中 0 条,丢弃` });
+        continue;
+      }
+      // 数据裁判:声称收编的词压着 N 条,关键词规则却捞不到 → 偏弱
+      // 口径:tagIds 的直接挂载数(不含子树)与命中数差 5 倍以上 → weak
+      const claimed = f.tagIds.reduce((s, id) => s + (tagCount(db, id) ?? 0), 0);
+      const weak = claimed >= 10 && matched.size < claimed / 5;
+      drafts.push({ name: f.name, reason: f.reason, conditions, hitCount: matched.size, weak });
+    }
+
+    if (drafts.length === 0) throw new Error('AI 的方案没一个草稿活下来 —— 换个档位或模型再试');
+    saveDrafts(db, level, uncoveredCount, drafts);
+    log.event({ level: 'info', category: 'llm', code: 'PROPOSAL_READY', message: `方案就绪:${drafts.length} 个草稿夹子` });
+  } catch (e) {
+    // 回 idle 而不是留 generating —— 卡在"生成中"是死状态
+    db.prepare(`UPDATE folder_proposals SET status = 'idle' WHERE id = 1`).run();
+    log.event({ level: 'error', category: 'llm', code: 'PROPOSAL_FAILED', message: (e as Error)?.message ?? String(e) });
+  }
+}
+
+/** saveDrafts 吃的形状 —— 就地别名一下,不为此 import DraftInput */
+interface DraftShape {
+  name: string; reason: string; conditions: RuleCondition[]; hitCount: number; weak: boolean;
+}
+
+/** 单个 tag 的挂载数(不加子树) */
+const tagCount = (db: Database.Database, id: number): number | null => {
+  const r = db.prepare(`SELECT COUNT(*) AS n FROM item_tags WHERE tag_id = ?`).get(id) as { n: number };
+  return r.n;
+};
