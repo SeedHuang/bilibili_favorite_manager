@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { openDb } from '../index.js';
 import {
   getProposal, startProposal, saveDrafts, listDrafts, setDraftStatus, sampleTitlesFor,
+  cooccurrencePairs, gatherInputs,
 } from './proposals.js';
 
 const seed = () => {
@@ -61,5 +62,40 @@ describe('方案 repo', () => {
     const db = seed();
     expect(sampleTitlesFor(db, [{ field: 'tag', any: ['1'] }])).toEqual(['标题A']);
     expect(sampleTitlesFor(db, [{ field: 'title', any: ['不存在'] }])).toEqual([]);
+  });
+});
+
+describe('共现 + 备料', () => {
+  function seedTwo() {
+    const db = openDb(':memory:');
+    // tag1/tag2 共现 2 条(Jaccard 1.0);tag3 独挂
+    db.prepare(`INSERT INTO items (id, type, title) VALUES ('BV1',2,'a'),('BV2',2,'b'),('BV3',2,'c')`).run();
+    db.prepare(`INSERT INTO tags (id,name,norm,created_at) VALUES (1,'NBA','nba',1),(2,'篮球','篮球',1),(3,'健身','健身',1)`).run();
+    const link = db.prepare(`INSERT INTO item_tags (item_id, tag_id, source) VALUES (?,?,'ai')`);
+    for (const [item, tag] of [['BV1',1],['BV1',2],['BV2',1],['BV2',2],['BV3',3]] as const) link.run(item, tag);
+    return db;
+  }
+
+  it('cooccurrencePairs 算 Jaccard,过滤低分', () => {
+    const db = seedTwo();
+    const all = cooccurrencePairs(db, 0);
+    expect(all).toContainEqual({ a: 1, b: 2, score: 1 });
+    expect(all.find((p) => p.a === 1 && p.b === 3)).toBeUndefined(); // 无共现不出现
+    expect(cooccurrencePairs(db, 0.5)).toHaveLength(1); // 0.3 阈值下 tag1-tag2 独存
+  });
+
+  it('gatherInputs 备齐四样料:树、共现、未覆盖计数、护栏', () => {
+    const db = seedTwo();
+    const g = gatherInputs(db, 5);
+    expect(g.treeText).toContain('NBA');           // 词库树在
+    expect(g.coText).toContain('NBA');             // 共现邻居在
+    expect(g.uncoveredCount).toBe(0);              // 三条全挂了词
+    expect(g.expected).toMatch(/\d+/);             // 护栏区间
+  });
+
+  it('未挂词条目计入 uncoveredCount', () => {
+    const db = seedTwo();
+    db.prepare(`INSERT INTO items (id, type, title) VALUES ('BV9',2,'没词')`).run();
+    expect(gatherInputs(db, 5).uncoveredCount).toBe(1);
   });
 });
