@@ -104,6 +104,14 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
 
   useEffect(() => { void loadProposal().catch((e) => setError((e as Error).message)); }, [loadProposal]);
 
+  /**
+   * 草稿操作统一走这里:动作成功后**必须**拉一次方案(草稿列表/待审数都来自它)。
+   * 单独包一层就是为了"第五个草稿操作"不再忘刷新 —— 漏了的表现是旧草稿留在屏上、
+   * 再点报 404,审查轮抓过一次。
+   */
+  const actProposal = (fn: () => Promise<unknown>) =>
+    act(async () => { await fn(); await loadProposal(); });
+
   // 轮询:generating 时每 3s;照 tags 那套,不搞 SSE
   useEffect(() => {
     if (!generating) return;
@@ -122,9 +130,15 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
       okText: '生成', cancelText: '算了',
       onOk: async () => {
         setError('');
-        await proposalsApi.generate(genLevel);
-        setGenerating(true);
-        await loadProposal();
+        try {
+          await proposalsApi.generate(genLevel);
+          setGenerating(true);
+          await loadProposal();
+        } catch (e) {
+          // 失败时弹窗关闭,错误落在页级红条 —— 和 TagPanel 的 confirmClearTags 同一惯例;
+          // rethrow 保弹窗的话弹窗里没有错误文案,用户只能看到"卡住"的壳
+          setError((e as Error).message);
+        }
       },
     });
   };
@@ -278,7 +292,8 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
             方案({proposal.level} 档) · {drafts.filter((d) => d.status === 'pending').length} 个待审
             · 未挂词条目 {proposal.uncoveredCount} 条不参与
             {drafts.some((d) => d.status === 'pending') && (
-              <Button size="small" type="link" disabled={busy} onClick={() => act(async () => { await proposalsApi.adoptAll(); })}>
+              <Button size="small" type="link" disabled={busy}
+                onClick={() => actProposal(() => proposalsApi.adoptAll())}>
                 全部采纳
               </Button>
             )}
@@ -569,7 +584,7 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
             <div style={{ padding: '0 4px 8px 26px', fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
               {d.sampleTitles.length > 0 && <div style={{ marginBottom: 4 }}>命中样本:{d.sampleTitles.slice(0, 5).join(' / ')}</div>}
               <Button size="small" type="primary" icon={<Check size={12} />} disabled={busy}
-                onClick={() => act(async () => { await proposalsApi.adopt(d.id); })}>
+                onClick={() => actProposal(() => proposalsApi.adopt(d.id))}>
                 采纳
               </Button>
               <Button size="small" icon={<Pencil size={12} />} disabled={busy}
@@ -583,14 +598,14 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
                     okText: '采纳', cancelText: '算了',
                     onOk: async () => {
                       const el = document.getElementById('draft-rename') as HTMLInputElement | null;
-                      await act(async () => { await proposalsApi.adopt(d.id, el?.value ?? undefined); });
+                      await actProposal(() => proposalsApi.adopt(d.id, el?.value ?? undefined));
                     },
                   });
                 }}>
                 改名采纳
               </Button>
               <Button size="small" type="text" danger icon={<X size={12} />} disabled={busy}
-                onClick={() => act(async () => { await proposalsApi.discard(d.id); })}>
+                onClick={() => actProposal(() => proposalsApi.discard(d.id))}>
                 丢弃
               </Button>
             </div>
