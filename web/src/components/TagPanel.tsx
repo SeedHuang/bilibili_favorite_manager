@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, App as AntApp, Button, Input, Progress, Radio, Select, Spin } from 'antd';
-import { Combine, Pencil, Check, Square, Tag, X, Trash2, ScrollText, RefreshCw, Eraser, ScanSearch } from 'lucide-react';
+import { Combine, Pencil, Check, Square, Tag, X, Trash2, ScrollText, Eraser, ScanSearch } from 'lucide-react';
 import { useRequest, useSearchParams } from '@umijs/max';
 import { rawResult, settingsApi, tagApi } from '../api';
 import type { Item, TagCheckProgressPayload, TagLogLine, TagNode, TagProgressPayload, TagRunStatus } from '../types';
@@ -8,7 +8,6 @@ import TagTree from './TagTree';
 import TagLogDrawer from './TagLogDrawer';
 import TagItemPane from './TagItemPane';
 import ContextPane from './ContextPane';
-import { runButtons } from '../utils/tagRunButtons';
 
 /**
  * 词库治理 + 按词看视频 —— 顶上「AI 标注」横栏(锁顶),下面一行三列:
@@ -138,7 +137,7 @@ export default function TagPanel() {
    * 这一跑产出的就是它们俩(§9F C5),不拉的话界面还停在旧树上,而上面刚刚报完
    * "新增词 N 个"。
    *
-   * `scope='missing'` 只标没标过的(增量,默认),`'all'` 全量重标(「重新标注全部」走它)。
+   * `scope='missing'` 只标没标过的(增量,弹窗默认),`'all'` 全量重标(弹窗选项走它)。
    */
 
   /**
@@ -253,14 +252,38 @@ export default function TagPanel() {
   // **重进页面恢复**:后端可能还有一轮在跑(用户上次离开时没停,后台继续标了)。
   // 进页面先查一次 run-progress —— 还在跑就把界面恢复成"标注中"并接管轮询。
   // 这样用户一进来就看到真相,想停点「停止」就真停了。
-  /** 「重新标注全部」= 全量重标,**会覆盖旧标注**(spec §9E.4),所以先问一句 */
-  const retagAll = () =>
+  /**
+   * 启动标注(spec 规则 3):按钮只表明任务,弹窗交代范围。话术与词库质检的
+   * confirmTagCheck 同一模板:继续X(默认)/ 全部重X(后果红字)——
+   * 两个弹窗是同一个 UI 模式,用户学一次就会两个。
+   */
+  const confirmTagRun = () => {
+    let scope: 'missing' | 'all' = 'missing';
     modal.confirm({
-      title: '把所有条目重新标一遍?',
-      content: '已有的标注会被覆盖(标签和类别都重写)。只想补没标过的,点「AI 标注」就行。',
-      okText: '全部重标', cancelText: '算了',
-      onOk: () => void runTag('all'),
+      title: 'AI 标注',
+      content: (
+        <div style={{ fontSize: 13 }}>
+          <div style={{ color: 'var(--text-dim)', marginBottom: 10 }}>
+            让模型逐个判定条目的标签和类别;跑的过程在「日志」里全程可见。
+            已标 {(tagStatus?.tagged ?? 0).toLocaleString()}/{(tagStatus?.total ?? 0).toLocaleString()}。
+          </div>
+          {/* 非受控(同 confirmTagCheck):content 只求值一次,onChange 只更新闭包 */}
+          <Radio.Group defaultValue="missing" onChange={(e) => { scope = e.target.value; }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <Radio value="missing">继续标注 —— 只标还没标过的(之前漏的 + 这次新收的)</Radio>
+              <Radio value="all">
+                全部重标 —— 对所有条目重新标注,包括已有标注的。
+                <b style={{ color: 'var(--warn)' }}>已有标注会被覆盖</b>,慎选
+              </Radio>
+            </div>
+          </Radio.Group>
+        </div>
+      ),
+      okText: '开始标注',
+      cancelText: '算了',
+      onOk: () => void runTag(scope),
     });
+  };
 
   /** 清空标注:高危、不可撤销,必须输入「清空」二字才可点确定(二次确认) */
   const confirmClearTags = () => {
@@ -408,9 +431,9 @@ export default function TagPanel() {
             }}
           >
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <Radio value="continue">继续质检 —— 检所有还没质检过的词(之前漏的 + 这次新长的)</Radio>
+              <Radio value="continue">继续质检 —— 只检还没质检过的词(之前漏的 + 这次新长的)</Radio>
               <Radio value="all">
-                全部审查 —— 对词库里所有词判定,包括已有词。模型可能把挂得多的大类词
+                全部重检 —— 对词库里所有词重新判定,包括已有词。模型可能把挂得多的大类词
                 判为"泛词"而删掉。<b style={{ color: 'var(--warn)' }}>删词不可逆</b>,慎选
               </Radio>
             </div>
@@ -674,23 +697,13 @@ export default function TagPanel() {
               </>
             ) : (
               <>
-                {/* tagStatus 取数前(null)兜底成 primary —— 不然 runButtons(0,0) 返回 []
-                    → 只剩「清空标注」,首页连「AI 标注」都没有 */}
-                {(tagStatus ? runButtons(tagStatus.tagged, tagStatus.total) : ['primary']).map((b) =>
-                  b === 'retag' ? (
-                    <Button key="retag" size="small" icon={<RefreshCw size={13} />} onClick={retagAll}>
-                      重新标注全部
-                    </Button>
-                  ) : (
-                    <Button
-                      key="run"
-                      size="small"
-                      icon={<Tag size={13} />}
-                      onClick={() => void runTag('missing')}
-                    >
-                      {b === 'continue' ? '继续标注' : 'AI 标注'}
-                    </Button>
-                  ),
+                {/* 标注一颗按钮(spec 规则 3):按钮只表明任务,不带数据状态 ——
+                    和旁边「词库质检」一致;范围与覆盖语义都在弹窗里交代。
+                    空库(total=0)不渲染:没有可标的对象 */}
+                {(!tagStatus || tagStatus.total > 0) && (
+                  <Button size="small" icon={<Tag size={13} />} onClick={confirmTagRun}>
+                    AI 标注
+                  </Button>
                 )}
                 {/* 词库质检:手动触发,弹窗选范围(全部 / 只查新的) */}
                 <Button size="small" icon={<ScanSearch size={13} />} onClick={confirmTagCheck}>
