@@ -26,7 +26,7 @@ import {
 } from '../db/repo/tags.js';
 import { runTagCheck } from './tagcheck.js';
 import { reconcileWithBudget, MIN_SAMPLE, type TreeChange } from './tagtree.js';
-import { getSetting, setSetting } from '../db/repo/state.js';
+import { getSetting, setSetting, readPoll } from '../db/repo/state.js';
 
 export interface TagDeps {
   db: Database.Database;
@@ -199,6 +199,8 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
       console.log('[tags/check] 拒绝:没配质检模型');
       return reply.code(400).send({ ok: false, reason: '还没配「标签质检」模型 —— 先去「授权」页配一个' });
     }
+    // 批大小从设置读(spec 2026-09-20 §2);缺省 200 由 runTagCheck 兜底
+    const checkBatch = readPoll(db, 'tagcheck').batch;
     console.log('[tags/check] 启动 scope=' + scope + ' —— 初始化状态,启动即返回');
 
     // 初始化这轮质检的状态 + 启动即返回
@@ -225,6 +227,9 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
         tree: listTagTree(db),
         scope,
         db,
+        // readPoll 的 batch 类型是 number|null;tagcheck 运行时永不为 null(默认 200),
+        // ?? undefined 只是类型桥接,真缺省交给 runTagCheck 内部兜底
+        batch: checkBatch ?? undefined,
         log,
         signal: controller.signal,
         timeoutMs: TAGCHECK_TIMEOUT_MS,
@@ -288,6 +293,9 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
     if (!llm) {
       return reply.code(400).send({ ok: false, reason: '还没配模型 —— 先去「授权」页配一个' });
     }
+    // 批上限从设置读(spec 2026-09-20 §2):tag 的 batch 语义是**批上限**,
+    // 动态公式收缩在 runTagging 里;缺省 16 由 runTagging 兜底
+    const tagCap = readPoll(db, 'tag').batch;
 
     // 增量口径用 **Set** 不是 `listUntaggedItemIds().includes()`:后者是全库 O(n²) 扫,
     // 3250 条真跑起来是秒级的卡顿
@@ -349,6 +357,8 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
             items: pool,
             signal: controller.signal,
             db,
+            // 同 readPoll 类型桥接:tagcheck 同款注释
+            cap: tagCap ?? undefined,
             // 每批完成更新一次进度 —— 轮询端点读到的最新值
             onBatch: (b) => {
               currentRun.done = b.done;
@@ -394,6 +404,8 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
        * 配置了却永远不生效的下拉,而质检会跟着打标一起跑在本地 4b 上。
        */
       const checker = readLlmSettings(db, 'tagcheck');
+      // 批大小从设置读 —— 和手动质检同一个任务、同一份设置,不能两套口径
+      const checkBatch = readPoll(db, 'tagcheck').batch;
       let check = { dropped: 0, merged: 0, moved: 0 };
       if (!checker) {
         log.event({
@@ -411,6 +423,8 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
             tree: listTagTree(db),
             scope: 'continue',
             db,
+            // 批大小与手动质检同源(设置)—— 同一个任务不能两套批大小口径
+            batch: checkBatch ?? undefined,
             // 质检"一个词都没判回来"要出声 —— 那个失败看起来和"什么都没变"一模一样
             log,
             onVerdict: (v) => frame('verdict', v),

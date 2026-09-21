@@ -12,6 +12,7 @@ import { registerCuratorRoutes } from '../curator/routes.js';
 import { registerRuleRoutes } from '../curator/ruleRoutes.js';
 import { registerTagRoutes } from '../curator/tagRoutes.js';
 import { registerProposalRoutes } from '../curator/proposalRoutes.js';
+import { registerPollsRoutes } from '../curator/settingsPolls.js';
 
 export interface HttpDeps {
   db: Database.Database;
@@ -97,6 +98,7 @@ export function createServer(deps: HttpDeps): FastifyInstance {
   registerRuleRoutes(app, { db, log });
   registerTagRoutes(app, { db, log });
   registerProposalRoutes(app, { db, log });
+  registerPollsRoutes(app, { db });
 
   return app;
 }

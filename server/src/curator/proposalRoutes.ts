@@ -7,10 +7,13 @@ import {
 } from '../db/repo/proposals.js';
 import { saveRule } from '../db/repo/rules.js';
 import { createFolder } from './workbench.js';
-import { runGeneration } from './proposal.js';
+import { runGeneration, proposalRun } from './proposal.js';
 import { readLlmSettings } from '../llm/config.js';
 
 export interface ProposalDeps { db: Database.Database; log: Logger }
+
+/** 中止控制器 —— abort 端点拿着它停正在跑的那轮。模块级,和 proposalRun 同一理由 */
+let currentController: AbortController | null = null;
 
 export function registerProposalRoutes(app: FastifyInstance, deps: ProposalDeps): void {
   const { db, log } = deps;
@@ -20,7 +23,7 @@ export function registerProposalRoutes(app: FastifyInstance, deps: ProposalDeps)
     if (!Number.isInteger(level) || level < 1 || level > 10) {
       return reply.code(400).send({ ok: false, reason: '档位必须是 1~10' });
     }
-    if (!readLlmSettings(db, 'rules')) {
+    if (!readLlmSettings(db, 'proposals')) {
       return reply.code(400).send({ ok: false, reason: '还没配模型 —— 先去「授权」页的模型管理里选一个' });
     }
     const cur = getProposal(db);
@@ -28,16 +31,36 @@ export function registerProposalRoutes(app: FastifyInstance, deps: ProposalDeps)
       return reply.code(409).send({ ok: false, reason: '上一轮还在生成中' });
     }
     // 先落 generating(防重复点击),异步跑;**不 await**
-    void runGeneration(db, log, level);
+    const controller = new AbortController();
+    currentController = controller;
+    void runGeneration(db, log, level, { signal: controller.signal });
     return reply.code(202).send({ ok: true });
+  });
+
+  // 中止:未在跑 → 409(和 tags/run-abort 的幂等不同,这里前端按钮只该在跑时出现)
+  app.post('/api/proposals/abort', async (_req, reply) => {
+    if (!proposalRun.running || !currentController) {
+      // 落库 generating 但内存没在跑 = 进程重启留下的僵尸态(status 没有任何
+      // 启动时复位逻辑)—— 不解锁的话 generate 恒 409、abort 恒 409,用户只能手改库。
+      // abort 端点顺手当解锁路径:回 idle,让前端下一次 load 回到正常态
+      const cur = getProposal(db);
+      if (cur?.status === 'generating') {
+        db.prepare(`UPDATE folder_proposals SET status = 'idle' WHERE id = 1`).run();
+        return { ok: true };
+      }
+      return reply.code(409).send({ ok: false, reason: '没有正在进行的生成' });
+    }
+    currentController.abort();
+    return { ok: true };
   });
 
   app.get('/api/proposals/current', async () => {
     const proposal = getProposal(db);
     const drafts = listDrafts(db);
-    if (proposal?.status !== 'ready') return { proposal, drafts };
+    const logs = proposalRun.logs;
+    if (proposal?.status !== 'ready') return { proposal, drafts, logs };
     // 只在 ready 时算样本标题 —— generating 时白算
-    return { proposal, drafts: drafts.map((d) => ({ ...d, sampleTitles: sampleTitlesFor(db, d.conditions) })) };
+    return { proposal, drafts: drafts.map((d) => ({ ...d, sampleTitles: sampleTitlesFor(db, d.conditions) })), logs };
   });
 
   /** 采纳一个草稿:建夹子 + 写规则 + 改状态,事务一体 */

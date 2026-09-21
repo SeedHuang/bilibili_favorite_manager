@@ -122,10 +122,17 @@ export async function runTagCheck(opts: {
   /** 质检范围:'continue' = 只检未质检的(checked_at IS NULL,含历史欠账+新词);
    *  'all' = 强制全库重检。默认 'continue'。 */
   scope?: 'continue' | 'all';
+  /**
+   * 每批送检词数(来自 settings,spec 2026-09-20 §2)。tagcheck 是**定长批**,
+   * 和 tag 的"批上限+动态收缩"不同 —— 这里给多少就切多大。缺省回落 200,
+   * 与 state.ts DEFAULTS.tagcheck.batch 同源同义。
+   */
+  batch?: number;
 }): Promise<{ dropped: number; merged: number; moved: number; checked: number }> {
   const { db } = opts;
-  // 分批大小:200 词/批。词多时一次全送会淹没模型 → 0 判定(TAGCHECK_EMPTY 根因)
-  const TAGCHECK_BATCH = 200;
+  // 分批大小:默认 200 词/批。词多时一次全送会淹没模型 → 0 判定(TAGCHECK_EMPTY 根因)。
+  // 设置可改(spec 2026-09-20 §2),settings 缺省时就是 200,行为不变
+  const BATCH = Math.max(1, opts.batch ?? 200); // 下界保护:导出函数直接被测试/模块调用,0 或负数会让循环永远走不完
   const allNames = opts.scope === 'all'
     ? listTagsWithParent(db).map((r) => r.name)   // 全库词名
     : listUncheckedTags(db);                       // 未质检的(含欠账+新词)
@@ -222,10 +229,10 @@ export async function runTagCheck(opts: {
     opts.onVerdict?.(v);
   };
 
-  for (let i = 0; i < allNames.length; i += TAGCHECK_BATCH) {
-    const batchNo = Math.floor(i / TAGCHECK_BATCH) + 1;
-    const batchTotal = Math.ceil(allNames.length / TAGCHECK_BATCH);
-    const batch = allNames.slice(i, i + TAGCHECK_BATCH);
+  for (let i = 0; i < allNames.length; i += BATCH) {
+    const batchNo = Math.floor(i / BATCH) + 1;
+    const batchTotal = Math.ceil(allNames.length / BATCH);
+    const batch = allNames.slice(i, i + BATCH);
     console.log(`[tags/check] 批 ${batchNo}/${batchTotal} 送 ${batch.length} 个词`);
     const messages: ChatMessage[] = [
       { role: 'system', content: CHECK_SYSTEM },
@@ -250,7 +257,7 @@ export async function runTagCheck(opts: {
     // 每批判完都报数 —— 分批后单批输出被截断(0 判定)会被其他批的非零总数掩盖,
     // 不在这里出声的话用户看到的就是" apparently 干净"的一轮
     console.log(`[tags/check] 批 ${batchNo}/${batchTotal} 判定 ${batchVerdicts.length} 个`);
-    opts.onBatch?.({ done: Math.min(i + TAGCHECK_BATCH, allNames.length), total: allNames.length });
+    opts.onBatch?.({ done: Math.min(i + BATCH, allNames.length), total: allNames.length });
     if (batchVerdicts.length === 0) {
       const why = `第 ${batchNo}/${batchTotal} 批一个词都没判回来:${batch.length} 个词送出去、0 条判定 —— 这批可能被截断了,按"都没问题"处理了`;
       opts.log?.event({ level: 'warn', category: 'llm', code: 'TAGCHECK_EMPTY', message: why });

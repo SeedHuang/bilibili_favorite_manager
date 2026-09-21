@@ -12,18 +12,21 @@
  * 文件可能被别的程序读走。
  */
 import type Database from 'better-sqlite3';
-import { getSetting, setSetting } from '../db/repo/state.js';
+import { getSetting, setSetting, deleteSetting } from '../db/repo/state.js';
 import { encryptSecret, decryptSecret } from '../security/dpapi.js';
 import { getModelMeta, type ModelMeta } from './registry.js';
 import type { ModelConfig } from './provider.js';
 import { assertUsableBaseUrl } from './provider.js';
 
-export type LlmPurpose = 'chat' | 'classify' | 'rules' | 'tag' | 'tagcheck';
-export const PURPOSES: readonly LlmPurpose[] = ['chat', 'classify', 'rules', 'tag', 'tagcheck'];
+// proposals(夹子方案生成)2026-09-20 起独立于 rules:两者量级与要求不同,
+// 混用会让规则页和方案页互相抢同一档模型
+export type LlmPurpose = 'chat' | 'classify' | 'proposals' | 'rules' | 'tag' | 'tagcheck';
+export const PURPOSES: readonly LlmPurpose[] = ['chat', 'classify', 'proposals', 'rules', 'tag', 'tagcheck'];
 /** 面向用户展示的用途名 —— 报错里别漏内部 key */
 const PURPOSE_LABELS: Record<LlmPurpose, string> = {
   chat: '聊天',
   classify: '归类',
+  proposals: '夹子方案生成',
   rules: '规则建议',
   tag: '打标',
   // 质检只对新词开口,判的是"这个词在树里该站哪" —— 量小但要准,和打标的要求相反
@@ -34,16 +37,6 @@ const PROVIDERS_KEY = 'llm.providers';
 const MODELS_KEY = 'llm.models';
 const OLLAMA_META_KEY = 'llm.ollama.meta';
 const purposeKey = (p: LlmPurpose) => `llm.purpose.${p}`;
-
-/**
- * 删掉一个 settings 键。
- *
- * 注:state.ts 只有 getSetting/setSetting,没有 deleteSetting —— 这里就地删,
- * 不改动本任务范围外的文件(见 task-1-report.md 的偏差说明)。
- */
-function deleteSetting(db: Database.Database, key: string): void {
-  db.prepare(`DELETE FROM settings WHERE key = ?`).run(key);
-}
 
 export interface ProviderEntry {
   id: string;
@@ -136,7 +129,7 @@ export function addEntry(db: Database.Database, input: { providerId: string; mod
   const entry: ModelEntry = { id: newId('m'), providerId: input.providerId, model: input.model.trim() };
   writeJson(db, MODELS_KEY, [...listEntries(db), entry]);
 
-  // 首条条目自动全分配 —— 避免配完一个模型,五个用途全是"未配置"
+  // 首条条目自动全分配 —— 避免配完一个模型,所有用途全是"未配置"
   const assigned = getAssignments(db);
   if (PURPOSES.every((p) => assigned[p] === null)) {
     for (const p of PURPOSES) setSetting(db, purposeKey(p), entry.id);
@@ -216,7 +209,7 @@ export function readLlmSettings(db: Database.Database, purpose: LlmPurpose): Llm
 
 // ── 测试铺底(生产代码不 import)─────────────────────
 
-/** 一条命令铺好 1 凭证 + 1 条目 + 五用途全指它。只在测试里用 */
+/** 一条命令铺好 1 凭证 + 1 条目 + 全部用途指它。只在测试里用 */
 export function seedLlm(
   db: Database.Database,
   opts: { provider?: string; model?: string; baseUrl?: string; apiKey?: string } = {},

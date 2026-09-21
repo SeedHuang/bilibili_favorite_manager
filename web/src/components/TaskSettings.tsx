@@ -1,16 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Button, Input, Select, Alert } from 'antd';
+import { Alert, App as AntApp, Button, Input, Select } from 'antd';
 import { Zap, KeyRound, SlidersHorizontal, Save, RefreshCw } from 'lucide-react';
-import { API_BASE, llmApi } from '../api';
-import type { EntryView, LlmPurpose, ModelMeta, ProviderView } from '../types';
+import { API_BASE, llmApi, settingsApi } from '../api';
+import type { EntryView, LlmPurpose, ModelMeta, PollsMap, ProviderView } from '../types';
 
 /**
- * 模型管理:三层(服务商凭证 → 模型条目 → 用途分配)。
- * spec 2026-09-17-model-config-redesign —— 每层一张卡,配置只下沉不回落。
+ * 任务设置:三层(服务商凭证 → 模型条目 → 任务行)。
+ * 每个任务行 = AI 模型 + 轮询间隔 + 批次大小(模型只是三件套之一,spec 2026-09-20 §4.3)。
  *
  * 旧的 `purpose='main'|'tag'` 两卡设计(DEFAULT 逐项回落)已废弃:用途之间现在平级,
  * `tag` 没配就是"未配置",不再偷偷沿用主模型 —— 那正是"以为在烧本地 4b,实际每批
  * 都在打贵的主模型"的来源。
+ *
+ * 轮询/批次存 settings 的 `poll.<taskType>.*`(spec 2026-09-20 §3),改动即保存;
+ * 轮询间隔要等 Plan B/C 把各任务迁到 useTaskProgress 后才真正被读,批次同理在
+ * 下次启动任务时由后端读 —— 所以底部小字如实写"下次生效"。
  */
 const PROVIDERS = [
   { value: 'ollama', label: '本地 Ollama', hint: '隐私 / 离线主力,默认 qwen2.5:14b' },
@@ -20,10 +24,13 @@ const PROVIDERS = [
   { value: 'custom', label: '自定义', hint: '任何 OpenAI 兼容端点' },
 ];
 
-export default function ModelManager() {
+export default function TaskSettings() {
   const [providers, setProviders] = useState<ProviderView[]>([]);
   const [entries, setEntries] = useState<EntryView[]>([]);
   const [assignments, setAssignments] = useState<Record<LlmPurpose, string | null> | null>(null);
+  /** 各任务的轮询/批次配置;null = 还没拉到(下拉占位,不阻塞渲染) */
+  const [polls, setPolls] = useState<PollsMap | null>(null);
+  const [pollsErr, setPollsErr] = useState('');
 
   const reload = useCallback(async () => {
     const [p, e, a] = await Promise.all([
@@ -38,13 +45,41 @@ export default function ModelManager() {
 
   useEffect(() => {
     reload().catch(() => {});
+    // 轮询配置独立拉 —— 拉失败红条,但不挡模型配置(两件事互不依赖,spec §5)
+    settingsApi
+      .getPolls()
+      .then(setPolls)
+      .catch((e) => setPollsErr((e as Error).message));
   }, [reload]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, width: '100%' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+        <span className="hud-label" style={{ color: 'var(--accent)' }}>
+          任务设置
+        </span>
+        <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
+          每个任务:AI 模型 / 轮询间隔 / 批次大小
+        </span>
+      </div>
+      {pollsErr && (
+        <Alert
+          type="error"
+          showIcon
+          message={`拉取轮询配置失败:${pollsErr}`}
+          closable
+          onClose={() => setPollsErr('')}
+        />
+      )}
       <ProviderCard providers={providers} onDone={reload} />
       <EntryCard providers={providers} entries={entries} onDone={reload} />
-      <AssignCard entries={entries} assignments={assignments} onDone={reload} />
+      <AssignCard
+        entries={entries}
+        assignments={assignments}
+        polls={polls}
+        setPolls={setPolls}
+        onDone={reload}
+      />
     </div>
   );
 }
@@ -539,7 +574,7 @@ function EntryCard({
     setBusy('add');
     try {
       await llmApi.addEntry({ providerId, model });
-      setNotice('条目已添加。首条会自动指给五个用途,可在下面那张卡改。');
+      setNotice('条目已添加。首条会自动指给所有用途,可在下面那张卡改。');
       setModel('');
       await onDone();
     } catch (e) {
@@ -661,7 +696,7 @@ function EntryCard({
   );
 }
 
-// ── 卡 3:用途分配 ───────────────────────────────────────
+// ── 卡 3:任务行(模型 / 轮询 / 批次)──────────────────────
 
 const PURPOSE_LABELS: Record<LlmPurpose, string> = {
   chat: '聊天',
@@ -669,27 +704,52 @@ const PURPOSE_LABELS: Record<LlmPurpose, string> = {
   rules: '规则建议',
   tag: '打标',
   tagcheck: '标签质检',
+  proposals: '夹子方案生成', // 与 server PURPOSE_LABELS 同名(报错文案里出现的是那个)
 };
+
+/** 有轮询/批次可配的任务 —— purpose 名即 taskType(spec §4.3) */
+const POLL_PURPOSES = ['tag', 'tagcheck', 'proposals'] as const;
+type PollPurpose = (typeof POLL_PURPOSES)[number];
+
+const INTERVAL_OPTIONS = [1000, 2000, 3000, 5000, 10000].map((v) => ({
+  value: v,
+  label: `${v / 1000}s`,
+}));
+
+const CUSTOM_BATCH = 'custom';
+const BATCH_OPTIONS: { value: number | typeof CUSTOM_BATCH; label: string }[] = [
+  ...[1, 2, 5, 10, 20, 30, 40, 50].map((v) => ({ value: v, label: String(v) })),
+  { value: CUSTOM_BATCH, label: '自定义…' },
+];
 
 function AssignCard({
   entries,
   assignments,
+  polls,
+  setPolls,
   onDone,
 }: {
   entries: EntryView[];
   assignments: Record<LlmPurpose, string | null> | null;
+  polls: PollsMap | null;
+  setPolls: (p: PollsMap) => void;
   onDone: () => Promise<void>;
 }) {
   const [error, setError] = useState('');
   /** 变更进行中锁住全部下拉 —— 快速连改两次时旧响应会晚到,把界面刷回旧值 */
   const [saving, setSaving] = useState(false);
+  /** 轮询/批次保存失败的红条;成功才动本地 polls(spec §5:失败不改 state) */
+  const [pollErr, setPollErr] = useState('');
+  const [pollSaving, setPollSaving] = useState(false);
+  // 静态 Modal.confirm 拿不到 ConfigProvider 的主题,必须走 App.useApp()(照 TagPanel)
+  const { modal } = AntApp.useApp();
 
   if (assignments === null) {
     return (
       <Card
         icon={<SlidersHorizontal size={16} style={{ color: 'var(--accent)' }} />}
-        title="用途分配"
-        hint="五个用途平级,各自指一个条目;没配 = 未配置,不回落"
+        title="任务"
+        hint="每个任务各自指一个条目;没配 = 未配置,不回落"
       >
         <p className="hud-label">加载中…</p>
       </Card>
@@ -714,28 +774,157 @@ function AssignCard({
     }
   };
 
+  /**
+   * 改轮询间隔。**上游裁决:tag/tagcheck 必须带数值 batch** —— HTTP 层没有
+   * batch=null 恢复默认的路径,漏发 batch 会被路由 400;proposals 无批次语义,
+   * 只发 intervalMs(server 那头也忽略 batch)。
+   */
+  const changeInterval = async (taskType: PollPurpose, v: number) => {
+    const cur = polls?.[taskType];
+    if (!polls || !cur) return;
+    setPollSaving(true);
+    setPollErr('');
+    try {
+      if (taskType === 'proposals') {
+        // proposals 无批次语义,server 侧忽略 batch 字段 —— 传 null 与省略等价,这里显式传
+        await settingsApi.setPoll(taskType, { intervalMs: v, batch: null });
+      } else {
+        // readPoll 对这两个任务恒返回数值 batch,null 只在类型上存在;真遇到就别写,防冲库
+        if (typeof cur.batch !== 'number') return;
+        await settingsApi.setPoll(taskType, { intervalMs: v, batch: cur.batch });
+      }
+      setPolls({ ...polls, [taskType]: { ...cur, intervalMs: v } });
+    } catch (e) {
+      setPollErr((e as Error).message);
+    } finally {
+      setPollSaving(false);
+    }
+  };
+
+  /** 改批次(只有 tag/tagcheck 有此列)。间隔带上当前值,同理防把已存档位冲掉 */
+  const changeBatch = async (taskType: 'tag' | 'tagcheck', v: number) => {
+    const cur = polls?.[taskType];
+    if (!polls || !cur) return;
+    setPollSaving(true);
+    setPollErr('');
+    try {
+      await settingsApi.setPoll(taskType, { intervalMs: cur.intervalMs, batch: v });
+      setPolls({ ...polls, [taskType]: { ...cur, batch: v } });
+    } catch (e) {
+      setPollErr((e as Error).message);
+    } finally {
+      setPollSaving(false);
+    }
+  };
+
+  /**
+   * 「自定义…」弹非受控 Input 取 1~500 的整数。
+   * 非受控是照 TagPanel confirmClearTags 的坑改的:value 绑闭包变量的话,modal
+   * 重渲染会把输入框打回初始值,用户打的字被 React 还原。
+   */
+  const customBatch = (taskType: 'tag' | 'tagcheck') => {
+    let typed = '';
+    const inst = modal.confirm({
+      title: '自定义批次大小',
+      content: (
+        <div>
+          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 8 }}>
+            1~500 的整数。批次大小在下次启动任务时生效。
+          </div>
+          <Input
+            autoFocus
+            placeholder="1~500"
+            onChange={(e) => {
+              typed = e.target.value;
+              const n = Number(typed);
+              const ok = typed.trim() !== '' && Number.isInteger(n) && n >= 1 && n <= 500;
+              // HookModal.update 顶层浅合并,okButtonProps 整体替换 —— 照 TagPanel 的注释
+              inst.update({ okButtonProps: { disabled: !ok } });
+            }}
+            style={{ width: '100%' }}
+          />
+        </div>
+      ),
+      okText: '保存',
+      okButtonProps: { disabled: true },
+      cancelText: '算了',
+      onOk: () => changeBatch(taskType, Number(typed)),
+    });
+  };
+
   return (
     <Card
       icon={<SlidersHorizontal size={16} style={{ color: 'var(--accent)' }} />}
-      title="用途分配"
-      hint="五个用途平级,各自指一个条目;没配 = 未配置,不回落"
+      title="任务"
+      hint="每个任务各自指一个条目;没配 = 未配置,不回落"
     >
-      {(Object.keys(PURPOSE_LABELS) as LlmPurpose[]).map((p) => (
-        <Field key={p} label={PURPOSE_LABELS[p]}>
-          <Select
-            id={`llm-${PURPOSE_LABELS[p]}`}
-            value={assignments[p] ?? ''}
-            onChange={(v) => void change(p, v)}
-            options={options}
-            disabled={entries.length === 0 || saving}
-            style={{ width: 320 }}
-          />
-        </Field>
-      ))}
+      {(Object.keys(PURPOSE_LABELS) as LlmPurpose[]).map((p) => {
+        // purpose 名即 taskType;只有这三个任务有轮询/批次列(spec §1 覆盖范围)
+        const tt = (POLL_PURPOSES as readonly string[]).includes(p) ? (p as PollPurpose) : null;
+        const cur = tt ? polls?.[tt] : undefined;
+        return (
+          <Field key={p} label={PURPOSE_LABELS[p]}>
+            <Select
+              id={`llm-${PURPOSE_LABELS[p]}`}
+              value={assignments[p] ?? ''}
+              onChange={(v) => void change(p, v)}
+              options={options}
+              disabled={entries.length === 0 || saving}
+              style={{ width: 320 }}
+            />
+            {tt && (
+              <>
+                <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)', marginLeft: 14 }}>
+                  轮询
+                </span>
+                <Select<number>
+                  id={`llm-${PURPOSE_LABELS[p]}-轮询`}
+                  value={cur?.intervalMs}
+                  onChange={(v) => void changeInterval(tt, v)}
+                  options={INTERVAL_OPTIONS}
+                  disabled={!cur || pollSaving}
+                  placeholder={cur ? undefined : '读取中…'}
+                  style={{ width: 84, marginLeft: 8 }}
+                />
+                <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)', marginLeft: 14 }}>
+                  批次
+                </span>
+                {tt === 'proposals' ? (
+                  // proposals 一次 LLM 调用,无批次语义(spec §0 修正 1)—— 只占位不给下拉
+                  <span
+                    style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)', marginLeft: 8 }}
+                  >
+                    —
+                  </span>
+                ) : (
+                  <Select<number | typeof CUSTOM_BATCH>
+                    id={`llm-${PURPOSE_LABELS[p]}-批次`}
+                    value={cur?.batch ?? undefined}
+                    onChange={(v) => {
+                      if (v === CUSTOM_BATCH) customBatch(tt);
+                      else void changeBatch(tt, v);
+                    }}
+                    options={BATCH_OPTIONS}
+                    disabled={!cur || pollSaving}
+                    placeholder={cur ? undefined : '读取中…'}
+                    style={{ width: 104, marginLeft: 8 }}
+                  />
+                )}
+              </>
+            )}
+          </Field>
+        );
+      })}
       {entries.length === 0 && (
         <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
           先在上面加一个模型条目。
         </span>
+      )}
+      <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
+        轮询间隔对已打开页面在下次进入该页时生效;批次大小下次启动任务时生效
+      </span>
+      {pollErr && (
+        <Alert type="error" showIcon message={pollErr} closable onClose={() => setPollErr('')} />
       )}
       {error && <Alert type="error" showIcon message={error} closable onClose={() => setError('')} />}
     </Card>

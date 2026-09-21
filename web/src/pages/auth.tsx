@@ -3,7 +3,7 @@ import { useRequest } from '@umijs/max';
 import { Button, Input, Alert } from 'antd';
 import { ShieldCheck, KeyRound } from 'lucide-react';
 import { api, rawResult } from '../api';
-import ModelManager from '../components/ModelManager';
+import TaskSettings from '../components/TaskSettings';
 
 export default function AuthPage() {
   const [cookie, setCookie] = useState('');
@@ -98,9 +98,9 @@ export default function AuthPage() {
         </Button>
       </div>
 
-      {/* 模型管理跟授权同一页 —— 都是"这台机器怎么跟外面说话"的配置。
-          模型管理:凭证 / 条目 / 用途分配三层(2026-09-17 重构) */}
-      <ModelManager />
+      {/* 任务设置跟授权同一页 —— 都是"这台机器怎么跟外面说话"的配置。
+          任务设置:凭证 / 条目 / 任务行(模型 / 轮询 / 批次)三层(2026-09-20) */}
+      <TaskSettings />
       </div>
     );
   }
@@ -161,8 +161,8 @@ export default function AuthPage() {
       )}
     </div>
 
-    {/* 没授权也能配模型 —— 两件事互不依赖 */}
-    <ModelManager />
+    {/* 没授权也能配任务 —— 两件事互不依赖 */}
+    <TaskSettings />
     </div>
   );
 }

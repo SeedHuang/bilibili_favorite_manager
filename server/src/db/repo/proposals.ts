@@ -171,6 +171,8 @@ export function cooccurrencePairs(db: Database.Database, min = 0.3): { a: number
 /** prompt 的四样料。都从库里现查,零 token */
 export function gatherInputs(db: Database.Database, level: number): {
   treeText: string; coText: string; uncoveredCount: number; expected: string;
+  /** 词库树行数与共现对数 —— 进度日志「备料完成」用,现成局部量不重复算 */
+  tagCount: number; pairCount: number;
 } {
   // 词库树:缩进文本,每词带挂条目数
   const rows = db.prepare(
@@ -206,5 +208,8 @@ export function gatherInputs(db: Database.Database, level: number): {
   ).get() as { n: number }).n;
 
   const leafCount = rows.filter((r) => !children.has(r.id)).length;
-  return { treeText, coText, uncoveredCount, expected: expectedFolders(leafCount, level) };
+  return {
+    treeText, coText, uncoveredCount, expected: expectedFolders(leafCount, level),
+    tagCount: rows.length, pairCount: pairs.length,
+  };
 }

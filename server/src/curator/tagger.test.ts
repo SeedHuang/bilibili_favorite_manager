@@ -183,7 +183,7 @@ describe('runTagging', () => {
   //   记 failedBatches,**后续批次照跑**,而不是卡死整轮。
   it('一批超时 → 记失败批次,后续批次继续(不卡死整轮)', async () => {
     const db = openDb(':memory:');
-    // 17 条 → 两批(16 + 1,批上限 TAG_BATCH_CAP=16)。第一批超时,第二批正常 ——
+    // 17 条 → 两批(16 + 1,缺省批上限 16)。第一批超时,第二批正常 ——
     // 验证"卡死整轮"被根治
     for (let i = 0; i < 17; i++) upsertItem(db, { id: `BV${i}`, type: 2, title: `题${i}` });
     const items = Array.from({ length: 17 }, (_, i) => item(`BV${i}`, `题${i}`));
@@ -204,6 +204,26 @@ describe('runTagging', () => {
     expect(r.tagged).toBe(1);
     // 一次超时 + 一次正常 = 2 次。补轮不触发(第 2 批没漏)
     expect(mocks.complete).toHaveBeenCalledTimes(2);
+  });
+
+  // 批上限从设置读(spec 2026-09-20 §2):cap 只是上限,动态公式照旧收缩 ——
+  // ctx 窗口足够大时公式不会成为瓶颈,批大小就该被 cap 压住
+  it('cap=3 时批大小≤3(设置的上限生效)', async () => {
+    const db = openDb(':memory:');
+    for (let i = 0; i < 10; i++) upsertItem(db, { id: `BV${i}`, type: 2, title: `题${i}` });
+    const items = Array.from({ length: 10 }, (_, i) => item(`BV${i}`, `题${i}`));
+    mocks.complete.mockImplementation(async ({ messages }: { messages: { content: string }[] }) => {
+      const ids = [...messages[1]!.content.matchAll(/\[(BV\d+)\]/g)].map((m) => m[1]!);
+      return JSON.stringify(ids.map((id) => ({ id, kind: '娱乐', domains: ['x'], tags: ['y'] })));
+    });
+
+    await runTagging({ config, ctx, items, db, cap: 3 });
+    // 10 条 ÷ 每批 ≤3 → 至少 4 次调用(不设 cap 时批上限 16,1 次就吞完)
+    expect(mocks.complete).toHaveBeenCalledTimes(4);
+    for (const call of mocks.complete.mock.calls) {
+      const ids = [...call[0]!.messages[1]!.content.matchAll(/\[(BV\d+)\]/g)];
+      expect(ids.length).toBeLessThanOrEqual(3);
+    }
   });
 
   it('标注写 ai_checked_at —— 增量靠它(漏了就是每次全库重标)', async () => {

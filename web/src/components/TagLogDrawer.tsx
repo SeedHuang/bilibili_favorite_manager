@@ -1,6 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
-import { Button, Drawer } from 'antd';
-import { ArrowDown, Eraser } from 'lucide-react';
+import TaskLogDrawer from './TaskLogDrawer';
 import type { TagLogLine, TreeChange } from '../types';
 
 /**
@@ -10,8 +8,8 @@ import type { TagLogLine, TreeChange } from '../types';
  * state),这里只收「要展示的这几行」。开/关也由 TagPanel 传 —— 本组件不自己开抽屉,
  * 那样抽屉内部状态会跟 TagPanel 的「日志」按钮脱节。
  *
- * **渲染封顶(§9D.7 ③)**:全库一轮是几千行,3250 个 DOM 行画出来抽屉必然卡。
- * 缓冲区全留,只画最新 ~500 行,上面压一行「还有 N 条更早的」。
+ * 抽屉骨架(Drawer/贴底/封顶/空态/下载)已抽进泛型壳 TaskLogDrawer(Plan B Task 3),
+ * 这里只剩标签页特化的部分:LogRow 的四类行渲染 + 「上一轮变化」区块(经壳的 top 插槽)。
  */
 export default function TagLogDrawer({
   open,
@@ -31,105 +29,55 @@ export default function TagLogDrawer({
   /** 「上一轮变化」清单 —— 收进抽屉(浏览合并进标签页),顶部不再放独立面板 */
   changes?: TreeChange[];
 }) {
-  const [follow, setFollow] = useState(true);
-  const scrollRef = useRef<HTMLDivElement>(null);
-
   const warnCount = lines.filter((l) => l.type === 'note' && l.level === 'warn').length;
 
-  // 贴底跟随:开抽屉时跳到底(正在跑或刚跑完,最新在下面),之后每条新行都贴底。
-  // 用户往上滚了就停(手在翻更早的记录,不该被新行拽走)
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el && follow) el.scrollTop = el.scrollHeight;
-  }, [open, lines, follow]);
-
-  // 渲染封顶(§9D.7 ③):只画最新的 500 行。**不截断缓冲区** —— 只截渲染,
-  // 不然滚过之后旧行就真没了
-  const RENDER_CAP = 500;
-  const visible = lines.slice(-RENDER_CAP);
-  const hidden = lines.length - visible.length;
-
   return (
-    <Drawer
-      className="bfm-drawer"
+    <TaskLogDrawer
       open={open}
       onClose={onClose}
-      placement="right"
-      width={460}
-      maskClosable
-      styles={{ body: { display: 'flex', flexDirection: 'column', height: '100%' } }}
-      title={
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span className="hud-label" style={{ color: 'var(--accent)' }}>标注日志</span>
-          <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
-            {lines.length.toLocaleString()} 行
-            {/* warn 的个数单独报 —— 失败是这扇抽屉存在的理由之一 */}
-            {warnCount > 0 && (
-              <span style={{ color: 'var(--warn)' }}> · {warnCount} 条提醒</span>
-            )}
-          </span>
-          <span style={{ marginLeft: 'auto', display: 'flex', gap: 2 }}>
-            <Button
-              type="text" size="small" aria-label={follow ? '已自动贴底' : '滚回底部'}
-              icon={<ArrowDown size={14} />}
-              onClick={() => { setFollow(true); }}
-              style={follow ? { color: 'var(--accent)' } : undefined}
-            />
-            <Button
-              type="text" size="small" aria-label="清空日志"
-              icon={<Eraser size={14} />}
-              onClick={onClear}
-            />
-          </span>
-        </div>
+      onClear={onClear}
+      waiting={waiting}
+      title="标注日志"
+      lines={lines}
+      warnCount={warnCount}
+      downloadName={`标注日志-${new Date().toISOString().slice(0, 10)}.txt`}
+      renderLine={(l) => <LogRow line={l} />}
+      serialize={(ls) => ls.map((l) => noteText(l)).join('\n')}
+      // 「上一轮变化」是标签页特有区块,壳用 top 插槽放在滚动区之前(位置与样式照原样)
+      top={
+        changes && changes.length > 0 ? (
+          <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--rule)', flex: 'none' }}>
+            <div className="hud-label" style={{ marginBottom: 6, color: 'var(--accent)' }}>上一轮变化</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 'var(--fs-12)', maxHeight: 180, overflowY: 'auto' }}>
+              {changes.map((c, i) => (
+                <div key={i} style={{ display: 'flex', gap: 8 }}>
+                  <span style={{ color: c.kind === 'merge' ? 'var(--ok)' : 'var(--accent)', flex: 'none' }}>
+                    {c.kind === 'merge' ? '→' : '↑'}
+                  </span>
+                  <span>{c.from}{c.to ? ` → ${c.to}` : ''}</span>
+                  <span style={{ color: 'var(--text-dim)' }}>{c.detail}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : undefined
       }
-    >
-      {changes && changes.length > 0 && (
-        <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--rule)', flex: 'none' }}>
-          <div className="hud-label" style={{ marginBottom: 6, color: 'var(--accent)' }}>上一轮变化</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 'var(--fs-12)', maxHeight: 180, overflowY: 'auto' }}>
-            {changes.map((c, i) => (
-              <div key={i} style={{ display: 'flex', gap: 8 }}>
-                <span style={{ color: c.kind === 'merge' ? 'var(--ok)' : 'var(--accent)', flex: 'none' }}>
-                  {c.kind === 'merge' ? '→' : '↑'}
-                </span>
-                <span>{c.from}{c.to ? ` → ${c.to}` : ''}</span>
-                <span style={{ color: 'var(--text-dim)' }}>{c.detail}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-      <div
-        ref={scrollRef}
-        onScroll={(e) => {
-          const el = e.currentTarget;
-          // 离底超过 40px 就算"用户在看更早的",停掉贴底
-          setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 40);
-        }}
-        style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '10px 14px' }}
-      >
-        {lines.length === 0 ? (
-          <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-dim)', fontSize: 'var(--fs-13)' }}>
-            {waiting
-              ? '任务在跑 —— 正在等模型返回第一批结果……(批量越大等得越久,不是卡死)'
-              : '还没跑过标注 —— 点上面的「AI 标注」,这里会出现每一步'}
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 'var(--fs-12)', lineHeight: 1.6 }}>
-            {hidden > 0 && (
-              // 渲染封顶(§9D.7 ③)的那条线 —— 告诉读者上面还有更早的,
-              // 不然他会以为日志从"这里"开始
-              <div style={{ padding: '4px 0', color: 'var(--text-dim)' }}>
-                还有 <span className="num">{hidden.toLocaleString()}</span> 条更早的
-              </div>
-            )}
-            {visible.map((l, i) => <LogRow key={i} line={l} />)}
-          </div>
-        )}
-      </div>
-    </Drawer>
+    />
   );
+}
+
+/** 把 TagLogLine 压成一行文本 —— 下载 .txt 用(渲染走 LogRow,格式两边一致) */
+function noteText(l: TagLogLine): string {
+  switch (l.type) {
+    case 'phase':
+      return `—— ${l.phase === 'tag' ? '打标' : '质检'} ${l.model} ——`;
+    case 'item':
+      return `[${l.id}] ${l.title}: ${[...l.domains, ...l.tags].join(' / ')}`;
+    case 'verdict':
+      return `质检「${l.name}」${actionText(l)}${l.reason ? ` ${l.reason}` : ''}`;
+    case 'note':
+      return `[${l.level === 'warn' ? 'warn' : 'info'}] ${l.text}`;
+  }
 }
 
 function LogRow({ line }: { line: TagLogLine }) {

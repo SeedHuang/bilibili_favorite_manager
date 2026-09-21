@@ -16,7 +16,7 @@ import { ensureTag, linkItemTag, normalizeTagName, setTagParent } from '../db/re
 import { complete } from '../llm/provider.js';
 import { parseJsonArray } from './parse.js';
 import type { ModelConfig } from '../llm/provider.js';
-import { TAG_BATCH_CAP, type ChatMessage } from '../llm/context.js';
+import { type ChatMessage } from '../llm/context.js';
 import type { ModelMeta } from '../llm/registry.js';
 
 /** kind 受控枚举(spec C3)—— 实测不受控会同义词泛滥("教程/教学/学习") */
@@ -173,6 +173,12 @@ export async function runTagging(opts: {
   onNote?: (level: 'info' | 'warn', text: string) => void;
   signal?: AbortSignal;
   db: Database.Database;
+  /**
+   * 批上限(来自 settings,spec 2026-09-20 §2)。**传算好的数不传 db** ——
+   * 这个函数该是纯计算,读设置是调用方(tagRoutes)的事。缺省回落 16,
+   * 与 state.ts DEFAULTS.tag.batch 同源同义。
+   */
+  cap?: number;
 }): Promise<{
   tagged: number;
   failedBatches: { firstItemId: string; size: number; reason: string }[];
@@ -234,9 +240,11 @@ export async function runTagging(opts: {
   };
 
   // 批大小:标注的输出很小(每条 ~30 token),输入才是瓶颈 —— 按 ctx 窗口算,
-  // 但受 `TAG_BATCH_CAP` 硬上限约束(llm/context.ts 的公共配置,用户定成 5)。
-  // 模型偶尔漏条由下面那两轮补轮兜底,所以切小只多花轮次、不会漏标。
-  const size = Math.max(1, Math.min(TAG_BATCH_CAP, Math.floor((opts.ctx.contextWindow - 1500) / 250)));
+  // 上限来自设置(spec 2026-09-20 §2):用户设的值 = 最多一批多少条,
+  // 设置放大不动动态公式,只松紧上限。模型偶尔漏条由下面那两轮补轮兜底,
+  // 所以切小只多花轮次、不会漏标。
+  const cap = opts.cap ?? 16;
+  const size = Math.max(1, Math.min(cap, Math.floor((opts.ctx.contextWindow - 1500) / 250)));
   for (let i = 0; i < opts.items.length; i += size) {
     if (opts.signal?.aborted) break; // §9D B2:发起新调用前先看信号
     const batch = opts.items.slice(i, i + size);

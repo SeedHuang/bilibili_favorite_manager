@@ -134,18 +134,42 @@ export function validateFolders(raw: unknown, ctx: FolderCtx): ValidFolder[] {
 export const GENERATE_TIMEOUT_MS = 300_000;
 
 /**
+ * 模块级运行态(照 tagRoutes currentRun 模式):logs 绑当前 run,重启清空。
+ * status 落库,logs 不落库(刷新丢,spec 规则 7)—— 进度轮询从 current 接口一拉就有。
+ */
+export const proposalRun = {
+  running: false,
+  logs: [] as { ts: number; level: 'info' | 'warn' | 'error'; text: string }[],
+};
+const pushLog = (level: 'info' | 'warn' | 'error', text: string) => {
+  proposalRun.logs.push({ ts: Date.now(), level, text });
+};
+
+/**
  * 一轮生成。**先落 generating 再干活**(刷新/断线状态不丢),错误回 idle。
  * 裁判顺序:validateFolders(结构)→ matchAll 实跑(命中 0 丢)→ 偏弱对账。
+ * 关键节点同时写 pushLog(内存,给进度抽屉)和 log.event(落库,给 TagLogDrawer)——
+ * 两者并行不替代:内存的会丢,落库的看不见进行中。
  */
-export async function runGeneration(db: Database.Database, log: Logger, level: number): Promise<void> {
-  const llm = readLlmSettings(db, 'rules');
-  if (!llm) { // 路由已拦,这里兜底(异步路径里没人接 400)
-    log.event({ level: 'error', category: 'llm', code: 'PROPOSAL_NO_LLM', message: '生成方案时模型配置消失' });
-    return;
-  }
-  startProposal(db, level);
+export async function runGeneration(
+  db: Database.Database, log: Logger, level: number,
+  opts: { signal?: AbortSignal } = {},
+): Promise<void> {
+  proposalRun.running = true;
+  proposalRun.logs = [];
+  pushLog('info', `开始生成方案(档位 L${level})`);
+  // try 从 readLlmSettings 就包住:running 置位后任何一步抛错都得走 finally 复位,
+  // 不然卡"生成中"是死状态(下面 catch 的注释同因)
   try {
+    const llm = readLlmSettings(db, 'proposals');
+    if (!llm) { // 路由已拦,这里兜底(异步路径里没人接 400)
+      log.event({ level: 'error', category: 'llm', code: 'PROPOSAL_NO_LLM', message: '生成方案时模型配置消失' });
+      pushLog('error', '生成方案时模型配置消失');
+      return;
+    }
+    startProposal(db, level);
     const inputs = gatherInputs(db, level);
+    pushLog('info', `备料完成:${inputs.tagCount} 词,${inputs.pairCount} 共现对`);
     const prompt = buildPrompt({ ...inputs, level });
     const raw = await complete({
       config: llm.config,
@@ -155,6 +179,9 @@ export async function runGeneration(db: Database.Database, log: Logger, level: n
       ],
       thinking: false,
       timeoutMs: GENERATE_TIMEOUT_MS,
+      // 中止透传:provider 的 complete 已支持(tagRoutes 同款条件展开),
+      // 没有信号时整个键不出现,请求形状与加开关前逐字一致
+      ...(opts.signal ? { abortSignal: opts.signal } : {}),
     });
 
     // 结构裁判:knownNames = 现有工作夹子名 + 词表里同名也当重名(防 AI 起名和词重)
@@ -183,7 +210,9 @@ export async function runGeneration(db: Database.Database, log: Logger, level: n
         probe, { subtree },
       );
       if (matched.size === 0) {
-        log.event({ level: 'info', category: 'llm', code: 'PROPOSAL_DRAFT_DROPPED', message: `「${f.name}」命中 0 条,丢弃` });
+        const message = `「${f.name}」命中 0 条,丢弃`;
+        log.event({ level: 'info', category: 'llm', code: 'PROPOSAL_DRAFT_DROPPED', message });
+        pushLog('info', message);
         continue;
       }
       // 数据裁判:声称收编的词压着 N 条,关键词规则却捞不到 → 偏弱
@@ -195,11 +224,23 @@ export async function runGeneration(db: Database.Database, log: Logger, level: n
 
     if (drafts.length === 0) throw new Error('AI 的方案没一个草稿活下来 —— 换个档位或模型再试');
     saveDrafts(db, level, uncoveredCount, drafts);
-    log.event({ level: 'info', category: 'llm', code: 'PROPOSAL_READY', message: `方案就绪:${drafts.length} 个草稿夹子` });
+    const readyMessage = `方案就绪:${drafts.length} 个草稿夹子`;
+    log.event({ level: 'info', category: 'llm', code: 'PROPOSAL_READY', message: readyMessage });
+    pushLog('info', readyMessage);
   } catch (e) {
+    // 中止不是故障:记 warn 并明说草稿不保留(草稿在 startProposal 已清,重申一遍防误解)
+    if (opts.signal?.aborted) {
+      const abortedMessage = '已中止 —— 已生成的草稿不保留';
+      pushLog('warn', abortedMessage);
+      log.event({ level: 'warn', category: 'llm', code: 'PROPOSAL_ABORTED', message: abortedMessage });
+    } else {
+      log.event({ level: 'error', category: 'llm', code: 'PROPOSAL_FAILED', message: (e as Error)?.message ?? String(e) });
+      pushLog('error', (e as Error)?.message ?? String(e));
+    }
     // 回 idle 而不是留 generating —— 卡在"生成中"是死状态
     db.prepare(`UPDATE folder_proposals SET status = 'idle' WHERE id = 1`).run();
-    log.event({ level: 'error', category: 'llm', code: 'PROPOSAL_FAILED', message: (e as Error)?.message ?? String(e) });
+  } finally {
+    proposalRun.running = false;
   }
 }
 

@@ -1,18 +1,21 @@
 import { useCallback, useEffect, useState } from 'react';
 import { App as AntApp, Button, Select, Tooltip } from 'antd';
-import { Bot, Check, ChevronDown, ChevronRight, Pencil, Plus, Sparkles, Trash2, X, Zap } from 'lucide-react';
+import { Bot, Check, ChevronDown, ChevronRight, Pencil, Plus, ScrollText, Sparkles, Square, Trash2, X, Zap } from 'lucide-react';
 import { proposalsApi, rulesApi, tagApi } from '../api';
 import type {
   DryRun,
   ProposalDraftView,
   ProposalInfo,
+  ProposalLogLine,
   RuleCondition,
   RuleField,
   RuleSuggestion,
   RuleView,
   TagNode,
 } from '../types';
+import { useTaskProgress } from '../hooks/useTaskProgress';
 import { useAssistant } from './assistant';
+import TaskLogDrawer from './TaskLogDrawer';
 
 /**
  * 规则管理器(spec §9C.4)。
@@ -93,13 +96,20 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
   const [drafts, setDrafts] = useState<ProposalDraftView[]>([]);
   const [genLevel, setGenLevel] = useState(5);
   const [generating, setGenerating] = useState(false);
+  /** 日志存独立 state 而不是从轮询结果读 —— hook 在 generating=false 后不再拉,
+      中止后的「已中止」行要靠 actProposal 那次手动 load 送进来;
+      组件重挂载时初次 load 也能把服务端还留着的上一轮日志带回来 */
+  const [logLines, setLogLines] = useState<ProposalLogLine[]>([]);
+  const [logOpen, setLogOpen] = useState(false);
 
+  /** current 的**唯一**写入通道:初次加载、actProposal、轮询 hook 全走它 ——
+      generating 从 cur.proposal.status 派生(原有语义),logs 在 proposal 字段外层(Task 1 形状) */
   const loadProposal = useCallback(async () => {
     const cur = await proposalsApi.current();
     setProposal(cur.proposal);
     setDrafts(cur.drafts);
+    setLogLines(cur.logs ?? []);
     setGenerating(cur.proposal?.status === 'generating');
-    return cur.proposal?.status;
   }, []);
 
   useEffect(() => { void loadProposal().catch((e) => setError((e as Error).message)); }, [loadProposal]);
@@ -112,16 +122,13 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
   const actProposal = (fn: () => Promise<unknown>) =>
     act(async () => { await fn(); await loadProposal(); });
 
-  // 轮询:generating 时每 3s;照 tags 那套,不搞 SSE
-  useEffect(() => {
-    if (!generating) return;
-    const t = setInterval(() => {
-      void loadProposal()
-        .then((s) => { if (s && s !== 'generating') setGenerating(false); })
-        .catch(() => {}); // 轮询失败静默,下一轮再试
-    }, 3000);
-    return () => clearInterval(t);
-  }, [generating, loadProposal]);
+  /** 需要留意的行数(warn+error)—— 徽标、标题计数、抽屉 warnCount 三处一个口径 */
+  const alertCount = logLines.filter((l) => l.level !== 'info').length;
+
+  // 轮询:generating 时按设置间隔(spec §3 可配),不再手工 setInterval。
+  // fetcher 用 loadProposal 而不是裸 current:四样数据(proposal/drafts/logs/generating)
+  // 从同一条路落 state,轮询和手动刷新不会各写一份
+  useTaskProgress({ taskType: 'proposals', fetcher: loadProposal, enabled: generating });
 
   const generate = () => {
     modal.confirm({
@@ -279,9 +286,33 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
           <span style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
             {LEVEL_NAMES[genLevel - 1].hint} · 数字越大分得越粗
           </span>
+          {/* 日志按钮照 TagPanel 的写法(ScrollText 小按钮);日志是内存态,
+              生成结束后仍可点开看上一轮 —— 所以不绑 generating */}
+          <Button
+            size="small" icon={<ScrollText size={13} />}
+            style={{ marginLeft: 'auto' }}
+            onClick={() => setLogOpen(true)}
+          >
+            日志
+            {alertCount > 0 && (
+              <span className="num" style={{ color: 'var(--warn)', marginLeft: 4 }}>
+                {alertCount}
+              </span>
+            )}
+          </Button>
+          {/* 生成中才有得中止 —— 后端未在跑时 abort 回 409(没有正在进行的生成) */}
+          {generating && (
+            <Button
+              size="small" danger icon={<Square size={12} />}
+              disabled={busy}
+              onClick={() => actProposal(async () => { await proposalsApi.abort(); })}
+            >
+              中止
+            </Button>
+          )}
           <Button
             size="small" type="primary" icon={<Sparkles size={13} />}
-            loading={generating} disabled={busy} style={{ marginLeft: 'auto' }}
+            loading={generating} disabled={busy}
             onClick={generate}
           >
             {generating ? '生成中…' : '生成方案'}
@@ -617,6 +648,29 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
         规则命中的条目会<span style={{ color: 'var(--accent)' }}> 0 token 直接归位</span>,
         剩下的才交给 AI。一条条目可以同时命中多个夹子 —— 那就都归(B站 本来也允许)。
       </div>
+
+      {/* 方案生成日志(spec 2026-09-20 规则 4)。lines 读独立 state:生成结束后
+          hook 停了,state 里还留着最后一拍 —— 中止后那次手动 load 也会刷新它。
+          「清空」只清前端视图:日志在服务端是内存态,下次启动 run 自动清 */}
+      <TaskLogDrawer
+        open={logOpen} onClose={() => setLogOpen(false)}
+        onClear={() => setLogLines([])}
+        title="方案生成日志"
+        lines={logLines}
+        renderLine={(l) => (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
+            {/* error 和 warn 同样要扎眼 —— 失败生成如果是暗点就没人看见 */}
+            <span style={{ color: l.level === 'info' ? 'var(--text-dim)' : 'var(--warn)', flex: 'none' }}>
+              {l.level === 'info' ? '·' : '⚠'}
+            </span>
+            <span style={{ color: l.level === 'info' ? 'var(--text-dim)' : 'var(--warn)' }}>{l.text}</span>
+          </div>
+        )}
+        serialize={(ls) => ls.map((l) => `${new Date(l.ts).toLocaleTimeString()} [${l.level}] ${l.text}`).join('\n')}
+        downloadName={`方案生成-${new Date().toISOString().slice(0, 10)}.txt`}
+        warnCount={alertCount}
+        waiting={generating && logLines.length === 0}
+      />
     </div>
   );
 }

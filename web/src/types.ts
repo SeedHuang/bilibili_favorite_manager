@@ -137,7 +137,8 @@ export interface EntryView {
   note?: string;
 }
 
-export type LlmPurpose = 'chat' | 'classify' | 'rules' | 'tag' | 'tagcheck';
+// proposals 已进 purpose 联合(设置页方案生成行要模型下拉;server 侧 Plan C 才认)
+export type LlmPurpose = 'chat' | 'classify' | 'rules' | 'tag' | 'tagcheck' | 'proposals';
 
 export interface AssignmentsView {
   assignments: Record<LlmPurpose, string | null>;
@@ -451,6 +452,9 @@ export interface FolderProfile {
 }
 
 // ── 夹子方案生成 ─────────────────────────────────────────
+/** 一条生成日志 —— 和 server 侧 proposalRun.logs 同形;内存态,重启 run 自动清 */
+export interface ProposalLogLine { ts: number; level: 'info' | 'warn' | 'error'; text: string }
+
 export interface ProposalInfo {
   level: number | null;
   uncoveredCount: number;
@@ -469,3 +473,7 @@ export interface ProposalDraftView {
   adoptedFolderId: number | null;
   sampleTitles: string[];
 }
+
+// ── 批次任务三件套设置(spec 2026-09-20 §3)──────────────
+export type PollConfig = { intervalMs: number; batch: number | null };
+export type PollsMap = Record<string, PollConfig>;

@@ -3,6 +3,7 @@ import { openDb } from '../index.js';
 import {
   getState, setState, deleteState,
   getSetting, setSetting, listSettingKeys,
+  readPoll, writePoll, listPolls,
 } from './state.js';
 
 describe('sync_state', () => {
@@ -44,5 +45,42 @@ describe('settings', () => {
     setSetting(db, 'bili.sessdata', 'SECRET');
     setSetting(db, 'llm.model', 'qwen3:8b');
     expect(listSettingKeys(db).sort()).toEqual(['bili.sessdata', 'llm.model']);
+  });
+});
+
+describe('polls 配置', () => {
+  it('缺 key 时兜底默认值', () => {
+    const db = openDb(':memory:');
+    expect(readPoll(db, 'tag')).toEqual({ intervalMs: 2000, batch: 16 });
+    expect(readPoll(db, 'tagcheck')).toEqual({ intervalMs: 3000, batch: 200 });
+    expect(readPoll(db, 'proposals')).toEqual({ intervalMs: 3000, batch: null });
+  });
+
+  it('writePoll 后读回新值', () => {
+    const db = openDb(':memory:');
+    writePoll(db, 'tag', { intervalMs: 5000, batch: 50 });
+    expect(readPoll(db, 'tag')).toEqual({ intervalMs: 5000, batch: 50 });
+  });
+
+  it('库里的非法值兜底(手改库场景)', () => {
+    const db = openDb(':memory:');
+    setSetting(db, 'poll.tag.interval_ms', '99999');
+    setSetting(db, 'poll.tag.batch', 'abc');
+    expect(readPoll(db, 'tag')).toEqual({ intervalMs: 2000, batch: 16 });
+  });
+
+  it('listPolls 返回全部白名单任务', () => {
+    const db = openDb(':memory:');
+    expect(listPolls(db)).toEqual({
+      tag: { intervalMs: 2000, batch: 16 },
+      tagcheck: { intervalMs: 3000, batch: 200 },
+      proposals: { intervalMs: 3000, batch: null },
+    });
+  });
+
+  it('未知 taskType:readPoll 兜底不抛,writePoll 抛', () => {
+    const db = openDb(':memory:');
+    expect(readPoll(db, 'nope')).toEqual({ intervalMs: 2000, batch: 16 });
+    expect(() => writePoll(db, 'nope', { intervalMs: 2000, batch: 16 })).toThrow();
   });
 });

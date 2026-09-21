@@ -6,6 +6,7 @@ import { createServer } from '../http/index.js';
 import { upsertItem } from '../db/repo/items.js';
 import { ensureTag, linkItemTag } from '../db/repo/tags.js';
 import { seedLlm } from '../llm/config.js';
+import { proposalRun } from './proposal.js';
 import type { BiliClient } from '../bilibili/client.js';
 
 const mocks = vi.hoisted(() => ({ complete: vi.fn() }));
@@ -39,7 +40,13 @@ const aiOut = (nbaId: number) => JSON.stringify([
 ]);
 
 describe('方案路由', () => {
-  beforeEach(() => { mocks.complete.mockReset(); });
+  beforeEach(() => {
+    mocks.complete.mockReset();
+    // proposalRun 是模块级内存态 —— 「再点 → 409」用例的挂起 promise 永不 settle,
+    // running 会钉在 true 泄漏到下一个用例,这里手动复位
+    proposalRun.running = false;
+    proposalRun.logs = [];
+  });
 
   it('没配模型 → 400', async () => {
     const { app, db } = makeApp();
@@ -144,5 +151,42 @@ describe('方案路由', () => {
     await new Promise((r) => setTimeout(r, 20));
     const cur = (await app.inject({ url: '/api/proposals/current' })).json();
     expect(cur.proposal.status).toBe('idle');
+  });
+
+  it('current 在生成后带 logs,abort 能停止挂起的生成', async () => {
+    const { app } = makeApp();
+    // 挂起的模型调用:complete 收到 abortSignal 且信号已中止 → reject(和真 AbortError 同形)。
+    // 裁决:mock 不需要模拟真中断,reject 走失败路径即可
+    mocks.complete.mockImplementation(
+      async ({ abortSignal }: { abortSignal?: AbortSignal }) => {
+        if (abortSignal && !abortSignal.aborted) {
+          await new Promise<void>((resolve) =>
+            abortSignal.addEventListener('abort', () => resolve(), { once: true }),
+          );
+        }
+        throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+      },
+    );
+    await app.inject({ method: 'POST', url: '/api/proposals/generate', payload: { level: 3 } });
+    await new Promise((r) => setTimeout(r, 20));
+
+    let cur = (await app.inject({ url: '/api/proposals/current' })).json();
+    expect(cur.proposal.status).toBe('generating');
+    expect(Array.isArray(cur.logs)).toBe(true);
+    expect(cur.logs.some((l: { text: string }) => l.text.includes('生成'))).toBe(true);
+
+    const ab = await app.inject({ method: 'POST', url: '/api/proposals/abort' });
+    expect(ab.statusCode).toBe(200);
+    // abort 后:模型 promise 被 reject,runGeneration 走失败路径回 idle
+    await new Promise((r) => setTimeout(r, 20));
+    cur = (await app.inject({ url: '/api/proposals/current' })).json();
+    expect(cur.proposal.status).toBe('idle');
+    expect(cur.logs.some((l: { text: string }) => l.text.includes('中止'))).toBe(true);
+  });
+
+  it('未在跑时 abort → 409', async () => {
+    const { app } = makeApp();
+    const res = await app.inject({ method: 'POST', url: '/api/proposals/abort' });
+    expect(res.statusCode).toBe(409);
   });
 });

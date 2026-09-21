@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, App as AntApp, Button, Input, Progress, Radio, Select, Spin } from 'antd';
 import { Combine, Pencil, Check, Square, Tag, X, Trash2, ScrollText, RefreshCw, Eraser, ScanSearch } from 'lucide-react';
 import { useRequest, useSearchParams } from '@umijs/max';
-import { rawResult, tagApi } from '../api';
+import { rawResult, settingsApi, tagApi } from '../api';
 import type { Item, TagCheckProgressPayload, TagLogLine, TagNode, TagProgressPayload, TagRunStatus } from '../types';
 import TagTree from './TagTree';
 import TagLogDrawer from './TagLogDrawer';
@@ -62,6 +62,20 @@ export default function TagPanel() {
   /** 当前活动轮询的停止函数 —— runTag/质检/恢复三个入口共用,卸载时统一清理 */
   const stopPollingRef = useRef<(() => void) | null>(null);
 
+  // 任务三件套(spec §2):轮询间隔按任务可配,挂载时拉一次设置。
+  // ref 而不是 state:间隔只被 setTimeout 读,不该为它整页重渲染。
+  // 拉失败兜底 500ms 保持现节奏;配置返回的 tag/tagcheck 默认是 2000/3000ms
+  const tagIntervalRef = useRef(500);
+  const checkIntervalRef = useRef(500);
+  useEffect(() => {
+    settingsApi.getPolls()
+      .then((polls) => {
+        if (polls.tag) tagIntervalRef.current = polls.tag.intervalMs;
+        if (polls.tagcheck) checkIntervalRef.current = polls.tagcheck.intervalMs;
+      })
+      .catch(() => {}); // 拉不到照旧 500ms
+  }, []);
+
   // ── 标注日志(§9D.7)──────────────────────────────────
   // **缓冲区放在这一页,不在抽屉里**:关掉抽屉不能丢,而"关掉就没了"正是用户两次
   // 报过的那个错("跑完了,我不知道刚才发生了什么")的另一种形态。跑完仍可读,
@@ -70,7 +84,7 @@ export default function TagPanel() {
   const [logOpen, setLogOpen] = useState(false);
   /** 按钮角标要报的 warn 数 —— 失败不打开抽屉也要看得见 */
   const logWarn = logLines.filter((l) => l.type === 'note' && l.level === 'warn').length;
-  // 日志从 `run-progress` 轮询里全量取 —— 后端累积,前端 500ms 一拍替换 state,
+  // 日志从 `run-progress` 轮询里全量取 —— 后端累积,前端按配置的间隔一拍替换 state,
   // 天然就是合并写节奏(不需要 SSE 时代那套 ref + 100ms flush)。
 
   // **拉挂了必须出声**(和「规则」页那棵树的取法一致)。少了 onError,一次 500
@@ -144,13 +158,13 @@ export default function TagPanel() {
    * 开始轮询 `run-progress` 并驱动界面。**`runTag` 和"重进页面恢复"都走它**。
    *
    * 用 `setTimeout` 递归而不是 `setInterval`:上一拍还没回来就不发下一拍,
-   * 天然不会重叠(轮询慢于 500ms 时也稳定)。
+   * 天然不会重叠(轮询慢于配置的间隔时也稳定)。
    */
   const startPolling = useCallback(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
     // 请求在途时被停:timer 还是 null,clearTimeout 清不掉 —— 用 stopped 挡在
-    // 重排之前,否则这一拍回来照旧 setTimeout(tick, 500),轮询永远停不下来
+    // 重排之前,否则这一拍回来照旧 setTimeout(tick, 配置的间隔),轮询永远停不下来
     const stopTimer = () => { stopped = true; if (timer) clearTimeout(timer); };
 
     const tick = async () => {
@@ -159,8 +173,8 @@ export default function TagPanel() {
         if (stopped) return;
         setTagProgress({ done: p.done, total: p.total, tagged: p.tagged });
         lastTagProgress.current = { done: p.done, total: p.total, tagged: p.tagged };
-        // 日志从后端累积数组全量替换。**没新行就不 set** —— 否则 500ms 一拍整棵
-        // TagTree 跟着重渲染(后端 append-only,长度没变就是没变)
+        // 日志从后端累积数组全量替换。**没新行就不 set** —— 否则每一拍(配置的间隔)
+        // 整棵 TagTree 跟着重渲染(后端 append-only,长度没变就是没变)
         setLogLines((prev) => (prev.length === p.logs.length ? prev : p.logs));
 
         if (p.error) {
@@ -208,7 +222,7 @@ export default function TagPanel() {
         // 单次轮询失败不炸 —— 下一拍再试(后端瞬断不该让界面卡死在"标注中")
       }
       if (stopped) return;
-      timer = setTimeout(tick, 500);
+      timer = setTimeout(tick, tagIntervalRef.current);
     };
 
     void tick();
@@ -290,7 +304,7 @@ export default function TagPanel() {
   };
 
   /**
-   * 手动质检的轮询 —— 照 startPolling(标注)的结构:500ms 一拍、stopped 标志防
+   * 手动质检的轮询 —— 照 startPolling(标注)的结构:按配置的间隔一拍、stopped 标志防
    * 竞态、跑完刷树/变化/健康度。日志(verdict 带 reason)进同一个抽屉。
    */
   const startCheckPolling = useCallback(() => {
@@ -334,7 +348,7 @@ export default function TagPanel() {
         // 单次轮询失败不炸 —— 下一拍再试
       }
       if (stopped) return;
-      timer = setTimeout(tick, 500);
+      timer = setTimeout(tick, checkIntervalRef.current);
     };
 
     void tick();

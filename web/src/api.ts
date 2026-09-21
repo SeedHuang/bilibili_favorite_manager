@@ -14,6 +14,9 @@ import type {
   ProgressPayload,
   ProposalDraftView,
   ProposalInfo,
+  ProposalLogLine,
+  PollConfig,
+  PollsMap,
   ProviderView,
   RuleCondition,
   RuleSuggestion,
@@ -380,11 +383,25 @@ export const rulesApi = {
   suggest: () => json<{ suggestions: RuleSuggestion[] }>('POST', '/api/rules/suggest'),
 };
 
+// ── 批次任务三件套设置 ──────────────────────────────────
+
+export const settingsApi = {
+  getPolls: () => api<{ polls: PollsMap }>('/api/settings/polls').then((r) => r.polls),
+  setPoll: (taskType: string, cfg: PollConfig) =>
+    json<{ ok: true }>('PUT', `/api/settings/polls/${taskType}`, cfg),
+};
+
 // ── 夹子方案生成 ─────────────────────────────────────────
 
 export const proposalsApi = {
   generate: (level: number) => json<{ ok: true }>('POST', '/api/proposals/generate', { level }),
-  current: () => api<{ proposal: ProposalInfo | null; drafts: ProposalDraftView[] }>('/api/proposals/current'),
+  /** 未在跑时后端回 409(reason「没有正在进行的生成」)—— 调用方按 actProposal 既有错误处理显示 */
+  abort: () => json<{ ok: true }>('POST', '/api/proposals/abort'),
+  // logs 在外层、与 proposal/drafts 同级(Task 1 后端形状);内存态,status 变了 logs 也没了
+  current: () =>
+    api<{ proposal: ProposalInfo | null; drafts: ProposalDraftView[]; logs: ProposalLogLine[] }>(
+      '/api/proposals/current',
+    ),
   adopt: (draftId: number, name?: string) =>
     json<{ ok: true; folderId: number }>('POST', '/api/proposals/adopt', { draftId, name }),
   adoptAll: () => json<{ ok: true; results: { draftId: number; folderId: number }[] }>('POST', '/api/proposals/adopt-all'),
