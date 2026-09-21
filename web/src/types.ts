@@ -266,14 +266,6 @@ export interface RuleView {
   hit: number;
 }
 
-/** 试跑:规则能覆盖多少条、剩下多少要给 AI */
-export interface DryRun {
-  covered: number;
-  remaining: number;
-  /** 没配模型时是 null */
-  batches: number | null;
-}
-
 /**
  * 一条 AI 规则建议。**过了自证才有**(服务端会拿这组词去跑匹配验证)。
  * 建议不落库 —— 采纳才变成规则。

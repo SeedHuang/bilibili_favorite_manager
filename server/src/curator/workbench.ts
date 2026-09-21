@@ -48,6 +48,7 @@ export function renameFolder(
   ensureWorkcopy(db);
   const trimmed = name.trim();
   if (!trimmed) throw new Error('名字不能为空');
+  if ([...trimmed].length > 20) throw new Error('夹子名最长 20 个字(B 站限制)');
   assertNotLocked(db, folderId, '改名');
 
   const before = workFolderOrThrow(db, folderId);
@@ -72,6 +73,9 @@ export function createFolder(db: Database.Database, name: string, who: Actor = U
   ensureWorkcopy(db);
   const trimmed = name.trim();
   if (!trimmed) throw new Error('名字不能为空');
+  // B 站收藏夹名上限 20 字 —— 本地建超长的能建,但同步到 B 站会被拒;
+  // 在唯一的建夹子入口兜底(改名入口另查),让错误在最早一步暴露
+  if ([...trimmed].length > 20) throw new Error('夹子名最长 20 个字(B 站限制)');
 
   const r = db
     .prepare(`INSERT INTO work_folders (origin_id, name, created_at) VALUES (NULL, ?, ?)`)

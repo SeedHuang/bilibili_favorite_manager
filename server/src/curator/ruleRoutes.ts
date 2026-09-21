@@ -5,7 +5,7 @@
  * 谁进谁出全靠手。它只存在本地,不上传 B站。
  *
  * 单独一个文件:curator/routes.ts 已经 786 行,而规则这一页是独立的一件事
- * (整页 CRUD + 命中数 + 试跑),塞进去只会让那个文件过千行。
+ * (整页 CRUD + 命中数),塞进去只会让那个文件过千行。
  */
 import type { FastifyInstance } from 'fastify';
 import type Database from 'better-sqlite3';
@@ -17,10 +17,7 @@ import { listWorkFolders } from '../db/repo/workbench.js';
 import { listFolders, isLockedFolder } from '../db/repo/folders.js';
 import type { ItemRow } from '../db/repo/items.js';
 import { itemTagIds, subtreeSets } from '../db/repo/tags.js';
-import { readLlmSettings } from '../llm/config.js';
-import { batchSize } from '../llm/context.js';
 import { matchAll, toRuleItem, validateSuggestion } from './rules.js';
-import { runSuggestions, suggestionInput } from './suggestions.js';
 
 export interface RuleDeps {
   db: Database.Database;
@@ -189,53 +186,5 @@ export function registerRuleRoutes(app: FastifyInstance, deps: RuleDeps): void {
     const existing = getRule(db, folderId)?.conditions ?? [];
     saveRule(db, folderId, [...existing, { field: valid.field, any: valid.any }], 'ai');
     return { ok: true };
-  });
-
-  /**
-   * 面板上「让 AI 看看规则」——建议的**第二个来源**(spec §9C.5 c)。
-   *
-   * **不落库**:建议是个可重生的中间态,采纳即变成规则、忽略即消失。
-   * 为它加一张表不值得。
-   */
-  app.post('/api/rules/suggest', async (req, reply) => {
-    const llm = readLlmSettings(db, 'rules');
-    if (!llm) {
-      // 和 curator/routes.ts 的 requireLlm 同一句话 —— 用户看到的是同一个原因
-      return reply.code(400).send({
-        ok: false, reason: '还没配模型 —— 先去「授权」页的模型管理里选一个',
-      });
-    }
-
-    const { folders, pool, allItems } = suggestionInput(db);
-    try {
-      const suggestions = await runSuggestions({
-        config: llm.config,
-        folders,
-        pool,
-        // 这条路没有"哪些是 AI 说拿不准的"这个信息(没跑归类)—— 不传 homelessIds,
-        // 也就没有那道省钱闸。用户是**主动**点的这个按钮,他想看就看。
-        cap: batchSize(llm.ctx),
-        allItems,
-      });
-      return { suggestions };
-    } catch (e) {
-      const message = (e as Error)?.message ?? String(e);
-      deps.log.event({ level: 'error', category: 'llm', code: 'SUGGEST_FAILED', message });
-      return reply.code(502).send({ ok: false, reason: message });
-    }
-  });
-
-  /** 试跑:规则能覆盖多少条、剩下多少要给 AI、按当前模型算几批 */
-  app.post('/api/rules/dry-run', async () => {
-    const { matchedCount, total } = rulesWithHits();
-    const llm = readLlmSettings(db, 'rules');
-    const remaining = total - matchedCount;
-
-    return {
-      covered: matchedCount,
-      remaining,
-      // 没配模型就不报批数(null)—— 别编一个(spec §9C.4:批数用 §3 的 batchSize 现算)
-      batches: llm && remaining > 0 ? Math.ceil(remaining / batchSize(llm.ctx)) : null,
-    };
   });
 }

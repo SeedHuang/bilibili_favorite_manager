@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { App as AntApp, Button, Select, Tooltip } from 'antd';
-import { Bot, Check, ChevronDown, ChevronRight, Pencil, Plus, ScrollText, Sparkles, Square, Trash2, X, Zap } from 'lucide-react';
+import { Bot, Check, ChevronDown, ChevronRight, Pencil, Plus, ScrollText, Sparkles, Square, Trash2, X } from 'lucide-react';
 import { proposalsApi, rulesApi, tagApi } from '../api';
 import type {
-  DryRun,
   ProposalDraftView,
   ProposalInfo,
   ProposalLogLine,
@@ -77,7 +76,6 @@ const LEVEL_NAMES: { level: number; name: string; hint: string }[] = [
 export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: number | null }) {
   const { modal } = AntApp.useApp();
   const [rules, setRules] = useState<RuleView[]>([]);
-  const [dry, setDry] = useState<DryRun | null>(null);
   const [open, setOpen] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -88,9 +86,6 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
   // 那一次跑在全局对话框里、结果要落到这一页 —— 两边得看同一份。
   // 副作用是**忽略过的建议不会因为离开页面又回来而复活**:就一份列表,忽略即移出。
   const { suggestions, setSuggestions } = useAssistant();
-  const [suggesting, setSuggesting] = useState(false);
-  /** 调用**成功但没建议**时的一句话 —— 不然面板整个消失,看着像按钮没反应 */
-  const [suggestNote, setSuggestNote] = useState('');
 
   const [proposal, setProposal] = useState<ProposalInfo | null>(null);
   const [drafts, setDrafts] = useState<ProposalDraftView[]>([]);
@@ -106,6 +101,14 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
       generating 从 cur.proposal.status 派生(原有语义),logs 在 proposal 字段外层(Task 1 形状) */
   const loadProposal = useCallback(async () => {
     const cur = await proposalsApi.current();
+    // 这行是"页面为什么显示生成中"的第一现场 —— 状态、草稿、日志长度一起打,
+    // 看一眼就知道是后端真在跑、还是库里残留的状态(标注/质检路径的 [check-poll] 同款作用)
+    console.log('[proposals-ui] current →', JSON.stringify({
+      status: cur.proposal?.status ?? 'none',
+      level: cur.proposal?.level ?? null,
+      drafts: cur.drafts.length,
+      logs: cur.logs?.length ?? 0,
+    }));
     setProposal(cur.proposal);
     setDrafts(cur.drafts);
     setLogLines(cur.logs ?? []);
@@ -125,6 +128,14 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
   /** 需要留意的行数(warn+error)—— 徽标、标题计数、抽屉 warnCount 三处一个口径 */
   const alertCount = logLines.filter((l) => l.level !== 'info').length;
 
+  // 生成已耗时(秒)—— 长任务里"还在动吗"靠这个回答,不定态条只答"动没动"
+  const [genSeconds, setGenSeconds] = useState(0);
+  useEffect(() => {
+    if (!generating) { setGenSeconds(0); return; }
+    const t = setInterval(() => setGenSeconds((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [generating]);
+
   // 轮询:generating 时按设置间隔(spec §3 可配),不再手工 setInterval。
   // fetcher 用 loadProposal 而不是裸 current:四样数据(proposal/drafts/logs/generating)
   // 从同一条路落 state,轮询和手动刷新不会各写一份
@@ -137,13 +148,16 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
       okText: '生成', cancelText: '算了',
       onOk: async () => {
         setError('');
+        console.log(`[proposals-ui] 点了生成方案 档位 L${genLevel} —— 等后端受理`);
         try {
           await proposalsApi.generate(genLevel);
+          console.log('[proposals-ui] 后端已受理(202)—— 进入运行态,开始轮询');
           setGenerating(true);
           await loadProposal();
         } catch (e) {
           // 失败时弹窗关闭,错误落在页级红条 —— 和 TagPanel 的 confirmClearTags 同一惯例;
           // rethrow 保弹窗的话弹窗里没有错误文案,用户只能看到"卡住"的壳
+          console.log('[proposals-ui] 启动失败', String(e));
           setError((e as Error).message);
         }
       },
@@ -191,8 +205,6 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
       await fn();
       // 命中数每次重算 —— 那是调规则时唯一的反馈(§9C.4 规矩 1)
       await reload();
-      // 规则变了,上一次的试跑结果就过期了
-      setDry(null);
       return true;
     } catch (e) {
       setError((e as Error).message);
@@ -202,46 +214,8 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
     }
   };
 
-  /**
-   * 试跑**不走 `act()`** —— `act` 最后那下 `setDry(null)` 是给"规则变了,旧结果过期了"用的,
-   * 而试跑本身正是要**留下**结果。走 act 的话结果会被立刻清掉,按钮点了等于没点。
-   */
-  const runDryRun = async () => {
-    setError('');
-    setBusy(true);
-    try {
-      setDry(await rulesApi.dryRun());
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const setConditions = (folderId: number, conditions: RuleCondition[]) =>
     act(() => rulesApi.save(folderId, conditions));
-
-  /** 让 AI 看看规则。不走 act() —— 它不该清掉试跑结果,也不该重算命中数 */
-  const askAi = async () => {
-    setError('');
-    setSuggestNote('');
-    setSuggesting(true);
-    try {
-      const got = (await rulesApi.suggest()).suggestions;
-      setSuggestions(got);
-      // **调用成功但一条都没有 —— 这也是信息。** 不说的话面板整个消失,用户看到的是
-      // "点了没反应",而他刚为此等了几十秒(真机踩过:模型提了 54 条全没过自证)。
-      // 服务端那条"用不了"的路已经改成抛错(会走上面的 error 分支),所以走到这里的
-      // 只有一种情况:模型确实没提出建议。
-      if (got.length === 0) {
-        setSuggestNote('AI 这次没提出建议 —— 可以再点一次,或先手写几条规则。');
-      }
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setSuggesting(false);
-    }
-  };
 
   const dropSuggestion = (s: RuleSuggestion) =>
     setSuggestions((list) =>
@@ -300,28 +274,44 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
               </span>
             )}
           </Button>
-          {/* 生成中才有得中止 —— 后端未在跑时 abort 回 409(没有正在进行的生成) */}
-          {generating && (
+          {/* 一颗按钮两个状态(spec 规则 3 + skill:按钮恒名只表明任务)——
+              空闲「生成方案」/ 运行「中止」,不并排两颗 */}
+          {generating ? (
             <Button
               size="small" danger icon={<Square size={12} />}
               disabled={busy}
-              onClick={() => actProposal(async () => { await proposalsApi.abort(); })}
+              onClick={() => {
+                console.log('[proposals-ui] 点了中止 —— 等后端回执');
+                void actProposal(async () => { await proposalsApi.abort(); });
+              }}
             >
               中止
             </Button>
+          ) : (
+            <Button
+              size="small" type="primary" icon={<Sparkles size={13} />}
+              disabled={busy}
+              onClick={generate}
+            >
+              生成方案
+            </Button>
           )}
-          <Button
-            size="small" type="primary" icon={<Sparkles size={13} />}
-            loading={generating} disabled={busy}
-            onClick={generate}
-          >
-            {generating ? '生成中…' : '生成方案'}
-          </Button>
         </div>
+        {/* 生成中的进度:**不定态**流动条 + 已耗时 —— 单次 LLM 调用没有 done/total,
+            编百分比是假信息;"还在动 + 动了多久"才是这里能诚实回答的
+            (spec §2 规则 1 的进度条,无批次语义的任务取不定态) */}
+        {generating && (
+          <div style={{ marginTop: 8 }}>
+            <div className="bfm-indeterminate" />
+            <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)', marginTop: 4 }}>
+              生成中 · 已 <span className="num">{genSeconds}</span> 秒 —— 过程看「日志」
+            </div>
+          </div>
+        )}
         {proposal?.status === 'ready' && (
           <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)', marginTop: 6 }}>
-            方案({proposal.level} 档) · {drafts.filter((d) => d.status === 'pending').length} 个待审
-            · 未挂词条目 {proposal.uncoveredCount} 条不参与
+            方案({proposal.level} 档) · {drafts.filter((d) => d.status === 'pending').length.toLocaleString()} 个待审
+            · 未挂词条目 {proposal.uncoveredCount.toLocaleString()} 条不参与
             {drafts.some((d) => d.status === 'pending') && (
               <Button size="small" type="link" disabled={busy}
                 onClick={() => actProposal(() => proposalsApi.adoptAll())}>
@@ -332,8 +322,10 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
         )}
       </div>
 
-      {/* ── AI 的建议:置顶且单独一栏 —— 它是"待你处理"的东西(§9C.4 规矩 2)── */}
-      {(suggestions.length > 0 || suggesting || suggestNote) && (
+      {/* ── AI 的建议:置顶且单独一栏 —— 它是"待你处理"的东西(§9C.4 规矩 2)──
+          唯一来源是**归类跑完顺手给的那批**(那一次跑在全局对话框里,结果落到这一页);
+          面板上主动要建议的按钮已删 —— 那一路与「夹子方案生成」重叠且没实测价值 */}
+      {suggestions.length > 0 && (
         <div className="hud-panel" style={{ padding: 12, borderColor: 'var(--ai)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
             <Bot size={14} style={{ color: 'var(--ai)' }} />
@@ -357,12 +349,6 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
               </Button>
             )}
           </div>
-
-          {suggestions.length === 0 && (
-            <div style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
-              {suggestNote || 'AI 正在看……'}
-            </div>
-          )}
 
           {suggestions.map((s) => {
             const name = rules.find((r) => r.folderId === s.folderId)?.folderName ?? `夹子 ${s.folderId}`;
@@ -434,36 +420,8 @@ export default function RulesPanel({ focusFolderId = null }: { focusFolderId?: n
             >
               新增规则
             </Button>
-            <Button
-              size="small"
-              icon={<Bot size={13} />}
-              loading={suggesting}
-              disabled={!rules.length || busy}
-              onClick={() => void askAi()}
-            >
-              让 AI 看看规则
-            </Button>
-            <Button
-              size="small"
-              icon={<Zap size={13} />}
-              loading={busy}
-              onClick={() => void runDryRun()}
-            >
-              试跑:规则 vs AI
-            </Button>
           </span>
         </div>
-
-        {dry && (
-          <div
-            className="hud-panel"
-            style={{ padding: '6px 10px', marginBottom: 10, fontSize: 'var(--fs-12)', borderColor: 'var(--accent)' }}
-          >
-            规则覆盖 <span className="num" style={{ color: 'var(--accent)' }}>{dry.covered.toLocaleString()}</span> 条
-            · 剩 <span className="num">{dry.remaining.toLocaleString()}</span> 条要交给 AI
-            {dry.batches !== null && <> · 约 <span className="num">{dry.batches}</span> 批</>}
-          </div>
-        )}
 
         {/* 表头 —— 密集行 + 发丝线,数据工具该长得像表格(§11:不用卡片装列表) */}
         <div style={{ display: 'flex', gap: 10, padding: '0 4px 6px', borderBottom: '1px solid var(--rule)' }}>

@@ -138,6 +138,12 @@ export async function complete(opts: {
    * 是打断,不是超时)。
    */
   timeoutMs?: number;
+  /**
+   * 输出上限(token)。**不传 = 厂商默认**(通常 4096~8192)—— 对"一次吐整套方案"
+   * 这种长输出就是硬天花板,超了直接 `finishReason=length` 把 JSON 截断,
+   * 而截断的 JSON 解析必失败。调用方从注册表的 `maxOutput` 传(deepseek-flash 是 384K)。
+   */
+  maxOutputTokens?: number;
 }): Promise<string> {
   const { instructions, rest } = splitPrompt(opts.messages);
   // 超时与用户中止**合成一个 signal**:AI SDK 只认一个 abortSignal。超时 abort 时
@@ -167,6 +173,8 @@ export async function complete(opts: {
       model: languageModel(opts.config),
       ...(instructions ? { instructions } : {}),
       messages: rest,
+      // 不传就是厂商默认(常常只有 8192)—— 长输出任务必须显式给上限,否则被静默截断
+      ...(opts.maxOutputTokens ? { maxOutputTokens: opts.maxOutputTokens } : {}),
       // `@ai-sdk/deepseek` 原生认这个键(3.0.44:`providerOptions.deepseek.thinking.type`,
       // 缺省 `enabled`)。**判 undefined,而不是给个默认值** —— 缺省的语义是
       // "这个参数一个字都不出现",聊天那条路的请求因此和加开关之前逐字一致
@@ -177,7 +185,7 @@ export async function complete(opts: {
       // "钱花了、结果没人接"。AI SDK 原生接受 signal,透传即可
       ...(signal ? { abortSignal: signal } : {}),
     });
-    const { text } = opts.timeoutMs === undefined
+    const res = opts.timeoutMs === undefined
       ? await call
       : await Promise.race([
           call,
@@ -191,7 +199,17 @@ export async function complete(opts: {
             );
           }),
         ]);
-    return text;
+    // **原始返回必须可见** —— 一处打全,三条批量路径(标注/质检/方案)都受益。
+    // 实测代价:以前只打"长度"甚至什么都不打,于是"模型到底回了什么"无从查证;
+    // 而「空返回」(正文全进推理 / 网关吞了内容)、「被输出上限截断」(JSON 断尾)、
+    // 「回了散文不是 JSON」三种失败在只打长度时长得一模一样。
+    // 一行说清三件事:多长、为什么停、是不是空的;带 120 字符预览判格式。
+    const preview = res.text.replace(/\s+/g, ' ').trim().slice(0, 120);
+    console.log(`[llm] ${opts.config.model} 返回 ${res.text.length} 字符`
+      + ` finish=${res.finishReason} 输出token=${res.usage.outputTokens ?? '?'}`
+      + (res.reasoningText ? ` 推理${res.reasoningText.length}字符` : '')
+      + (preview ? ` | ${preview}${res.text.length > 120 ? '…' : ''}` : ' | **空返回**'));
+    return res.text;
   } finally {
     if (timer) clearTimeout(timer);
     if (raceTimer) clearTimeout(raceTimer);

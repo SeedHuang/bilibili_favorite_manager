@@ -189,4 +189,25 @@ describe('方案路由', () => {
     const res = await app.inject({ method: 'POST', url: '/api/proposals/abort' });
     expect(res.statusCode).toBe(409);
   });
+
+  it('启动即复位僵尸态:库里 generating 但内存没跑,注册路由后回 idle', async () => {
+    // 模拟"上一进程跑到一半被杀":库里钉着 generating,内存里没有对应的 run。
+    // 注册路由(≈进程启动)就该把它复位 —— 不然页面一进来显示"生成中 + 中止",
+    // 点中止还会得到 409(真机上出现过)
+    const db = openDb(':memory:');
+    const log = new Logger(db, { silent: true });
+    seedLlm(db);
+    db.prepare(
+      `INSERT INTO folder_proposals (id, level, status, created_at) VALUES (1, 5, 'generating', ?)`,
+    ).run(Date.now());
+
+    const app = createServer({ db, log, client: stubClient });
+    const cur = (await app.inject({ url: '/api/proposals/current' })).json();
+    expect(cur.proposal.status).toBe('idle');
+
+    // 且僵尸态没把启动挡住(这正是当时卡死用户的地方)
+    mocks.complete.mockResolvedValue('[]');
+    const gen = await app.inject({ method: 'POST', url: '/api/proposals/generate', payload: { level: 5 } });
+    expect(gen.statusCode).toBe(202);
+  });
 });

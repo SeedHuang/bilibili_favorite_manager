@@ -310,3 +310,29 @@
 @media (prefers-reduced-motion: reduce) {
   .bfm-blink { animation: none; }
 }
+
+/* 不定态进度条:单次 LLM 调用没有 done/total,编一个百分比是假的 ——
+   一条来回扫的亮条只回答"还在动",不回答"到哪了"(spec §2 规则 1 的进度条,
+   对无批次语义的任务取不定态)。prefers-reduced-motion 下退化成常亮条。 */
+@keyframes bfm-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(320%); }
+}
+.bfm-indeterminate {
+  position: relative;
+  overflow: hidden;
+  height: 2px;
+  background: var(--rule);
+  border-radius: 1px;
+}
+.bfm-indeterminate::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 30%;
+  background: var(--accent);
+  animation: bfm-indeterminate 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .bfm-indeterminate::after { animation: none; transform: translateX(0); width: 100%; opacity: 0.5; }
+}

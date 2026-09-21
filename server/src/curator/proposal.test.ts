@@ -26,34 +26,75 @@ describe('buildPrompt', () => {
     expect(p.user).toContain('4~9');
     expect(p.system).toContain('线索');       // 共现提醒
   });
+
+  it('**相邻档位的判据**都要给,不能只有名字', () => {
+    // 回归护栏:曾经只有 `L4=方向` 这样的名字列表,模型没法校准"领域 vs 邻域"这类相邻档差别
+    const p = buildPrompt({ treeText: '- x', coText: '', expected: '4~9 个', level: 5 });
+    for (const l of LEVELS.filter((x) => x.level !== 5)) {
+      expect(p.system, `L${l.level} 的判据缺失`).toContain(l.criterion);
+    }
+    expect(p.system).toContain('同一领域');   // 本档判据(单列在上方)
+  });
 });
 
 describe('validateFolders 裁判', () => {
-  const ctx = { validTagIds: new Set([1, 2]), knownNames: new Set(['已有']) };
+  const ctx = {
+    validTagIds: new Set([1, 2]),
+    // normalize 后的词名 → id:prompt 只给名字,模型只能回名字,裁判必须认
+    tagIdByName: new Map([['ai 编程', 1], ['python', 2]]),
+    knownNames: new Set(['已有']),
+  };
   it('合法输出通过', () => {
-    const ok = validateFolders(
+    const v = validateFolders(
       [{ name: 'AI 编程', reason: 'r', tagIds: [1], keywords: ['教程'] }],
       ctx,
     );
-    expect(ok).toEqual([{ name: 'AI 编程', reason: 'r', tagIds: [1], keywords: ['教程'] }]);
+    expect(v.folders).toEqual([{ name: 'AI 编程', reason: 'r', tagIds: [1], keywords: ['教程'] }]);
   });
-  it('编造 tagId → 整条丢', () => {
-    expect(validateFolders([{ name: 'x', reason: '', tagIds: [99], keywords: [] }], ctx)).toEqual([]);
+  it('**回词名也收** —— 转成 id(实测:prompt 没给 id,模型只能回名字)', () => {
+    const v = validateFolders(
+      [{ name: 'AI 编程', reason: 'r', tagIds: ['AI 编程', 'Python'], keywords: [] }],
+      ctx,
+    );
+    expect(v.folders).toEqual([{ name: 'AI 编程', reason: 'r', tagIds: [1, 2], keywords: [] }]);
+  });
+  it('词名归一化后匹配(全半角/大小写/首尾标点不影响)', () => {
+    const v = validateFolders(
+      [{ name: 'x', reason: '', tagIds: [' python  '], keywords: [] }],
+      ctx,
+    );
+    expect(v.folders).toEqual([{ name: 'x', reason: '', tagIds: [2], keywords: [] }]);
+  });
+  it('**一个错名不牵连整条** —— 跳过它,夹子照留(实测:L6 一次上百个词名,一个拼错就全灭)', () => {
+    const v = validateFolders(
+      [{ name: 'x', reason: '', tagIds: ['AI 编程', '查无此词', 'blenderco'], keywords: [] }],
+      ctx,
+    );
+    expect(v.folders).toEqual([{ name: 'x', reason: '', tagIds: [1], keywords: [] }]);
+    expect(v.skippedTags).toBe(2);
+  });
+  it('词名全查不到且无关键词 → 才丢', () => {
+    const v = validateFolders([{ name: 'x', reason: '', tagIds: ['查无此词'], keywords: [] }], ctx);
+    expect(v.folders).toEqual([]);
+    expect(v.rejects[0]?.why).toBe('词与关键词全查不到');
+  });
+  it('数字 id 编造且无关键词 → 丢', () => {
+    expect(validateFolders([{ name: 'x', reason: '', tagIds: [99], keywords: [] }], ctx).folders).toEqual([]);
   });
   it('重名(与已有夹子)丢', () => {
-    expect(validateFolders([{ name: '已有', reason: '', tagIds: [], keywords: ['a'] }], ctx)).toEqual([]);
+    expect(validateFolders([{ name: '已有', reason: '', tagIds: [], keywords: ['a'] }], ctx).folders).toEqual([]);
   });
   it('方案内部互相重名 → 只留第一个', () => {
-    const out = validateFolders(
+    const v = validateFolders(
       [{ name: 'A', reason: '', tagIds: [], keywords: ['a'] }, { name: 'A', reason: '', tagIds: [], keywords: ['b'] }],
       ctx,
     );
-    expect(out).toHaveLength(1);
+    expect(v.folders).toHaveLength(1);
   });
   it('tagIds/keywords 全空 → 丢;非对象/缺字段 → 丢', () => {
-    expect(validateFolders([{ name: 'B', reason: '', tagIds: [], keywords: [] }], ctx)).toEqual([]);
-    expect(validateFolders('junk', ctx)).toEqual([]);
-    expect(validateFolders([{ name: 123 }], ctx)).toEqual([]);
+    expect(validateFolders([{ name: 'B', reason: '', tagIds: [], keywords: [] }], ctx).folders).toEqual([]);
+    expect(validateFolders('junk', ctx).folders).toEqual([]);
+    expect(validateFolders([{ name: 123 }], ctx).folders).toEqual([]);
   });
   it('keywords 去空白、去重、截 20', () => {
     const kw = ['a', ' a ', '', 42, 'a'] as unknown as string[];
@@ -63,6 +104,6 @@ describe('validateFolders 裁判', () => {
       [{ name: 'C', reason: '', tagIds: [], keywords: [...kw, ...Array(25).fill('x').map((_, i) => `x${i}`)] }],
       ctx,
     );
-    expect(out[0]!.keywords).toEqual(['a', ...Array(19).fill('x').map((_, i) => `x${i}`)]);
+    expect(out.folders[0]!.keywords).toEqual(['a', ...Array(19).fill('x').map((_, i) => `x${i}`)]);
   });
 });

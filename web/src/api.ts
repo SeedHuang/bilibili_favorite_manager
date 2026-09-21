@@ -2,7 +2,6 @@ import type {
   AssignmentsView,
   AuditReport,
   AuditSummary,
-  DryRun,
   EntryView,
   FolderSpec,
   Item,
@@ -375,12 +374,6 @@ export const rulesApi = {
   /** 采纳一条建议 = **追加**一个条件(origin 记 'ai'),不是覆盖 */
   adopt: (folderId: number, s: Omit<RuleSuggestion, 'folderId'>) =>
     json<{ ok: true }>('POST', `/api/rules/${folderId}/adopt`, s),
-
-  /** 试跑:规则覆盖多少、剩多少给 AI、几批 */
-  dryRun: () => json<DryRun>('POST', '/api/rules/dry-run'),
-
-  /** 让 AI 看看规则 —— 建议**不落库**,刷新就没了 */
-  suggest: () => json<{ suggestions: RuleSuggestion[] }>('POST', '/api/rules/suggest'),
 };
 
 // ── 批次任务三件套设置 ──────────────────────────────────

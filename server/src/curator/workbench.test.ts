@@ -81,6 +81,14 @@ describe('编辑动作', () => {
     expect(listOperations(db)[0]!.kind).toBe('create_folder');
   });
 
+  it('名字超 20 字(B 站限制)建/改都拒 —— 本地建了同步也会被 B 站拒', () => {
+    const db = seeded();
+    expect(() => createFolder(db, 'a'.repeat(21))).toThrow(/20/);
+    expect(() => createFolder(db, '一'.repeat(20))).not.toThrow(); // 恰好 20 可以
+    const id = createFolder(db, '短名');
+    expect(() => renameFolder(db, id, 'b'.repeat(21))).toThrow(/20/);
+  });
+
   it('只能删空夹', () => {
     const db = seeded();
     expect(() => deleteFolder(db, originIdOf(db, 7))).toThrow(/还有 \d+ 条/);
