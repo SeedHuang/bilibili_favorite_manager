@@ -89,17 +89,17 @@ describe('编辑动作', () => {
     expect(() => renameFolder(db, id, 'b'.repeat(21))).toThrow(/20/);
   });
 
-  it('只能删空夹', () => {
+  it('非空夹子可删(安全网兜底);锁定夹子仍然不能删', () => {
     const db = seeded();
-    expect(() => deleteFolder(db, originIdOf(db, 7))).toThrow(/还有 \d+ 条/);
-    const empty = createFolder(db, '空夹');
-    expect(() => deleteFolder(db, empty)).not.toThrow();
+    expect(() => deleteFolder(db, originIdOf(db, 9))).toThrow(/不能删除/);
+    const human = originIdOf(db, 7);
+    deleteFolder(db, human);
+    expect(listWorkFolders(db).some((f) => f.id === human)).toBe(false);
   });
 
   it('锁定的夹子不能删除(哪怕它是空的)', () => {
     const db = seeded();
     const locked = originIdOf(db, 9);
-    removeItems(db, workItemIds(db, locked), locked);
     expect(() => deleteFolder(db, locked)).toThrow(/不能删除/);
   });
 
@@ -336,5 +336,175 @@ describe('assignItems', () => {
     const a = originIdOf(db, 7);
     expect(() => assignItems(db, ['BV2'], [a, 999])).toThrow(/没有夹子/);
     expect(workItemIds(db, a)).toContain('BV2'); // 没动
+  });
+});
+
+// ── 成员资格写入器(spec 2026-09-21 §3)──────────────────
+import { writeMembership, reconcileAiFolder, applyRuleHitsToFolder } from './workbench.js';
+import { listAiFolderIds, markFolderAsAi } from '../db/repo/aiFolders.js';
+import { saveRule } from '../db/repo/rules.js';
+
+/** 建一个 AI 夹子(标记 + 规则同事务 —— 不变量"AI 夹子恒有规则"的测试侧shortcut) */
+function makeAiFolder(db: ReturnType<typeof seeded>, name: string, keywords: string[]): number {
+  const r = db
+    .prepare(`INSERT INTO work_folders (origin_id, name, created_at) VALUES (NULL, ?, ?)`)
+    .run(name, Date.now());
+  const id = Number(r.lastInsertRowid);
+  markFolderAsAi(db, id);
+  if (keywords.length) saveRule(db, id, [{ field: 'title', any: keywords }], 'ai');
+  return id;
+}
+
+describe('writeMembership', () => {
+  it('人类夹子只加不清 —— 目标集不含它时存量原样保留', () => {
+    const db = seeded();
+    const human = originIdOf(db, 7); // BV1、BV2
+    writeMembership(db, ['BV3'], [originIdOf(db, 8)]); // 目标根本不是 7
+    expect(workItemIds(db, human).sort()).toEqual(['BV1', 'BV2']);
+    // BV2 不在目标集里 —— 也不许清
+    writeMembership(db, ['BV2'], [originIdOf(db, 8)]);
+    expect(workItemIds(db, human)).toContain('BV2');
+    expect(workItemIds(db, originIdOf(db, 8))).toContain('BV2');
+  });
+
+  it('AI 夹子不是写入目标 —— 直接拒(洞 4:AI 夹子唯一入口是规则)', () => {
+    const db = seeded();
+    const ai = makeAiFolder(db, 'AI 编程', ['BV1']);
+    expect(() => writeMembership(db, ['BV2'], [ai])).toThrow(/AI 建的夹子/);
+  });
+
+  it('默认夹:条目落进主题夹子时移出;只在默认夹之间倒手时留着', () => {
+    const db = seeded();
+    const def = originIdOf(db, 9);
+    const human = originIdOf(db, 7);
+    writeMembership(db, ['BV4'], [human]);
+    expect(workItemIds(db, def)).not.toContain('BV4');
+    writeMembership(db, ['BV4'], [def]);
+    expect(workItemIds(db, def)).toContain('BV4');
+  });
+
+  it('留痕:一次调用一条日志', () => {
+    const db = seeded();
+    writeMembership(db, ['BV1'], [originIdOf(db, 8)]);
+    expect(listOperations(db)).toHaveLength(1);
+    expect(listOperations(db)[0]!.kind).toBe('move_items');
+  });
+});
+
+describe('reconcileAiFolder', () => {
+  it('多则清(走安全网)、缺则补 —— 成员恒等于规则命中集', () => {
+    const db = seeded();
+    const def = originIdOf(db, 9);
+    const ai = makeAiFolder(db, '全部', ['BV1', 'BV2', 'BV3']);
+    // 预置:BV4 是多余成员(不在规则命中集),且不在默认夹 —— 清出前必须兜底
+    db.prepare(`INSERT INTO work_folder_items (folder_id, item_id) VALUES (?, ?)`).run(ai, 'BV4');
+
+    const r = reconcileAiFolder(db, ai);
+    expect(r).toEqual({ added: 3, removed: 1 });
+
+    expect(workItemIds(db, ai).sort()).toEqual(['BV1', 'BV2', 'BV3']);
+    expect(workItemIds(db, def)).toContain('BV4'); // 安全网兜底,没丢视频
+  });
+
+  it('规则改严 → 不命中的清出;清出时不复核"有没有别的家"(字面版)', () => {
+    const db = seeded();
+    const def = originIdOf(db, 9);
+    const ai = makeAiFolder(db, '一切', ['BV1', 'BV2', 'BV3']);
+    reconcileAiFolder(db, ai); // 先收满
+    // BV3 同时在人类夹子 8 里活着 —— 字面版照样补进默认夹
+    saveRule(db, ai, [{ field: 'title', any: ['BV1'] }], 'ai');
+    reconcileAiFolder(db, ai);
+    expect(workItemIds(db, ai)).toEqual(['BV1']);
+    expect(workItemIds(db, def)).toContain('BV3');
+  });
+
+  it('人类夹子不走对账 —— 拒', () => {
+    const db = seeded();
+    expect(() => reconcileAiFolder(db, originIdOf(db, 7))).toThrow(/不是 AI 建的夹子/);
+  });
+});
+
+describe('applyRuleHitsToFolder', () => {
+  it('人类夹子整理 = 只按规则补缺,存量不清', () => {
+    const db = seeded();
+    const human = originIdOf(db, 7); // 存量 BV1、BV2
+    saveRule(db, human, [{ field: 'title', any: ['BV3'] }], 'user');
+    const r = applyRuleHitsToFolder(db, human);
+    expect(r.added).toBe(1);
+    expect(workItemIds(db, human).sort()).toEqual(['BV1', 'BV2', 'BV3']);
+    expect(workItemIds(db, originIdOf(db, 8))).toContain('BV3'); // 原处保留(只加)
+  });
+
+  it('没规则的夹子是 no-op', () => {
+    const db = seeded();
+    expect(applyRuleHitsToFolder(db, originIdOf(db, 7))).toEqual({ added: 0 });
+  });
+});
+
+import { getRule } from '../db/repo/rules.js';
+
+describe('删除与合并对三分类的语义', () => {
+  it('非空夹子可以删了:成员先兜底进默认夹,容器+规则一起走(取代 m4b 空夹红线)', () => {
+    const db = seeded();
+    const human = originIdOf(db, 7);
+    const def = originIdOf(db, 9);
+    saveRule(db, human, [{ field: 'title', any: ['BV1'] }], 'user');
+
+    deleteFolder(db, human); // 不再抛"还有 N 条"
+
+    expect(listWorkFolders(db).some((f) => f.id === human)).toBe(false);
+    expect(workItemIds(db, def).sort()).toEqual(['BV1', 'BV2', 'BV4']); // BV1/BV2 兜底
+    expect(getRule(db, human)).toBeNull(); // 规则跟着 CASCADE
+  });
+
+  it('锁定夹子仍然不能删', () => {
+    const db = seeded();
+    expect(() => deleteFolder(db, originIdOf(db, 9))).toThrow(/不能删除/);
+  });
+
+  it('AI actor 删人类夹子 → 拒;user actor 删 AI 夹子 → 允许', () => {
+    const db = seeded();
+    const human = originIdOf(db, 7);
+    const ai = makeAiFolder(db, 'AI 临时', ['BV3']);
+    expect(() => deleteFolder(db, human, { actor: 'ai' })).toThrow(/AI 不能/);
+    expect(() => deleteFolder(db, ai, { actor: 'user' })).not.toThrow();
+  });
+
+  it('AI actor 的合并源里有人类夹子 → 整批拒', () => {
+    const db = seeded();
+    const human = originIdOf(db, 7);
+    const ai = makeAiFolder(db, 'AI 目标', ['BV1']);
+    expect(() => mergeFolders(db, [human], ai, { actor: 'ai' })).toThrow(/AI 不能/);
+  });
+
+  it('合并 AI 源 → 目标规则收到并集(洞 5:合并不驱逐)', () => {
+    const db = seeded();
+    const aiA = makeAiFolder(db, 'AI 甲', ['BV1']);
+    const aiB = makeAiFolder(db, 'AI 乙', ['BV3']);
+
+    mergeFolders(db, [aiA], aiB, { actor: 'ai' });
+
+    expect(listWorkFolders(db).some((f) => f.id === aiA)).toBe(false);
+    const merged = getRule(db, aiB)!.conditions;
+    // 两个源的条件都活着(顺序不限,断言按字段聚合)
+    const titleAny = merged.filter((c) => c.field === 'title').flatMap((c) => c.any).sort();
+    expect(titleAny).toEqual(['BV1', 'BV3']);
+  });
+
+  it('moveItems 清原归属时跳过 AI 夹子(条目在 AI 夹 + 人类夹,移走后 AI 夹的归属还在)', () => {
+    const db = seeded();
+    const ai = makeAiFolder(db, 'AI 收纳', ['BV1']);
+    reconcileAiFolder(db, ai); // 规则命中 BV1 → 收进 AI 夹
+    const human = originIdOf(db, 7); // BV1、BV2
+    moveItems(db, ['BV1'], originIdOf(db, 8));
+    expect(workItemIds(db, ai)).toContain('BV1'); // AI 夹的归属没被顺手清掉
+    expect(workItemIds(db, human)).not.toContain('BV1'); // 人类夹的清了(用户的明确意图)
+  });
+
+  it('从 AI 夹子手动移出 → 拒(spec 洞 7:移了下次对账也会回来,不如不让移)', () => {
+    const db = seeded();
+    const ai = makeAiFolder(db, 'AI 收纳', ['BV3']);
+    reconcileAiFolder(db, ai);
+    expect(() => removeItems(db, ['BV3'], ai)).toThrow(/AI 建的夹子/);
   });
 });

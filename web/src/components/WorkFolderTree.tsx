@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { App as AntApp, Button, Select } from 'antd';
 import { ChevronRight, ChevronDown, Lock, Pencil, Check, X, Combine, Trash2, SlidersHorizontal } from 'lucide-react';
-import type { ChangeMark, Item, RemovedFolder, WorkFolderView } from '../types';
+import type { ChangeMark, Item, RemovedFolder, RuleView, WorkFolderView } from '../types';
+import FolderRuleSection from './FolderRuleSection';
 
 /**
  * 一份结构(spec §9B.5)。
@@ -28,13 +29,19 @@ export default function WorkFolderTree({
   onToggleSelect,
   onRename,
   onToggleLock,
-  onShowRule,
+  onToggleRule,
+  onRuleChanged,
   onMerge,
   onDelete,
   onRemoveSelected,
   checked,
   onToggleCheck,
   outliersByFolder,
+  rules,
+  ruleOpenId,
+  tagNameOf,
+  tagTree,
+  busy,
 }: {
   folders: WorkFolderView[];
   removed: RemovedFolder[];
@@ -44,8 +51,10 @@ export default function WorkFolderTree({
   onToggleSelect: (itemId: string) => void;
   onRename: (folderId: number, name: string) => void;
   onToggleLock: (originId: number, locked: boolean) => void;
-  /** 跳到 /rules 并定位到这个夹子的规则行 */
-  onShowRule: (folderId: number) => void;
+  /** 点夹子行规则按钮:就地展开/收起该行的规则区(不再跳 /rules) */
+  onToggleRule: (folderId: number) => void;
+  /** 规则区任一改动成功后 —— 重拉 rules + workbench 视图 */
+  onRuleChanged: () => void;
   onMerge: (fromId: number, intoId: number) => void;
   onDelete: (folderId: number) => void;
   onRemoveSelected: (folderId: number, itemIds: string[]) => void;
@@ -64,7 +73,15 @@ export default function WorkFolderTree({
    */
   checked: Set<number>;
   onToggleCheck: (folderId: number) => void;
+  /** 每条夹子对应的规则视图(没规则的夹子拿不到条目) */
+  rules: RuleView[];
+  /** 展开规则区的夹子 id —— 由 curator 统一管理(采纳/改一下后定位展开) */
+  ruleOpenId: number | null;
+  tagNameOf: Map<number, string>;
+  tagTree: { id: number; name: string }[];
+  busy: boolean;
 }) {
+  const ruleViewOf = new Map(rules.map((r) => [r.folderId, r]));
   return (
     <div>
       {folders.map((f) => (
@@ -79,13 +96,19 @@ export default function WorkFolderTree({
           onToggleSelect={onToggleSelect}
           onRename={onRename}
           onToggleLock={onToggleLock}
-          onShowRule={onShowRule}
+          onToggleRule={onToggleRule}
+          onRuleChanged={onRuleChanged}
           onMerge={onMerge}
           onDelete={onDelete}
           onRemoveSelected={onRemoveSelected}
           checked={checked}
           onToggleCheck={onToggleCheck}
           outliersByFolder={outliersByFolder}
+          ruleView={ruleViewOf.get(f.id) ?? null}
+          ruleOpen={ruleOpenId === f.id}
+          tagNameOf={tagNameOf}
+          tagTree={tagTree}
+          busy={busy}
         />
       ))}
 
@@ -133,13 +156,19 @@ function FolderRow({
   onToggleSelect,
   onRename,
   onToggleLock,
-  onShowRule,
+  onToggleRule,
+  onRuleChanged,
   onMerge,
   onDelete,
   onRemoveSelected,
   checked,
   onToggleCheck,
   outliersByFolder,
+  ruleView,
+  ruleOpen,
+  tagNameOf,
+  tagTree,
+  busy,
 }: {
   folder: WorkFolderView;
   allFolders: WorkFolderView[];
@@ -150,14 +179,21 @@ function FolderRow({
   onToggleSelect: (itemId: string) => void;
   onRename: (folderId: number, name: string) => void;
   onToggleLock: (originId: number, locked: boolean) => void;
-  /** 跳到 /rules 并定位到这个夹子的规则行 */
-  onShowRule: (folderId: number) => void;
+  /** 点夹子行规则按钮:就地展开/收起该行的规则区(不再跳 /rules) */
+  onToggleRule: (folderId: number) => void;
+  /** 规则区任一改动成功后 —— 重拉 rules + workbench 视图 */
+  onRuleChanged: () => void;
   onMerge: (fromId: number, intoId: number) => void;
   onDelete: (folderId: number) => void;
   onRemoveSelected: (folderId: number, itemIds: string[]) => void;
   checked: Set<number>;
   onToggleCheck: (folderId: number) => void;
   outliersByFolder: ReadonlyMap<number, readonly string[]>;
+  ruleView: RuleView | null;
+  ruleOpen: boolean;
+  tagNameOf: Map<number, string>;
+  tagTree: { id: number; name: string }[];
+  busy: boolean;
 }) {
   // 静态 Modal.confirm 拿不到 ConfigProvider 的主题,用 App.useApp() 这套
   const { modal } = AntApp.useApp();
@@ -320,6 +356,18 @@ function FolderRow({
               {folder.name}
             </span>
 
+            {/* 来源图标(spec §7):🤖 = AI 建 / ✎ = 用户建。锁定的默认夹不显示 */}
+            {!folder.locked && (
+              <span
+                role="img"
+                aria-label={folder.ai ? 'AI 建的夹子' : '你建的夹子'}
+                title={folder.ai ? 'AI 建的夹子 —— 规则只读,走建议通道' : '你建的夹子'}
+                style={{ fontSize: 11, color: 'var(--text-dim)', flex: 'none', cursor: 'help' }}
+              >
+                {folder.ai ? '🤖' : '✎'}
+              </span>
+            )}
+
             {mark && (
               <span
                 role="img"
@@ -355,12 +403,12 @@ function FolderRow({
               </span>
             )}
 
-            {/* 跳到 /rules 并定位到这一行的规则 —— 规则和夹子分了家,这条缝要补(§9C.4) */}
+            {/* 规则区开关 —— 就地展开/收起这一行的规则,不再跳 /rules(spec §7) */}
             <button
               type="button"
-              aria-label={`看「${folder.name}」的规则`}
-              title="看它的规则"
-              onClick={() => onShowRule(folder.id)}
+              aria-label={ruleOpen ? `收起「${folder.name}」的规则` : `展开「${folder.name}」的规则`}
+              title={ruleOpen ? '收起规则区' : '展开规则区'}
+              onClick={() => onToggleRule(folder.id)}
               style={{ border: 'none', background: 'none', padding: 0, cursor: 'pointer', color: 'var(--text-dim)', opacity: 0.5 }}
             >
               <SlidersHorizontal size={11} />
@@ -422,6 +470,17 @@ function FolderRow({
 
       {open && (
         <div style={{ paddingLeft: 24, paddingBottom: 6 }}>
+          {/* 规则区:夹子行展开后的第一段 —— 规则从此住在树里(spec §7) */}
+          {ruleView && (
+            <FolderRuleSection
+              view={ruleView}
+              tagNameOf={tagNameOf}
+              tagTree={tagTree}
+              busy={busy}
+              editable={!folder.locked && !folder.ai}
+              onChanged={onRuleChanged}
+            />
+          )}
           {/* 「移走」需要的是**源夹子**,不是目标 —— 所以它在展开区里,而不是在
               顶上的动作条里。动作条上只有"移动 / 也放进"(那两个才是选目标)。 */}
           {items.length > 0 && (

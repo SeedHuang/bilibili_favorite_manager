@@ -5,6 +5,7 @@ import { upsertItem, linkFolderItem } from './items.js';
 import { setState, stateKey } from './state.js';
 import { ensureWorkcopy, listWorkFolders } from './workbench.js';
 import { buildWorkbenchView } from './workbenchView.js';
+import { markFolderAsAi } from './aiFolders.js';
 
 function seeded() {
   const db = openDb(':memory:');
@@ -130,5 +131,14 @@ describe('工作台视图', () => {
     // 首启/还原后是这个状态。界面此时该显示"B站 现在的样子"(由页面读快照列表),
     // 而不是把用户的夹子全标成已删除。
     expect(buildWorkbenchView(db)).toEqual({ folders: [], removed: [], unassignedCount: 0 });
+  });
+
+  it('AI 标记进视图:有标记 ai=true,存量夹子 ai=false(保守默认)', () => {
+    const db = seeded();
+    const f = byOrigin(db).get(8)!;
+    markFolderAsAi(db, f.id);
+    const v = buildWorkbenchView(db);
+    expect(v.folders.find((x) => x.id === f.id)!.ai).toBe(true);
+    expect(v.folders.find((x) => x.originId === 7)!.ai).toBe(false);
   });
 });

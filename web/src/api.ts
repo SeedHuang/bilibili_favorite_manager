@@ -14,6 +14,7 @@ import type {
   ProposalDraftView,
   ProposalInfo,
   ProposalLogLine,
+  ReviewCurrent,
   PollConfig,
   PollsMap,
   ProviderView,
@@ -358,6 +359,15 @@ export const workbenchApi = {
     api<{ operations: OperationEntry[] }>(`/api/workbench/log?limit=${limit}`).then(
       (r) => r.operations,
     ),
+
+  /** 对勾选的夹子兑现成员关系。纯本地计算,不调 LLM(不花钱) */
+  tidy: (folderIds: number[]) =>
+    json<{
+      ok: true;
+      reconciled: { folderId: number; added: number; removed: number }[];
+      ruleAdded: { folderId: number; added: number }[];
+      skipped: string[];
+    }>('POST', '/api/workbench/tidy', { folderIds }),
 };
 
 // ── M4c:规则 ────────────────────────────────────────────
@@ -399,6 +409,21 @@ export const proposalsApi = {
     json<{ ok: true; folderId: number }>('POST', '/api/proposals/adopt', { draftId, name }),
   adoptAll: () => json<{ ok: true; results: { draftId: number; folderId: number }[] }>('POST', '/api/proposals/adopt-all'),
   discard: (draftId: number) => json<{ ok: true }>('POST', '/api/proposals/discard', { draftId }),
+  /** 全部丢弃:所有 pending 草稿置 discarded(与「全部采纳」并列) */
+  discardAll: () => json<{ ok: true }>('POST', '/api/proposals/discard-all'),
+};
+
+// ── 审查草稿(spec 2026-09-21 §5/§6)─────────────────────
+
+export const reviewsApi = {
+  generate: (folderIds: number[]) =>
+    json<{ ok: true }>('POST', '/api/reviews/generate', { folderIds }),
+  abort: () => json<{ ok: true }>('POST', '/api/reviews/abort'),
+  current: () => api<ReviewCurrent>('/api/reviews/current'),
+  adopt: (draftId: number, name?: string) =>
+    json<{ ok: true }>('POST', '/api/reviews/adopt', { draftId, name }),
+  discard: (draftId: number) => json<{ ok: true }>('POST', '/api/reviews/discard', { draftId }),
+  adoptAll: () => json<{ ok: true }>('POST', '/api/reviews/adopt-all'),
 };
 
 // ── M4e:条目 AI 标注 ────────────────────────────────────

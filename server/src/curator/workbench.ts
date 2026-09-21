@@ -95,20 +95,26 @@ export function deleteFolder(db: Database.Database, folderId: number, who: Actor
   ensureWorkcopy(db);
   const f = workFolderOrThrow(db, folderId);
   assertNotLocked(db, folderId, '删除');
-
-  const count = workItemIds(db, folderId).length;
-  // 只能删空夹 —— 里面还有条目就没法表达"它们去哪了"
-  if (count > 0) {
-    throw new Error(`「${f.name}」里还有 ${count} 条,先把它们移走或删掉这个夹子里的条目`);
+  if (who.actor === 'ai' && !isAiFolder(db, folderId)) {
+    throw new Error(`「${f.name}」是人类建立的夹子,AI 不能删除它`);
   }
-  db.prepare(`DELETE FROM work_folders WHERE id = ?`).run(folderId);
+
+  const members = workItemIds(db, folderId);
+  let backedUp = 0;
+  db.transaction(() => {
+    if (members.length > 0) backedUp = ensureDefaultMembership(db, members); // 删夹不删视频:先兜底
+    db.prepare(`DELETE FROM work_folders WHERE id = ?`).run(folderId);
+  })();
 
   logOperation(db, {
     kind: 'delete_folder',
     actor: who.actor,
     sessionId: who.sessionId,
-    summary: `删除空夹子「${f.name}」`,
-    detail: { folderId, name: f.name },
+    summary:
+      members.length > 0
+        ? `删除夹子「${f.name}」(${backedUp}/${members.length} 条已兜底进默认收藏夹)`
+        : `删除空夹子「${f.name}」`,
+    detail: { folderId, name: f.name, memberCount: members.length },
   });
 }
 
@@ -148,6 +154,18 @@ export function mergeFolders(
   const froms = sources.map((id) => workFolderOrThrow(db, id));
   for (const f of froms) assertNotLocked(db, f.id, '移动并删除');
 
+  if (who.actor === 'ai') {
+    const human = froms.filter((f) => !isAiFolder(db, f.id));
+    if (human.length > 0) {
+      throw new Error(`「${human[0]!.name}」是人类建立的夹子,AI 不能合并或删除它`);
+    }
+  }
+  // AI 源的规则要在删夹子**之前**取出来 —— CASCADE 会把它们带走(洞 5)
+  const aiRules = froms
+    .filter((f) => isAiFolder(db, f.id))
+    .map((f) => getRule(db, f.id))
+    .filter((r): r is NonNullable<typeof r> => r !== null && r.conditions.length > 0);
+
   const moved = new Set(froms.flatMap((f) => workItemIds(db, f.id)));
 
   db.transaction(() => {
@@ -159,6 +177,22 @@ export function mergeFolders(
       db.prepare(`DELETE FROM work_folders WHERE id = ?`).run(f.id);
     }
   })();
+
+  // 合并不驱逐(洞 5):AI 源的规则并进目标,源成员里不命中目标规则的下次对账才不会
+  // 全被清出。"合并"悄悄变成"合并 + 驱逐"是绝不能发生的。
+  if (aiRules.length > 0) {
+    const seen = new Set<string>();
+    const union = [
+      ...(getRule(db, intoId)?.conditions ?? []),
+      ...aiRules.flatMap((r) => r.conditions),
+    ].filter((c) => {
+      const key = `${c.field}|${[...c.any].sort().join(',')}`;
+      if (seen.has(key) || c.any.length === 0) return false;
+      seen.add(key);
+      return true;
+    });
+    if (union.length > 0) saveRule(db, intoId, union, 'ai');
+  }
 
   const names = froms.map((f) => `「${f.name}」`).join('、');
   logOperation(db, {
@@ -187,10 +221,22 @@ export function moveItems(
   if (itemIds.length === 0) return;
   ensureWorkcopy(db);
   const to = workFolderOrThrow(db, toFolderId);
+  // AI 夹子不是落点(洞 4):成员=规则命中集,直接移入下次对账必被清出 —— 和 writeMembership 同一道闸
+  if (isAiFolder(db, toFolderId)) {
+    throw new Error(`「${to.name}」是 AI 建的夹子,成员由它的规则决定 —— 请采纳规则建议,不要直接移入`);
+  }
 
+  const aiIds = listAiFolderIds(db);
   db.transaction(() => {
     for (const itemId of itemIds) {
-      db.prepare(`DELETE FROM work_folder_items WHERE item_id = ?`).run(itemId);
+      const current = (
+        db.prepare(`SELECT folder_id FROM work_folder_items WHERE item_id = ?`).all(itemId) as
+          { folder_id: number }[]
+      ).map((r) => r.folder_id);
+      for (const folderId of current) {
+        if (aiIds.has(folderId)) continue; // AI 夹的归属只能由 reconcile 拿走
+        db.prepare(`DELETE FROM work_folder_items WHERE item_id = ? AND folder_id = ?`).run(itemId, folderId);
+      }
       db.prepare(
         `INSERT OR IGNORE INTO work_folder_items (folder_id, item_id) VALUES (?, ?)`,
       ).run(toFolderId, itemId);
@@ -266,6 +312,10 @@ export function addItems(
   if (itemIds.length === 0) return;
   ensureWorkcopy(db);
   const to = workFolderOrThrow(db, toFolderId);
+  // AI 夹子不是落点(洞 4)—— 和 moveItems / writeMembership 同一道闸
+  if (isAiFolder(db, toFolderId)) {
+    throw new Error(`「${to.name}」是 AI 建的夹子,成员由它的规则决定 —— 请采纳规则建议,不要直接移入`);
+  }
 
   const stmt = db.prepare(
     `INSERT OR IGNORE INTO work_folder_items (folder_id, item_id) VALUES (?, ?)`,
@@ -294,6 +344,9 @@ export function removeItems(
   if (itemIds.length === 0) return;
   ensureWorkcopy(db);
   const from = workFolderOrThrow(db, fromFolderId);
+  if (isAiFolder(db, fromFolderId)) {
+    throw new Error(`「${from.name}」是 AI 建的夹子,成员由规则决定 —— 改规则(采纳建议)才能移出条目`);
+  }
 
   const stmt = db.prepare(`DELETE FROM work_folder_items WHERE folder_id = ? AND item_id = ?`);
   db.transaction(() => {
@@ -321,4 +374,230 @@ export function resetWorkbench(db: Database.Database, who: Actor = USER): void {
     summary: existed ? '一键还原:丢掉了全部改动' : '一键还原(本来就没有改动)',
     detail: null,
   });
+}
+
+import { listAiFolderIds, isAiFolder } from '../db/repo/aiFolders.js';
+import { getRule, saveRule } from '../db/repo/rules.js';
+import { matchAll, toRuleItem } from './rules.js';
+import { itemTagIds, subtreeSets } from '../db/repo/tags.js';
+import type { ItemRow } from '../db/repo/items.js';
+import type { RuleCondition } from '../db/repo/rules.js';
+
+/** 默认收藏夹(锁定夹子)的工作副本 id;没有就 null —— 安全网没有落点时如实不兜底 */
+export function defaultWorkFolderId(db: Database.Database): number | null {
+  for (const w of listWorkFolders(db)) {
+    if (w.originId === null) continue;
+    const origin = listFolders(db).find((f) => f.id === w.originId);
+    if (origin && isLockedFolder(db, origin)) return w.id;
+  }
+  return null;
+}
+
+/**
+ * 安全网(字面版,spec §4):这批条目里不在默认收藏夹的,补进默认收藏夹。
+ * **不做"有没有别的家"的判断** —— 用户拍板:哪怕它在别的夹子里活着也照补。
+ * 代价(默认夹会变大)已知且接受,见 spec §4。
+ */
+export function ensureDefaultMembership(db: Database.Database, itemIds: readonly string[]): number {
+  const defaultId = defaultWorkFolderId(db);
+  if (defaultId === null || itemIds.length === 0) return 0;
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO work_folder_items (folder_id, item_id) VALUES (?, ?)`,
+  );
+  let added = 0;
+  for (const itemId of itemIds) {
+    added += insert.run(defaultId, itemId).changes;
+  }
+  return added;
+}
+
+/**
+ * 成员资格写入器 —— 所有程序化成员变更的唯一入口(spec §3)。
+ *
+ * 三条纪律编码在一处,整理对账、AI 归类应用、采纳填充全走这里:
+ * - AI 夹子不是写入目标(它的成员只能由 reconcile 写)—— 直接拒;
+ * - 人类夹子只加不清 —— 红线的落点就是一个 continue;
+ * - 默认夹在条目落进**主题**夹子时移出(现状语义);只在默认夹之间倒手时留着。
+ */
+export function writeMembership(
+  db: Database.Database,
+  itemIds: readonly string[],
+  targetFolderIds: readonly number[],
+  who: Actor = USER,
+): { added: number } {
+  if (itemIds.length === 0 || targetFolderIds.length === 0) return { added: 0 };
+  ensureWorkcopy(db);
+
+  const targets = [...new Set(targetFolderIds)];
+  const byId = new Map(listWorkFolders(db).map((f) => [f.id, f]));
+  const folderInfos = targets.map((id) => {
+    const f = byId.get(id);
+    if (!f) throw new Error(`工作副本里没有夹子 ${id}`);
+    return f;
+  });
+
+  const aiIds = listAiFolderIds(db);
+  const aiTarget = folderInfos.find((f) => aiIds.has(f.id));
+  if (aiTarget) {
+    throw new Error(
+      `「${aiTarget.name}」是 AI 建的夹子,成员由它的规则决定 —— 请采纳规则建议,不要直接移入`,
+    );
+  }
+
+  const defaultId = defaultWorkFolderId(db);
+  const ids = [...new Set(itemIds)];
+  let added = 0;
+
+  db.transaction(() => {
+    const insert = db.prepare(
+      `INSERT OR IGNORE INTO work_folder_items (folder_id, item_id) VALUES (?, ?)`,
+    );
+    const del = db.prepare(`DELETE FROM work_folder_items WHERE item_id = ? AND folder_id = ?`);
+    const memberOf = db.prepare(`SELECT folder_id FROM work_folder_items WHERE item_id = ?`);
+
+    for (const itemId of ids) {
+      const targetSet = new Set(targets);
+      const current = (memberOf.all(itemId) as { folder_id: number }[]).map((r) => r.folder_id);
+      for (const folderId of current) {
+        if (targetSet.has(folderId)) continue;
+        if (aiIds.has(folderId)) continue; // AI 夹子的归属只能由 reconcile 拿走
+        if (folderId === defaultId) {
+          // 默认夹:有主题落点 → 移出;只在默认夹之间倒手 → 留着
+          if (targets.some((t) => t !== defaultId)) del.run(itemId, folderId);
+          continue;
+        }
+        // 人类夹子:只加不清 —— 红线落点,跳过即可
+        continue;
+      }
+      for (const folderId of targets) added += insert.run(folderId, itemId).changes;
+    }
+  })();
+
+  logOperation(db, {
+    kind: 'move_items',
+    actor: who.actor,
+    sessionId: who.sessionId,
+    summary: `归置 ${ids.length} 条到 ${targets.length} 个夹子(补进 ${added} 份归属;人类夹子只加不清)`,
+    detail: { itemIds: ids, toFolderIds: targets, added },
+  });
+  return { added };
+}
+
+/**
+ * AI 夹子对账:成员 = 规则命中集。缺的补进;多的走安全网后清出。
+ * 这是 AI 夹子成员的**唯一**写手 —— writeMembership 拒绝 AI 夹子,两边合起来
+ * 才把"成员恒等于命中集"钉死。
+ */
+export function reconcileAiFolder(
+  db: Database.Database,
+  folderId: number,
+  who: Actor = USER,
+): { added: number; removed: number } {
+  ensureWorkcopy(db);
+  const f = workFolderOrThrow(db, folderId);
+  if (!listAiFolderIds(db).has(folderId)) throw new Error(`「${f.name}」不是 AI 建的夹子`);
+
+  const rule = db
+    .prepare(
+      `SELECT conditions_json, origin, updated_at FROM work_folder_rules WHERE folder_id = ?`,
+    )
+    .get(folderId) as
+    | { conditions_json: string; origin: 'ai' | 'user'; updated_at: number }
+    | undefined;
+  const conditions: RuleCondition[] = rule
+    ? (JSON.parse(rule.conditions_json) as RuleCondition[])
+    : [];
+
+  const items = db.prepare(`SELECT * FROM items`).all() as ItemRow[];
+  const tagsOf = itemTagIds(db);
+  const matched = conditions.length
+    ? matchAll(
+        items.map((i) => ({ ...toRuleItem(i), tagIds: tagsOf.get(i.id) ?? [] })),
+        [{ folderId, conditions, origin: rule!.origin, updatedAt: rule!.updated_at }],
+        { subtree: subtreeSets(db) },
+      )
+    : new Map<string, { folderId: number }[]>();
+  const want = new Set(matched.keys());
+  const have = new Set(workItemIds(db, folderId));
+
+  const toAdd = [...want].filter((id) => !have.has(id));
+  const toRemove = [...have].filter((id) => !want.has(id));
+
+  let backedUp = 0;
+  db.transaction(() => {
+    const insert = db.prepare(
+      `INSERT OR IGNORE INTO work_folder_items (folder_id, item_id) VALUES (?, ?)`,
+    );
+    const del = db.prepare(`DELETE FROM work_folder_items WHERE folder_id = ? AND item_id = ?`);
+    for (const itemId of toAdd) insert.run(folderId, itemId);
+    if (toRemove.length > 0) backedUp = ensureDefaultMembership(db, toRemove); // 安全网,先兜底再清出
+    for (const itemId of toRemove) del.run(folderId, itemId);
+  })();
+
+  if (toAdd.length + toRemove.length > 0) {
+    logOperation(db, {
+      kind: 'move_items',
+      actor: who.actor,
+      sessionId: who.sessionId,
+      summary:
+        toRemove.length > 0
+          ? `对账「${f.name}」:补进 ${toAdd.length} 条,清出 ${toRemove.length} 条(已兜底默认收藏夹 ${backedUp}/${toRemove.length} 条)`
+          : `对账「${f.name}」:补进 ${toAdd.length} 条`,
+      detail: { folderId, added: toAdd, removed: toRemove },
+    });
+  }
+  return { added: toAdd.length, removed: toRemove.length };
+}
+
+/**
+ * 人类夹子的整理:把规则命中集里缺的成员补进来 —— **只加,不清**。
+ * 存量成员哪怕不命中规则也原样保留(用户 2026-09-21 的红线)。
+ */
+export function applyRuleHitsToFolder(
+  db: Database.Database,
+  folderId: number,
+  who: Actor = USER,
+): { added: number } {
+  ensureWorkcopy(db);
+  const f = workFolderOrThrow(db, folderId);
+  if (listAiFolderIds(db).has(folderId)) throw new Error(`「${f.name}」是 AI 夹子,请走对账`);
+
+  const rule = db
+    .prepare(
+      `SELECT conditions_json, origin, updated_at FROM work_folder_rules WHERE folder_id = ?`,
+    )
+    .get(folderId) as
+    | { conditions_json: string; origin: 'ai' | 'user'; updated_at: number }
+    | undefined;
+  const conditions: RuleCondition[] = rule
+    ? (JSON.parse(rule.conditions_json) as RuleCondition[])
+    : [];
+  if (conditions.length === 0) return { added: 0 };
+
+  const items = db.prepare(`SELECT * FROM items`).all() as ItemRow[];
+  const tagsOf = itemTagIds(db);
+  const matched = matchAll(
+    items.map((i) => ({ ...toRuleItem(i), tagIds: tagsOf.get(i.id) ?? [] })),
+    [{ folderId, conditions, origin: rule!.origin, updatedAt: rule!.updated_at }],
+    { subtree: subtreeSets(db) },
+  );
+  const have = new Set(workItemIds(db, folderId));
+  const toAdd = [...matched.keys()].filter((id) => !have.has(id));
+  if (toAdd.length === 0) return { added: 0 };
+
+  let added = 0;
+  db.transaction(() => {
+    const insert = db.prepare(
+      `INSERT OR IGNORE INTO work_folder_items (folder_id, item_id) VALUES (?, ?)`,
+    );
+    for (const itemId of toAdd) added += insert.run(folderId, itemId).changes;
+  })();
+  logOperation(db, {
+    kind: 'add_items',
+    actor: who.actor,
+    sessionId: who.sessionId,
+    summary: `整理「${f.name}」:按规则补进 ${added} 条(只加不清)`,
+    detail: { folderId, added: toAdd },
+  });
+  return { added };
 }

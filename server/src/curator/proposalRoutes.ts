@@ -6,6 +6,7 @@ import {
   listDrafts, setDraftStatus, sampleTitlesFor, getProposal,
 } from '../db/repo/proposals.js';
 import { saveRule } from '../db/repo/rules.js';
+import { markFolderAsAi } from '../db/repo/aiFolders.js';
 import { createFolder } from './workbench.js';
 import { runGeneration, proposalRun } from './proposal.js';
 import { readLlmSettings } from '../llm/config.js';
@@ -108,6 +109,7 @@ export function registerProposalRoutes(app: FastifyInstance, deps: ProposalDeps)
       let folderId = 0;
       db.transaction(() => {
         folderId = createFolder(db, folderName); // workbench 的:建夹子 + 记操作日志
+        markFolderAsAi(db, folderId); // 三分类:AI 方案采纳建的夹子,标记为 AI 夹子
         saveRule(db, folderId, draft.conditions, 'ai');
         setDraftStatus(db, id, 'adopted', folderId);
       })();
@@ -125,6 +127,7 @@ export function registerProposalRoutes(app: FastifyInstance, deps: ProposalDeps)
         let folderId = 0;
         db.transaction(() => {
           folderId = createFolder(db, d.name);
+          markFolderAsAi(db, folderId); // 三分类:AI 方案采纳建的夹子,标记为 AI 夹子
           saveRule(db, folderId, d.conditions, 'ai');
           setDraftStatus(db, d.id, 'adopted', folderId);
         })();
@@ -141,6 +144,12 @@ export function registerProposalRoutes(app: FastifyInstance, deps: ProposalDeps)
     const draft = listDrafts(db).find((d) => d.id === id);
     if (!draft) return reply.code(404).send({ ok: false, reason: '草稿不存在' });
     setDraftStatus(db, id, 'discarded');
+    return { ok: true };
+  });
+
+  /** 全部丢弃:所有 pending 草稿置 discarded(与「全部采纳」并列,spec §6) */
+  app.post('/api/proposals/discard-all', async () => {
+    db.prepare(`UPDATE folder_proposal_folders SET status = 'discarded' WHERE status = 'pending'`).run();
     return { ok: true };
   });
 }

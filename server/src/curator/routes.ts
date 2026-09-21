@@ -61,8 +61,10 @@ import {
 import { getState, setSetting, stateKey } from '../db/repo/state.js';
 import {
   renameFolder, createFolder, deleteFolder, mergeFolders,
-  moveItems, addItems, removeItems, resetWorkbench, assignItems,
+  moveItems, addItems, removeItems, resetWorkbench,
+  writeMembership, reconcileAiFolder, applyRuleHitsToFolder,
 } from './workbench.js';
+import { listAiFolderIds, isAiFolder as isAiFolderWork } from '../db/repo/aiFolders.js';
 
 export interface CuratorDeps {
   db: Database.Database;
@@ -607,8 +609,9 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
     }
 
     // **按"目标夹子集合"分组,而不是按单个夹子** —— 一条条目可以同时归进多个夹子
-    // (规则命中的都归,R4)。按单个夹子分组会把它拆成多次调用,而每次 assignItems
-    // 都会先清空该条目的归属,后一次会把前一次删掉。
+    // (规则命中的都归,R4)。按单个夹子分组会把它拆成多次调用,而每次写入器
+    // 都会把"目标之外的旧归属"原样留下(人类夹子只加不清),分组仍是一次操作一条日志。
+    const aiFolderIds = listAiFolderIds(db);
     const targetOf = new Map<string, number[]>();
     // AI 拿不准的条目(folderTempId === null)**原地不动** —— 这些必须单列出来。
     // 生成侧的提示词明确写着"拿不准就填 null",整批失败也是 null,所以这是常态
@@ -622,6 +625,8 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
       }
       const folderId = Number(a.folderTempId);
       if (!Number.isInteger(folderId)) continue; // 编出来的 id 丢掉
+      // AI 夹子不是归类目标的合法落点(洞 4):成员=规则命中集,直接写必被对账清出
+      if (aiFolderIds.has(folderId)) continue;
       const list = targetOf.get(a.itemId);
       if (list) {
         if (!list.includes(folderId)) list.push(folderId);
@@ -644,7 +649,8 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
     for (const [key, itemIds] of byTargetSet) {
       const folderIds = key.split(',').map(Number);
       try {
-        assignItems(db, itemIds, folderIds, { actor: 'ai', sessionId });
+        // 三条纪律的落点:AI 夹子被过滤(上面)、人类夹子只加不清、默认夹有主题落点才移出
+        writeMembership(db, itemIds, folderIds, { actor: 'ai', sessionId });
         applied += itemIds.length;
       } catch {
         // 目标夹子可能在你手改时被删了 —— 跳过这批,其余照常
@@ -748,6 +754,47 @@ export function registerCuratorRoutes(app: FastifyInstance, deps: CuratorDeps): 
     resetWorkbench(db);
     log.event({ level: 'info', category: 'sync', message: '整理方案已还原' });
     return { ok: true };
+  });
+
+  /**
+   * 「整理」—— 对勾选的夹子兑现成员关系。**纯本地计算**:不调 LLM、不花钱,
+   * 它执行的是已经存在的规则与成员(spec §5)。
+   * - AI 夹子 → reconcileAiFolder(精确对账,清出走安全网)
+   * - 人类夹子 → applyRuleHitsToFolder(只加不清;没规则 = 跳过)
+   */
+  app.post('/api/workbench/tidy', async (req, reply) => {
+    const { folderIds } = (req.body ?? {}) as { folderIds?: unknown };
+    if (
+      !Array.isArray(folderIds) ||
+      folderIds.length === 0 ||
+      folderIds.some((x) => !Number.isInteger(x))
+    ) {
+      return reply.code(400).send({ ok: false, reason: 'folderIds 必须是非空数字数组' });
+    }
+    const reconciled: { folderId: number; added: number; removed: number }[] = [];
+    const ruleAdded: { folderId: number; added: number }[] = [];
+    const skipped: string[] = [];
+    for (const folderId of folderIds) {
+      try {
+        if (isAiFolderWork(db, folderId)) {
+          reconciled.push({ folderId, ...reconcileAiFolder(db, folderId) });
+        } else {
+          const r = applyRuleHitsToFolder(db, folderId);
+          if (r.added > 0) ruleAdded.push({ folderId, added: r.added });
+          else skipped.push(String(folderId));
+        }
+      } catch (e) {
+        skipped.push(`${folderId}: ${(e as Error).message}`);
+      }
+    }
+    log.event({
+      level: 'info',
+      category: 'sync',
+      message: `整理 ${folderIds.length} 个夹子:对账 ${reconciled.length} 个,规则补进 ${
+        ruleAdded.reduce((s, r) => s + r.added, 0)
+      } 条,跳过 ${skipped.length} 个`,
+    });
+    return { ok: true, reconciled, ruleAdded, skipped };
   });
 
   app.post('/api/workbench/folders', async (req, reply) => {

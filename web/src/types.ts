@@ -196,6 +196,8 @@ export interface WorkFolderView {
   mark: ChangeMark;
   itemCount: number;
   locked: boolean;
+  /** AI 建的夹子(spec 2026-09-21 三分类) */
+  ai: boolean;
 }
 
 export interface RemovedFolder {
@@ -262,6 +264,8 @@ export interface RuleView {
   /** null = 还没人写过 */
   origin: RuleOrigin | null;
   updatedAt: number | null;
+  /** AI 建的夹子(spec 2026-09-21 三分类)—— 它的规则只读,走建议通道 */
+  ai: boolean;
   /** 命中数:这条规则会从**全库**捞走多少条 */
   hit: number;
 }
@@ -469,3 +473,25 @@ export interface ProposalDraftView {
 // ── 批次任务三件套设置(spec 2026-09-20 §3)──────────────
 export type PollConfig = { intervalMs: number; batch: number | null };
 export type PollsMap = Record<string, PollConfig>;
+
+// ── 审查勾选的夹子(spec 2026-09-21 §5/§6)─────────────────
+export type ReviewKind = 'rule' | 'merge' | 'delete';
+
+export interface ReviewDraftView {
+  id: number;
+  kind: ReviewKind;
+  folderId: number;
+  /** current 端点带上,免前端再查 */
+  folderName?: string;
+  intoId?: number | null;
+  intoName?: string | null;
+  conditions: RuleCondition[] | null;
+  because: string;
+  status: 'pending' | 'adopted' | 'discarded';
+}
+
+export interface ReviewCurrent {
+  running: boolean;
+  logs: ProposalLogLine[];
+  drafts: ReviewDraftView[];
+}

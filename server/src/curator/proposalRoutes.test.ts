@@ -93,7 +93,7 @@ describe('方案路由', () => {
   });
 
   it('采纳:建夹子+写规则(origin=ai)+草稿状态', async () => {
-    const { app, nbaId } = makeApp();
+    const { app, db, nbaId } = makeApp();
     mocks.complete.mockResolvedValue(aiOut(nbaId));
     await app.inject({ method: 'POST', url: '/api/proposals/generate', payload: { level: 3 } });
     await new Promise((r) => setTimeout(r, 20));
@@ -102,6 +102,7 @@ describe('方案路由', () => {
     const res = await app.inject({ method: 'POST', url: '/api/proposals/adopt', payload: { draftId: drafts[0].id } });
     expect(res.statusCode).toBe(200);
     const { folderId } = res.json();
+    expect(db.prepare('SELECT 1 FROM work_ai_folders WHERE folder_id = ?').get(folderId)).toBeDefined();
     expect(folderId).toBeGreaterThan(0);
 
     // 夹子存在

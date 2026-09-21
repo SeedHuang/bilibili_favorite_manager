@@ -255,4 +255,25 @@ CREATE TABLE IF NOT EXISTS folder_proposal_folders (
   adopted_folder_id INTEGER REFERENCES work_folders(id) ON DELETE SET NULL,
   created_at        INTEGER NOT NULL
 );
+
+-- ── 夹子三分类(2026-09-21)────────────────────────────────
+-- AI 创建标记:有行 = AI 夹子,没行 = 人类夹子(保守默认)。
+-- 照 work_folder_rules 的老套路开侧表,不动 work_folders;标记只写不改。
+CREATE TABLE IF NOT EXISTS work_ai_folders (
+  folder_id  INTEGER PRIMARY KEY REFERENCES work_folders(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL
+);
+
+-- 审查草稿(「审查勾选的夹子」产出)。与生成草稿(folder_proposal_folders)
+-- 分表:生成只清自己的表,两类草稿互不误伤(spec 洞 8)。
+CREATE TABLE IF NOT EXISTS review_drafts (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind            TEXT NOT NULL,      -- 'rule' | 'merge' | 'delete'
+  folder_id       INTEGER NOT NULL REFERENCES work_folders(id) ON DELETE CASCADE,   -- 目标夹子(merge 时 = 被并掉的源)
+  into_id         INTEGER REFERENCES work_folders(id) ON DELETE CASCADE,            -- 仅 merge:并入的目标
+  conditions_json TEXT,               -- 仅 rule / merge(并集)
+  because         TEXT,
+  status          TEXT NOT NULL,      -- 'pending' | 'adopted' | 'discarded'
+  created_at      INTEGER NOT NULL
+);
 `;

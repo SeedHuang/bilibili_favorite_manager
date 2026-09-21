@@ -830,8 +830,9 @@ describe('应用 AI 结论', () => {
     // BV1 去了新夹子,BV2 留在原处 —— "原地不动"是这半句的真实验证
     const moved = (await app.inject({ method: 'GET', url: `/api/workbench/folders/${target}/items` })).json();
     expect(moved.items.map((i: { id: string }) => i.id)).toEqual(['BV1']);
+    // spec 2026-09-21:人类夹子只加不清 —— BV1 在人类夹子里的旧归属保留,不被 AI 应用清掉
     const stayed = (await app.inject({ method: 'GET', url: `/api/workbench/folders/${deep}/items` })).json();
-    expect(stayed.items.map((i: { id: string }) => i.id)).toEqual(['BV2']);
+    expect(stayed.items.map((i: { id: string }) => i.id)).toEqual(['BV1', 'BV2']);
     await app.close();
   });
 
@@ -1259,16 +1260,19 @@ describe('工作台路由', () => {
     await app.close();
   });
 
-  it('删非空夹 → 400 并说清还有多少条', async () => {
+  it('删非空夹 → 允许(安全网兜底;没有默认夹时如实不兜底)', async () => {
     const { app, db } = makeApp();
     seed(db);
     await app.inject({ method: 'POST', url: '/api/workbench/folders', payload: { name: 'x' } });
     const view = (await app.inject({ method: 'GET', url: '/api/workbench' })).json();
     const deep = view.folders.find((f: { originId: number }) => f.originId === 7).id;
 
+    // spec 2026-09-21:删夹子 = 删容器,不删视频 —— 空夹红线被安全网取代
     const res = await app.inject({ method: 'DELETE', url: `/api/workbench/folders/${deep}` });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().reason).toContain('还有 2 条');
+    expect(res.statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/api/workbench' })).json().folders.some(
+      (f: { id: number }) => f.id === deep,
+    )).toBe(false);
     await app.close();
   });
 
@@ -1498,6 +1502,74 @@ describe('工作台路由', () => {
     const { app } = makeApp();
     const res = await app.inject({ method: 'PATCH', url: '/api/workbench/folders/999', payload: { name: 'x' } });
     expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it('tidy:AI 夹子精确对账、人类夹子只加不清、无规则跳过', async () => {
+    const { app, db } = makeApp();
+    seed(db); // 快照夹 7(深度学习,BV1 标题 'a'、BV2 标题 'b')
+    await app.inject({ method: 'POST', url: '/api/workbench/folders', payload: { name: '临时' } });
+    const view = (await app.inject({ url: '/api/workbench' })).json();
+    const human = view.folders.find((f: { originId: number | null }) => f.originId === 7).id as number;
+    const ai = await app.inject({
+      method: 'POST', url: '/api/workbench/folders', payload: { name: 'AI 编程' },
+    }).then((r) => r.json().id as number);
+    // 直接落 AI 标记 + 规则(路由层还没有"标记"入口,测试侧直写,与 repo 测试同口径)
+    db.prepare(`INSERT INTO work_ai_folders (folder_id, created_at) VALUES (?, ?)`).run(ai, Date.now());
+    saveRule(db, ai, [{ field: 'title', any: ['a'] }], 'ai'); // 命中 BV1
+
+    const res = await app.inject({
+      method: 'POST', url: '/api/workbench/tidy',
+      payload: { folderIds: [ai, human] },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    // AI 夹:BV1 命中 → 补进
+    expect(body.reconciled).toEqual([{ folderId: ai, added: 1, removed: 0 }]);
+    // 人类夹:没规则 → 跳过
+    expect(body.skipped).toHaveLength(1);
+
+    const items = await app.inject({ url: `/api/workbench/folders/${ai}/items` });
+    expect(items.json().items.map((i: { id: string }) => i.id)).toEqual(['BV1']);
+    await app.close();
+  });
+
+  it('tidy:空 folderIds → 400', async () => {
+    const { app } = makeApp();
+    const res = await app.inject({ method: 'POST', url: '/api/workbench/tidy', payload: { folderIds: [] } });
+    expect(res.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it('apply:目标集里的 AI 夹子被过滤掉,人类夹子存量不被清', async () => {
+    const { app, db } = makeApp();
+    seed(db);
+    const sid = await newSession(app);
+    // 造工作副本 + 人类夹子存量
+    await app.inject({ method: 'POST', url: '/api/workbench/folders', payload: { name: '临时' } });
+    const view = (await app.inject({ url: '/api/workbench' })).json();
+    const human = view.folders.find((f: { originId: number | null }) => f.originId === 7).id as number;
+    // BV1 已经在人类夹子里(快照继承),AI 结论把 BV1 归去新建夹子 —— 存量不许被清
+    const ai = await app.inject({
+      method: 'POST', url: '/api/workbench/folders', payload: { name: 'AI 编程' },
+    }).then((r) => r.json().id as number);
+    db.prepare(`INSERT INTO work_ai_folders (folder_id, created_at) VALUES (?, ?)`).run(ai, Date.now());
+    saveRule(db, ai, [{ field: 'title', any: ['BV1'] }], 'ai');
+
+    saveClassification(db, sid, [
+      { itemId: 'BV1', folderTempId: String(ai), confidence: 0.9, reason: 'r' },
+    ]);
+    db.prepare(`UPDATE classifications SET updated_at = ? WHERE session_id = ?`).run(
+      (db.prepare(`SELECT COALESCE(MAX(ts),0) AS t FROM operation_log`).get() as { t: number }).t + 1,
+      sid,
+    );
+
+    const res = await app.inject({ method: 'POST', url: `/api/curator/sessions/${sid}/apply` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().applied).toBe(0); // AI 夹目标被过滤,没有可应用的
+    // 人类夹子的存量原样保留
+    const items = await app.inject({ url: `/api/workbench/folders/${human}/items` });
+    expect(items.json().items.map((i: { id: string }) => i.id)).toContain('BV1');
     await app.close();
   });
 });

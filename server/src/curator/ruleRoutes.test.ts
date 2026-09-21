@@ -50,10 +50,11 @@ describe('规则路由', () => {
     const res = await app.inject({ url: '/api/rules' });
     expect(res.statusCode).toBe(200);
 
-    const rules = res.json().rules as { folderId: number; conditions: unknown[]; hit: number }[];
+    const rules = res.json().rules as { folderId: number; conditions: unknown[]; hit: number; ai: boolean }[];
     const mine = rules.find((r) => r.folderId === id)!;
     expect(mine.conditions).toEqual([]);
     expect(mine.hit).toBe(0);
+    expect(mine.ai).toBe(false); // 存量夹子无标记 = 人类夹子(保守默认)
     await app.close();
   });
 

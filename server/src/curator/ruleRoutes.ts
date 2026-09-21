@@ -15,6 +15,7 @@ import {
 } from '../db/repo/rules.js';
 import { listWorkFolders } from '../db/repo/workbench.js';
 import { listFolders, isLockedFolder } from '../db/repo/folders.js';
+import { isAiFolder } from '../db/repo/aiFolders.js';
 import type { ItemRow } from '../db/repo/items.js';
 import { itemTagIds, subtreeSets } from '../db/repo/tags.js';
 import { matchAll, toRuleItem, validateSuggestion } from './rules.js';
@@ -34,6 +35,8 @@ export interface RuleView {
   /** null = 还没人写过 */
   origin: RuleOrigin | null;
   updatedAt: number | null;
+  /** AI 建的夹子(spec 2026-09-21 三分类)—— 它的规则只读,走建议通道 */
+  ai: boolean;
   /** 命中数:这条规则会从**全库**捞走多少条(spec §9C.4 口径) */
   hit: number;
 }
@@ -76,6 +79,7 @@ export function registerRuleRoutes(app: FastifyInstance, deps: RuleDeps): void {
         conditions: ruleOf.get(w.id)?.conditions ?? [],
         origin: ruleOf.get(w.id)?.origin ?? null,
         updatedAt: ruleOf.get(w.id)?.updatedAt ?? null,
+        ai: isAiFolder(db, w.id),
         hit: hits.get(w.id) ?? 0,
       };
     });

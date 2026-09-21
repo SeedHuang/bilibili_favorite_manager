@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3';
 import { listFolders, isLockedFolder } from './folders.js';
 import { listItemIdsByFolder } from './items.js';
 import { hasWorkcopy, listWorkFolders, workItemIds } from './workbench.js';
+import { isAiFolder } from './aiFolders.js';
 
 /**
  * 工作台视图 —— **纯读**,改动标记是算出来的,不单独存。
@@ -21,6 +22,8 @@ export interface WorkFolderView {
   itemCount: number;
   /** 锁定的夹子(B站 自带默认收藏夹)在界面上也不能改名/删除 */
   locked: boolean;
+  /** AI 建的夹子(spec 2026-09-21 三分类):有标记 = AI,没标记 = 人类 */
+  ai: boolean;
 }
 
 export interface RemovedFolder {
@@ -60,6 +63,7 @@ export function buildWorkbenchView(db: Database.Database): {
       itemCount: workItemIds(db, w.id).length,
       // 锁跟着**原点夹子**走:新建的同名夹子不该继承锁
       locked: origin !== undefined && isLockedFolder(db, origin),
+      ai: isAiFolder(db, w.id),
     };
   });
 
