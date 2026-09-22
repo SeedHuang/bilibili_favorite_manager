@@ -4,8 +4,8 @@ import { getState, stateKey } from './state.js';
 /**
  * 工作副本 —— 你要把收藏夹改成什么样。
  *
- * 全局唯一一份(**不按会话分**):「现在的体系」是单数,多套竞争方案
- * 是旧的错误模型。唯一性由 `work_state` 的 CHECK(id = 1) 在数据库层保证。
+ * 全局唯一一份:「现在的体系」是单数,多套竞争方案是旧的错误模型。
+ * 唯一性由 `work_state` 的 CHECK(id = 1) 在数据库层保证。
  */
 export interface WorkFolder {
   id: number;

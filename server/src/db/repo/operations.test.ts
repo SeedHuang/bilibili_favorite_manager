@@ -38,10 +38,10 @@ describe('操作日志', () => {
     expect(listOperations(db)).toHaveLength(1);
   });
 
-  it('actor=ai 时能带上会话号,便于把一次应用归成一组', () => {
+  it('actor=ai 也能正常落库(不依赖会话)', () => {
     const db = fresh();
-    logOperation(db, { kind: 'move_items', actor: 'ai', sessionId: 3, summary: 'x' });
-    expect(listOperations(db)[0]!.sessionId).toBe(3);
+    logOperation(db, { kind: 'move_items', actor: 'ai', summary: 'x' });
+    expect(listOperations(db)[0]!.actor).toBe('ai');
   });
 
   it('limit 限制条数', () => {
@@ -52,7 +52,7 @@ describe('操作日志', () => {
     expect(listOperations(db, { limit: 2 })).toHaveLength(2);
   });
 
-  it('sinceTs 只取那之后的 —— AI 应用前查冲突用', () => {
+  it('sinceTs 只取那之后的 —— 批量应用前查冲突用', () => {
     const db = fresh();
     logOperation(db, { kind: 'create_folder', actor: 'user', summary: '旧的' });
     logOperation(db, { kind: 'create_folder', actor: 'user', summary: '新的' });
@@ -65,7 +65,7 @@ describe('操作日志', () => {
   });
 
   // 毫秒级墙钟给不了唯一坐标:同一毫秒里落的第二条会和上一条撞成同一个 ts。
-  // 冲突检测(apply 的 sinceTs 窗口)就靠"ts 严格递增"这个不变量,所以得有人守。
+  // 冲突检测(sinceTs 窗口)就靠"ts 严格递增"这个不变量,所以得有人守。
   it('ts 严格递增 —— 一次操作在日志里有唯一坐标', () => {
     const db = fresh();
     const firstId = logOperation(db, { kind: 'create_folder', actor: 'user', summary: '一' });

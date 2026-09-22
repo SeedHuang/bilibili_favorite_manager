@@ -699,8 +699,6 @@ function EntryCard({
 // ── 卡 3:任务行(模型 / 轮询 / 批次)──────────────────────
 
 const PURPOSE_LABELS: Record<LlmPurpose, string> = {
-  chat: '聊天',
-  classify: '归类',
   rules: '规则建议',
   tag: '打标',
   tagcheck: '标签质检',

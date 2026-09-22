@@ -67,7 +67,7 @@ describe('listOllamaModels', () => {
 
   // 真机踩的坑:maxOutput 一开始被我设成 contextWindow,于是
   // budget = contextWindow - maxOutput - 1500 变成负数 →
-  // 聊天上下文被裁到只剩最后一条,compact 每轮空烧一次
+  // 输入预算为负,静默退化(批次算不出/超上下文)
   it('给输出留份额,不把整个窗口都算成输出', async () => {
     const f = mkFetch(
       { models: [{ name: 'qwen2.5:14b' }] },
@@ -75,7 +75,7 @@ describe('listOllamaModels', () => {
     );
     const m = (await listOllamaModels('', f))[0]!;
     expect(m.maxOutput).toBeLessThan(m.contextWindow);
-    // 输入预算必须为正 —— 这是"聊天还能记得上一轮"的前提
+    // 输入预算必须为正 —— 为负就是静默退化
     expect(m.contextWindow - m.maxOutput - 1500).toBeGreaterThan(0);
     // 且仍要能撑住 spec §3 说的"本地 14b ≈ 120 条/批"
     expect(Math.floor((m.contextWindow - 1500) / 250)).toBeGreaterThanOrEqual(100);

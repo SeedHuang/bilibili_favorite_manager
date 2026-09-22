@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useRequest } from '@umijs/max';
 import { App as AntApp, Button, Input, Alert, Select, Tabs } from 'antd';
-import { Bot, Undo2, Plus, FolderInput, MoveRight, FolderX, Lock, Sparkles, Wand2, ScrollText, Square, Check, Pencil, X } from 'lucide-react';
+import { Undo2, Plus, FolderInput, MoveRight, FolderX, Lock, Sparkles, Wand2, ScrollText, Square } from 'lucide-react';
 import { api, rawResult, workbenchApi, setFolderLock, proposalsApi, reviewsApi, rulesApi, tagApi } from '../api';
 import type {
   Folder,
@@ -12,13 +12,10 @@ import type {
   ProposalDraftView,
   ProposalLogLine,
   RuleView,
-  RuleSuggestion,
-  RuleField,
   TagNode,
 } from '../types';
 import WorkFolderTree from '../components/WorkFolderTree';
 import OperationLog from '../components/OperationLog';
-import { useAssistant } from '../components/assistant';
 import { useTaskProgress } from '../hooks/useTaskProgress';
 import TaskLogDrawer from '../components/TaskLogDrawer';
 import DraftsArea from '../components/ReviewDrafts';
@@ -38,18 +35,11 @@ const LEVEL_NAMES: { level: number; name: string; hint: string }[] = [
   { level: 10, name: '全收', hint: '全库归成几大主题' },
 ];
 
-/** 条件字段名 —— AI 建议栏的展示用它 */
-const FIELD_LABEL: Record<RuleField, string> = {
-  title: '标题', intro: '简介', upper: 'UP 名', tag: '标签',
-};
-
-/** 整理 —— 一份结构,改动带标记。AI 不在这里(在右下角对话框里)。 */
+/** 整理 —— 一份结构,改动带标记。 */
 export default function CuratorPage() {
   // 静态 `Modal.confirm` 认不到主题(它在另一个 React root 里)——
   // 用 `App.useApp()` 拿的那套才走 ConfigProvider
   const { modal } = AntApp.useApp();
-  // 建议存在助手 context 里:归类跑完顺手给的那批落在全局对话框里,两边看同一份
-  const { openWith, suggestions, setSuggestions } = useAssistant();
 
   const [view, setView] = useState<WorkbenchView | null>(null);
   // total 是夹子的真实条目数,items 只有前 500 条 —— 两者不等时要说出来
@@ -293,38 +283,6 @@ export default function CuratorPage() {
     })();
   }, [reloadRules, reload]);
 
-  // ── AI 的建议(从 RulesPanel 迁来)─────────────────────────
-  /** 建议动作:采纳后重拉 rules(命中数/来源重算) */
-  const actSuggestion = async (fn: () => Promise<unknown>): Promise<boolean> => {
-    setError('');
-    setBusy(true);
-    try {
-      await fn();
-      await reloadRules();
-      return true;
-    } catch (e) {
-      setError((e as Error).message);
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const dropSuggestion = (s: RuleSuggestion) =>
-    setSuggestions((list) =>
-      list.filter((x) => !(x.folderId === s.folderId && x.field === s.field && x.any.join() === s.any.join())),
-    );
-
-  /** 采纳 = 追加一条条件(不是覆盖);改一下 = 先采纳再把那一行摊开给你改 */
-  const takeSuggestion = async (s: RuleSuggestion, andEdit: boolean) => {
-    const { folderId, ...rest } = s;
-    // **采纳失败就不算处理过** —— 建议不能因为一次 400 就从面板上消失:
-    // 那会让用户以为它被采纳了,而其实什么都没写。只有「忽略」该让它消失。
-    if (!(await actSuggestion(() => rulesApi.adopt(folderId, rest)))) return;
-    dropSuggestion(s);
-    if (andEdit) openRuleRow(folderId);
-  };
-
   /**
    * 所有编辑动作走这里:统一错误处理 + 重新拉视图(标记每次都重算)。
    * 返回是否成功 —— 调用方要据此决定「成功后收尾」的动作(比如清勾选):
@@ -359,7 +317,7 @@ export default function CuratorPage() {
     setSelected(new Set()); // 同理:换夹子要清,否则会把上一个夹子勾的一起移走
     try {
       // 一律走**工作副本**口径。新建的夹子 originId 是 null,但完全可能有条目
-      // (移动 / 也放进 / AI 应用都会往里写)—— 之前按"没有原点就当它空"处理,
+      // (移动 / 也放进都会往里写)—— 之前按"没有原点就当它空"处理,
       // 结果是行头说 645、展开说 0,而且那些条目从此看不见也勾不到,再也挪不走。
       const r = await workbenchApi.items(folderId);
       setExpanded({ folderId, items: r.items, total: r.total });
@@ -545,9 +503,6 @@ export default function CuratorPage() {
       >
         新建夹子
       </Button>,
-      <Button key="ai" icon={<Bot size={14} />} onClick={() => openWith()}>
-        打开 AI 助手
-      </Button>,
       <Button
         key="gen"
         icon={<Sparkles size={14} />}
@@ -704,80 +659,6 @@ export default function CuratorPage() {
           </div>
         )}
       </div>
-
-      {/* ── AI 的建议:置顶且单独一栏 —— 它是"待你处理"的东西(§9C.4 规矩 2)──
-          唯一来源是**归类跑完顺手给的那批**(那一次跑在全局对话框里,结果落到这一页) */}
-      {suggestions.length > 0 && (
-        <div className="hud-panel" style={{ padding: 12, borderColor: 'var(--ai)' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-            <Bot size={14} style={{ color: 'var(--ai)' }} />
-            <span className="hud-label" style={{ color: 'var(--ai)' }}>AI 的建议</span>
-            <span className="num" style={{ fontSize: 'var(--fs-12)', color: 'var(--text-dim)' }}>
-              {suggestions.length}
-            </span>
-            {suggestions.length > 1 && (
-              <Button
-                size="small"
-                style={{ marginLeft: 'auto' }}
-                disabled={busy}
-                onClick={() => {
-                  // 一条一条来 —— adopt 是追加,并发写同一个夹子会互相覆盖
-                  void (async () => {
-                    for (const s of [...suggestions]) await takeSuggestion(s, false);
-                  })();
-                }}
-              >
-                全部采纳
-              </Button>
-            )}
-          </div>
-
-          {suggestions.map((s) => {
-            const name = rules.find((r) => r.folderId === s.folderId)?.folderName ?? `夹子 ${s.folderId}`;
-            return (
-              <div
-                key={`${s.folderId}-${s.field}-${s.any.join()}`}
-                style={{
-                  borderLeft: '2px solid var(--ai)', background: 'var(--surface-2)',
-                  padding: '8px 10px', marginBottom: 6,
-                }}
-              >
-                <div style={{ fontSize: 'var(--fs-13)' }}>
-                  「{name}」加一条:
-                  <span style={{ color: 'var(--ai)' }}>
-                    {' '}{FIELD_LABEL[s.field]}含 {s.any.join(' · ')}
-                  </span>
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--text-dim)', margin: '4px 0 6px', lineHeight: 1.6 }}>
-                  依据:{s.because || '(没给依据)'}
-                  {/* 自证过的证据 —— 这是"该不该信它"的全部依据(§9C.5 R7) */}
-                  <span className="num"> · 命中 {s.evidenceItemIds.length} 条</span>
-                </div>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <Button
-                    size="small" type="primary" icon={<Check size={12} />}
-                    disabled={busy} onClick={() => void takeSuggestion(s, false)}
-                  >
-                    采纳
-                  </Button>
-                  <Button
-                    size="small" icon={<Pencil size={12} />}
-                    disabled={busy} onClick={() => void takeSuggestion(s, true)}
-                  >
-                    改一下
-                  </Button>
-                  <Button
-                    size="small" type="text" icon={<X size={12} />}
-                    disabled={busy} onClick={() => dropSuggestion(s)}
-                  >
-                    忽略
-                  </Button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
 
       {/* ── 草稿区:生成草稿 + 审查草稿混合显示(spec §6)── */}
       <DraftsArea

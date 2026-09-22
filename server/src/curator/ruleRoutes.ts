@@ -11,14 +11,14 @@ import type { FastifyInstance } from 'fastify';
 import type Database from 'better-sqlite3';
 import type { Logger } from '../logger/index.js';
 import {
-  listRules, getRule, saveRule, deleteRule, type RuleCondition, type RuleOrigin,
+  listRules, saveRule, deleteRule, type RuleCondition, type RuleOrigin,
 } from '../db/repo/rules.js';
 import { listWorkFolders } from '../db/repo/workbench.js';
 import { listFolders, isLockedFolder } from '../db/repo/folders.js';
 import { isAiFolder } from '../db/repo/aiFolders.js';
 import type { ItemRow } from '../db/repo/items.js';
 import { itemTagIds, subtreeSets } from '../db/repo/tags.js';
-import { matchAll, toRuleItem, validateSuggestion } from './rules.js';
+import { matchAll, toRuleItem } from './rules.js';
 
 export interface RuleDeps {
   db: Database.Database;
@@ -148,47 +148,6 @@ export function registerRuleRoutes(app: FastifyInstance, deps: RuleDeps): void {
     }
     // 只删规则 —— 夹子和里面的条目一行不动(界面上的文案也是这么说的)
     deleteRule(db, folderId);
-    return { ok: true };
-  });
-
-  /**
-   * 采纳一条 AI 建议 = **追加**一个条件,不是覆盖。
-   *
-   * 覆盖会把夹子原有的规则整条抹掉 —— 而"再给这个夹子加一条"正是建议的语义。
-   *
-   * 这里**再验一次**自证(spec §9C.6 约束 2):过不了验证的建议不入库,
-   * 连"待采纳"都不给。客户端传回来的东西不可信,验一遍的成本可以忽略。
-   */
-  app.post('/api/rules/:folderId/adopt', async (req, reply) => {
-    const folderId = Number((req.params as { folderId: string }).folderId);
-    const found = folderOr(folderId);
-    if (!found) {
-      return reply.code(404).send({ ok: false, reason: `工作副本里没有夹子 ${folderId}` });
-    }
-    if (found.origin && isLockedFolder(db, found.origin)) {
-      return reply.code(400).send({
-        ok: false,
-        reason: `「${found.origin.title}」是 B站 自带的默认收藏夹,不能加规则`,
-      });
-    }
-
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const items = db.prepare(`SELECT * FROM items`).all() as ItemRow[];
-    const valid = validateSuggestion(
-      { ...body, folderTempId: folderId },
-      {
-        validFolderIds: new Set([folderId]),
-        // 这里**故意**不带 tagIds:自证的探针字段只能是 VALID_FIELDS 里那三个文本字段
-        // —— tag 建议根本进不来(见 VALID_FIELDS 那条注释),带了也没人读
-        itemsById: new Map(items.map((i) => [i.id, toRuleItem(i)])),
-      },
-    );
-    if (!valid) {
-      return reply.code(400).send({ ok: false, reason: '这条建议过不了自证,不采纳' });
-    }
-
-    const existing = getRule(db, folderId)?.conditions ?? [];
-    saveRule(db, folderId, [...existing, { field: valid.field, any: valid.any }], 'ai');
     return { ok: true };
   });
 }

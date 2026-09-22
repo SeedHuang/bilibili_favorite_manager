@@ -2,9 +2,6 @@ import { App as AntApp, ConfigProvider, theme as antdTheme } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { Link, Outlet, useLocation } from '@umijs/max';
 import { FolderHeart, KeyRound, Tags, Wand2 } from 'lucide-react';
-import { AssistantProvider } from '../components/assistant';
-import AIAssistantIcon from '../components/AIAssistantIcon';
-import ChatDrawer from '../components/ChatDrawer';
 
 /**
  * HUD 外壳 —— 设计语言移植自 CP2077 UI Kit(B 档)。
@@ -59,9 +56,6 @@ export default function Layout() {
         (`html/body/#root` 100% → 外壳 100%)断一层就会塌。
       */}
       <AntApp component={false}>
-      {/* AI 管家是**全站常驻**的:不挂任何 tab,悬浮图标 + 抽屉都在外壳这一层
-          (spec §11.9)。状态放 context,因为 /curator 页面的按钮也要能叫出抽屉。 */}
-      <AssistantProvider>
       {/* 应用外壳:锁死一屏、自身不滚动,滚动只发生在内容区。
           高度用 100%(链自 html/body/#root 的 100%),**不用 100vh** ——
           100vh 是"视口高度"而 % 是"父元素高度",二者不等时会撑破外壳、
@@ -136,10 +130,7 @@ export default function Layout() {
             })}
           </nav>
 
-          {/* AI 管家入口:顶栏右侧,和 LOCAL MIRROR 并排。悬浮球曾挂在右下角,
-              那个位置压着内容区右下角的操作 —— 入口进顶栏,内容区保持干净 */}
           <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 14 }}>
-            <AIAssistantIcon />
             <span className="hud-label">LOCAL MIRROR</span>
           </div>
         </header>
@@ -158,10 +149,6 @@ export default function Layout() {
           <Outlet />
         </main>
       </div>
-
-        {/* 聊天抽屉:外壳层,和当前路由无关(入口在顶栏) */}
-        <ChatDrawer />
-      </AssistantProvider>
       </AntApp>
     </ConfigProvider>
   );

@@ -70,4 +70,27 @@ describe('schema', () => {
     const n = db.prepare(`SELECT COUNT(*) AS n FROM folder_items WHERE item_id = 'BV1'`).get() as { n: number };
     expect(n.n).toBe(2);
   });
+
+  it('老库带聊天数据也能升级 —— DROP 顺序对 FK 安全', () => {
+    const db = openDb(':memory:');
+    // 手工搭一个"真用过的老库":sessions 有数据,子表引用它
+    db.exec(`CREATE TABLE sessions (id INTEGER PRIMARY KEY, title TEXT)`);
+    db.exec(
+      `CREATE TABLE session_messages (
+         id INTEGER PRIMARY KEY,
+         session_id INTEGER NOT NULL REFERENCES sessions(id),
+         content TEXT
+       )`,
+    );
+    db.exec(`INSERT INTO sessions (id, title) VALUES (1, '旧会话')`);
+    db.exec(`INSERT INTO session_messages (session_id, content) VALUES (1, '旧消息')`);
+    // applySchema 要先能建出其余表、再清掉遗留表,整个过程不抛
+    expect(() => applySchema(db)).not.toThrow();
+    const t = (
+      db.prepare(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sessions', 'session_messages')`,
+      ).all() as { name: string }[]
+    ).map((r) => r.name);
+    expect(t).toEqual([]);
+  });
 });

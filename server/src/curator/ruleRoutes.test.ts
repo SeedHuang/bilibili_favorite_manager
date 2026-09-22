@@ -155,36 +155,6 @@ describe('规则路由', () => {
     await app.close();
   });
 
-  // 锁定这道闸有**两个**执行点(替换规则 / 采纳建议),上面那条只钉住了替换这一个
-  it('锁定夹子的采纳也被拒,且库里一行没写', async () => {
-    const { app, db } = makeApp();
-    await workcopy(app);
-    // 和上面同款:锁定夹子必须在 ensureWorkcopy **之前**躺在快照里 ——
-    // ensureWorkcopy 幂等,已有工作副本时再加夹子就进不去了(那测的是空集),所以
-    // reset 清掉工作副本、重新建一次,让 9 被克隆进来
-    upsertFolder(db, { id: 9, title: '默认收藏夹', mediaCount: 0, raw: JSON.stringify({ attr: 0 }) });
-    await app.inject({ method: 'POST', url: '/api/workbench/reset' });
-    await app.inject({ method: 'POST', url: '/api/workbench/folders', payload: { name: '临时' } });
-
-    const view = (await app.inject({ url: '/api/workbench' })).json();
-    const locked = view.folders.find((f: { originId: number | null }) => f.originId === 9).id;
-
-    const res = await app.inject({
-      method: 'POST', url: `/api/rules/${locked}/adopt`,
-      // 这条建议**本身是合法的**(BV1 的标题真的含 Python)—— 它只会因为**锁**被拒,
-      // 不是因为自证不过;否则测的是另一道闸,锁定那道没被钉住
-      payload: { field: 'title', any: ['Python'], because: '同类', evidenceItemIds: ['BV1'] },
-    });
-    expect(res.statusCode).toBe(400);
-    expect(res.json().reason).toContain('默认收藏夹');
-
-    const mine = (await app.inject({ url: '/api/rules' }))
-      .json()
-      .rules.find((r: { folderId: number }) => r.folderId === locked);
-    expect(mine.conditions).toEqual([]); // 一条都没写进去
-    await app.close();
-  });
-
   it('DELETE 清掉规则', async () => {
     const { app } = makeApp();
     const id = await workcopy(app);
@@ -200,57 +170,6 @@ describe('规则路由', () => {
       .rules.find((r: { folderId: number }) => r.folderId === id);
     expect(mine.conditions).toEqual([]);
     expect(mine.hit).toBe(0);
-    await app.close();
-  });
-
-  // 采纳是**追加**,不是覆盖 —— 覆盖会把夹子原有的规则整条抹掉
-  it('POST adopt 追加一条条件,origin 记 ai', async () => {
-    const { app } = makeApp();
-    const id = await workcopy(app);
-    await app.inject({
-      method: 'PUT', url: `/api/rules/${id}`,
-      payload: { conditions: [{ field: 'title', any: ['Python'] }] },
-    });
-
-    const res = await app.inject({
-      method: 'POST', url: `/api/rules/${id}/adopt`,
-      payload: {
-        field: 'title', any: ['Rust'], because: '同类',
-        evidenceItemIds: ['BV2'],
-      },
-    });
-    expect(res.statusCode).toBe(200);
-
-    const mine = (await app.inject({ url: '/api/rules' }))
-      .json()
-      .rules.find((r: { folderId: number }) => r.folderId === id);
-    expect(mine.conditions).toEqual([
-      { field: 'title', any: ['Python'] },
-      { field: 'title', any: ['Rust'] },
-    ]);
-    expect(mine.origin).toBe('ai');
-    expect(mine.hit).toBe(2); // 两条都被捞走了
-    await app.close();
-  });
-
-  // §9C.6 约束 2:没验过的建议不入库。采纳这条路径**也要**过验证
-  it('POST adopt 一条自证不过的建议 → 400,库里没有它', async () => {
-    const { app } = makeApp();
-    const id = await workcopy(app);
-
-    const res = await app.inject({
-      method: 'POST', url: `/api/rules/${id}/adopt`,
-      payload: {
-        field: 'title', any: ['根本打不中'],
-        because: '编的', evidenceItemIds: ['BV1'],
-      },
-    });
-    expect(res.statusCode).toBe(400);
-
-    const mine = (await app.inject({ url: '/api/rules' }))
-      .json()
-      .rules.find((r: { folderId: number }) => r.folderId === id);
-    expect(mine.conditions).toEqual([]);
     await app.close();
   });
 });

@@ -285,7 +285,7 @@ function FolderRow({
           disabled={folder.locked}
           title={
             folder.locked
-              ? 'B站 自带的默认收藏夹 —— 不能改名、不能删除,也不能整夹子搬走。里面的条目请用归类或展开后单独挑'
+              ? 'B站 自带的默认收藏夹 —— 不能改名、不能删除,也不能整夹子搬走。里面的条目请展开后单独挑'
               : undefined
           }
           aria-label={`选择夹子「${folder.name}」(${folder.itemCount} 条)`}

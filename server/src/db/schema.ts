@@ -83,58 +83,6 @@ CREATE TABLE IF NOT EXISTS api_calls (
 );
 CREATE INDEX IF NOT EXISTS idx_api_trace ON api_calls(trace_id);
 
--- M4 AI 整理 增量 schema(2026-09-15)
--- sessions: AI 整理会话(可续)
-CREATE TABLE IF NOT EXISTS sessions (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  title      TEXT,
-  preview    TEXT,
-  status     TEXT,
-  summary    TEXT,
-  created_at INTEGER,
-  updated_at INTEGER
-);
--- session_messages: 只存聊天本质,不含结构化编辑(红队 2026-09-15)
-CREATE TABLE IF NOT EXISTS session_messages (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id INTEGER NOT NULL REFERENCES sessions(id),
-  role       TEXT NOT NULL,
-  content    TEXT NOT NULL,
-  ts         INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_msg_session ON session_messages(session_id);
--- taxonomy_draft: 用户在聊天窗里直接编辑的体系状态(不进消息流)
-CREATE TABLE IF NOT EXISTS taxonomy_draft (
-  session_id       INTEGER PRIMARY KEY REFERENCES sessions(id),
-  folders_json     TEXT NOT NULL,
-  constraints_json  TEXT,
-  summary          TEXT,
-  updated_at       INTEGER
-);
--- M5 审计报告
-CREATE TABLE IF NOT EXISTS audit_logs (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind         TEXT NOT NULL,
-  title        TEXT,
-  summary      TEXT,
-  before_json  TEXT,
-  after_json   TEXT,
-  detail_json  TEXT,
-  trace_id     TEXT,
-  created_at   INTEGER
-);
-
--- classifications: Pass 2 的归类结果(M4)。一条会话一份,重跑覆盖。
--- 为什么要落库:条目级 ai_reason 要能点开看(spec §9.0 Step 4),
--- 而重跑 3000 条的 Pass 2 是实打实花钱的,不能每次刷新页面都重来。
--- 刻意**不用** §5 的 plans 表 —— 那是 M5 写回流程的表,等 M5 自己建。
-CREATE TABLE IF NOT EXISTS classifications (
-  session_id       INTEGER PRIMARY KEY REFERENCES sessions(id),
-  assignments_json TEXT NOT NULL,
-  failed_json      TEXT,
-  updated_at       INTEGER
-);
-
 -- ── M4b 整理工作台(2026-09-16)──────────────────────────
 -- 同步快照(folders / folder_items)与工作副本分离:快照只读、编辑只写下面这几张。
 -- 破了这条「还原」就没有意义 —— 改动和 B站 真相混在一起就分不出谁是谁。
@@ -172,7 +120,6 @@ CREATE TABLE IF NOT EXISTS operation_log (
   ts          INTEGER NOT NULL,
   kind        TEXT NOT NULL,
   actor       TEXT NOT NULL,   -- 'user' | 'ai'
-  session_id  INTEGER,         -- actor='ai' 时是哪次对话
   summary     TEXT NOT NULL,   -- 人类可读一句话,界面直接显示
   detail_json TEXT
 );

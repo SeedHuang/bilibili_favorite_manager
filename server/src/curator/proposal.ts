@@ -15,7 +15,7 @@ import { matchAll, toRuleItem } from './rules.js';
 /**
  * 夹子方案生成 —— prompt 组装 + AI 输出裁判(纯函数,无 IO)。
  *
- * 裁判沿 validateSuggestion 的纪律:**编造就整条丢**,不给部分正确留宽容。
+ * 裁判纪律:**编造就整条丢**,不给部分正确留宽容。
  * 阶梯进 prompt **不带任何具体例子** —— 具体词(Claude Code 之类)会锚定模型
  * 往科技领域聚,例子只留在 spec 的人看表格里。
  */

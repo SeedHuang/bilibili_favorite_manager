@@ -20,12 +20,10 @@ import { assertUsableBaseUrl } from './provider.js';
 
 // proposals(夹子方案生成)2026-09-20 起独立于 rules:两者量级与要求不同,
 // 混用会让规则页和方案页互相抢同一档模型
-export type LlmPurpose = 'chat' | 'classify' | 'proposals' | 'rules' | 'tag' | 'tagcheck';
-export const PURPOSES: readonly LlmPurpose[] = ['chat', 'classify', 'proposals', 'rules', 'tag', 'tagcheck'];
+export type LlmPurpose = 'proposals' | 'rules' | 'tag' | 'tagcheck';
+export const PURPOSES: readonly LlmPurpose[] = ['proposals', 'rules', 'tag', 'tagcheck'];
 /** 面向用户展示的用途名 —— 报错里别漏内部 key */
 const PURPOSE_LABELS: Record<LlmPurpose, string> = {
-  chat: '聊天',
-  classify: '归类',
   proposals: '夹子方案生成',
   rules: '规则建议',
   tag: '打标',
@@ -205,6 +203,22 @@ export function readLlmSettings(db: Database.Database, purpose: LlmPurpose): Llm
     },
     ctx,
   };
+}
+
+/**
+ * 已保存凭证里的第一个可用 apiKey(解密后)。空 = 没配任何带 key 的凭证。
+ *
+ * 聊天用途删除后,test-llm / remote-models 还需要一个"拿已存 key 当回落"的
+ * 来源 —— 取第一个**真正带 key** 的条目,不依赖任何具体用途(用途无关)。
+ * 跳过没配 key 的(Ollama 凭证、或用户清空过 key),否则拿空 key 发请求。
+ */
+export function firstSavedApiKey(db: Database.Database): string {
+  const providers = new Map(listProviders(db).map((p) => [p.id, p]));
+  for (const entry of listEntries(db)) {
+    const enc = providers.get(entry.providerId)?.apiKeyEnc;
+    if (enc) return decryptSecret(enc) ?? '';
+  }
+  return '';
 }
 
 // ── 测试铺底(生产代码不 import)─────────────────────

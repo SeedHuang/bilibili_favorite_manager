@@ -16,97 +16,6 @@ export interface Item {
   pubtime: number | null; favTime: number | null; upperName: string | null; invalid: number;
 }
 
-// ── M4:AI 整理 ──────────────────────────────────────────
-
-/** 体系里的一个夹子(草稿 / Pass 1 提案共用) */
-export interface FolderSpec {
-  /** Pass 2 引用用的临时 id */
-  tempId: string;
-  name: string;
-  description: string;
-  rule: string;
-  estCount: number;
-  /** 复用现有夹子而不是新建 —— B站不能改归属,复用比新建重要得多 */
-  reuseFolderId?: number;
-}
-
-export interface ChatMessage {
-  id: number;
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  ts: number | null;
-}
-
-export interface SessionSummary {
-  id: number;
-  title: string | null;
-  preview: string | null;
-  status: 'active' | 'archived' | null;
-  updatedAt: number | null;
-}
-
-export interface Assignment {
-  itemId: string;
-  /** null = 未归类(AI 语境里也只有这一个说法,不另起一个词) */
-  folderTempId: string | null;
-  confidence: number;
-  reason: string;
-}
-
-export interface FailedBatch {
-  firstItemId: string;
-  size: number;
-  reason: string;
-}
-
-export interface TaxonomyProposal {
-  folders: FolderSpec[];
-  notes: string;
-}
-
-/** Pass 1 输出校验报告(spec §9.1.1)。前两条阻断,后两条只是警告 */
-export interface ValidationReport {
-  invalidReuseIds: number[];
-  duplicateReuseIds: { folderId: number; tempIds: string[] }[];
-  unmatchedExistingFolders: number[];
-  nameConflicts: string[];
-}
-
-export interface SessionDetail {
-  session: SessionSummary;
-  messages: ChatMessage[];
-  draft: { sessionId: number; folders: FolderSpec[]; constraints?: string; updatedAt: number } | null;
-  classification: { assignments: Assignment[]; failed: FailedBatch[] } | null;
-}
-
-export interface FolderSnapshot {
-  id?: number;
-  tempId?: string;
-  name: string;
-  count: number;
-}
-
-export interface AuditReport {
-  kind: 'reorganize';
-  title: string;
-  summary: string;
-  before: FolderSnapshot[];
-  after: FolderSnapshot[];
-  detail: {
-    merged: { fromFolderId: number; intoTempId: string }[];
-    unassigned: string[];
-    byFolder: Record<string, string[]>;
-  };
-}
-
-export interface AuditSummary {
-  id: number;
-  kind: string;
-  title: string | null;
-  summary: string | null;
-  createdAt: number | null;
-}
-
 export interface ModelMeta {
   provider: string;
   model: string;
@@ -138,49 +47,10 @@ export interface EntryView {
 }
 
 // proposals 已进 purpose 联合(设置页方案生成行要模型下拉;server 侧 Plan C 才认)
-export type LlmPurpose = 'chat' | 'classify' | 'rules' | 'tag' | 'tagcheck' | 'proposals';
+export type LlmPurpose = 'rules' | 'tag' | 'tagcheck' | 'proposals';
 
 export interface AssignmentsView {
   assignments: Record<LlmPurpose, string | null>;
-}
-
-export interface Pass1Response {
-  taxonomy: TaxonomyProposal;
-  warnings: string[];
-  validation: ValidationReport;
-  sampleSize: number;
-  keywordStats: { matched: number; unmatched: number };
-  batchSize: number;
-}
-
-export interface Pass2Response {
-  assignments: Assignment[];
-  failedBatches: FailedBatch[];
-  total: number;
-  batchSize: number;
-  /** 规则归了几条条目(spec §9C.3 ③ 要如实分栏) */
-  ruleCount: number;
-  /** AI 归了几条 */
-  aiCount: number;
-  /** 没归上的那些条目攒出来的建议 —— 不落库,刷新就没了 */
-  suggestions: RuleSuggestion[];
-}
-
-/**
- * run-pass-2 的 progress 帧载荷(§9D A2)—— **恰好这五个字段**,多一个都算破坏契约。
- * 服务端每跑完一批发一帧,用来画进度条。
- */
-export interface ProgressPayload {
-  /** 刚到第几批 */
-  batch: number;
-  /** 一共几批 */
-  batches: number;
-  /** 已完成条数 */
-  done: number;
-  /** 交给 AI 的总条数 */
-  total: number;
-  /** 规则已接走的条目数(与 done 帧的 ruleCount 同口径) */
-  ruleCount: number;
 }
 
 // ── M4b:整理工作台 ──────────────────────────────────────
@@ -235,7 +105,6 @@ export interface OperationEntry {
   ts: number;
   kind: OpKind;
   actor: 'user' | 'ai';
-  sessionId: number | null;
   summary: string;
   detail: unknown;
 }
@@ -270,20 +139,14 @@ export interface RuleView {
   hit: number;
 }
 
-/**
- * 一条 AI 规则建议。**过了自证才有**(服务端会拿这组词去跑匹配验证)。
- * 建议不落库 —— 采纳才变成规则。
- */
-export interface RuleSuggestion {
-  folderId: number;
-  field: RuleField;
-  any: string[];
-  because: string;
-  /** 它声称会命中的条目 —— 建议可信度的来源 */
-  evidenceItemIds: string[];
-}
-
 // ── M4e:条目 AI 标注 ────────────────────────────────────
+
+/** 一批失败的条目(打标/质检进度里的 failedBatches 用) */
+export interface FailedBatch {
+  firstItemId: string;
+  size: number;
+  reason: string;
+}
 
 /** 打标进度 + 这次会用哪个模型(spec §9E) */
 export interface TagRunStatus {
@@ -301,7 +164,7 @@ export interface TagRunStatus {
   model: { provider: string; model: string; source: 'tag' | 'main' } | null;
 }
 
-/** 标注的 progress 帧载荷 —— 只有这三个数,没有归类那边的 ruleCount */
+/** 标注的 progress 帧载荷 —— 只有这三个数 */
 export interface TagProgressPayload {
   done: number;
   total: number;

@@ -1,16 +1,10 @@
 import type {
   AssignmentsView,
-  AuditReport,
-  AuditSummary,
   EntryView,
-  FolderSpec,
   Item,
   LlmPurpose,
   ModelMeta,
   OperationEntry,
-  Pass1Response,
-  Pass2Response,
-  ProgressPayload,
   ProposalDraftView,
   ProposalInfo,
   ProposalLogLine,
@@ -19,10 +13,7 @@ import type {
   PollsMap,
   ProviderView,
   RuleCondition,
-  RuleSuggestion,
   RuleView,
-  SessionDetail,
-  SessionSummary,
   TagRunProgress,
   TagRunStatus,
   TagTreeView,
@@ -71,8 +62,9 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
  * `FST_ERR_CTP_EMPTY_JSON_BODY`,在进 handler 之前就 400,响应体里**没有 `reason`**,
  * 界面上只显示一句"请求失败 400",后端连日志都来不及记(实测踩过)。
  *
- * 无 body 的调用有八个:删夹子 / 一键还原 / 归档会话 / 撤回方案 / 归类 /
- * 规则删除 / 规则试跑 / 规则建议 —— 全被这一处影响,所以修在这里而不是每个调用点。
+ * 无 body 的调用有 14 个:删夹子 / 一键还原 / 规则删除 / 删厂商 / 删模型项 /
+ * 中止方案生成 / 方案全部采纳 / 方案全部丢弃 / 中止审查 / 审查全部采纳 /
+ * 删标签 / 中止标注 / 清空标注 / 启动标注 —— 全被这一处影响,所以修在这里而不是每个调用点。
  */
 export function json<T>(method: 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
   return api<T>(path, {
@@ -89,170 +81,6 @@ export function json<T>(method: 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: strin
  */
 export const setFolderLock = (id: number, locked: boolean | null) =>
   json<{ ok: true; locked: boolean }>('PUT', `/api/folders/${id}/lock`, { locked });
-
-// ── M4:AI 整理 ──────────────────────────────────────────
-
-export const curatorApi = {
-  listSessions: () =>
-    api<{ sessions: SessionSummary[] }>('/api/curator/sessions').then((r) => r.sessions),
-
-  newSession: (title?: string) =>
-    json<{ id: number }>('POST', '/api/curator/sessions', title ? { title } : {}).then((r) => r.id),
-
-  getSession: (id: number) => api<SessionDetail>(`/api/curator/sessions/${id}`),
-
-  archiveSession: (id: number) => json<{ ok: true }>('DELETE', `/api/curator/sessions/${id}`),
-
-  getDraft: (id: number) =>
-    api<{ draft: SessionDetail['draft'] }>(`/api/curator/sessions/${id}/draft`).then((r) => r.draft),
-
-  saveDraft: (id: number, folders: FolderSpec[], constraints?: string) =>
-    json<{ ok: true }>('PUT', `/api/curator/sessions/${id}/draft`, { folders, constraints }),
-
-  runPass1: (id: number, constraint?: string) =>
-    json<Pass1Response>('POST', `/api/curator/sessions/${id}/run-pass-1`, { constraint }),
-
-  runPass2: (id: number) => json<Pass2Response>('POST', `/api/curator/sessions/${id}/run-pass-2`),
-
-  /**
-   * 把 AI 归类提案应用到工作副本。folderTempId 就是工作夹子 id,不需要映射。
-   *
-   * 默认不覆盖:期间有用户手改时后端回 **409**,确认过再带 `force: true` 重来。
-   */
-  apply: (sessionId: number, force = false) =>
-    json<{
-      ok: true;
-      applied: number;
-      skipped: number;
-      /** AI 拿不准、保持原样的条数 —— 不单列的话"归类完成"就是句假话 */
-      unclassified: number;
-      /** **日志条数**,不是条目数(一次操作只留一行) */
-      overwritten: number;
-    }>('POST', `/api/curator/sessions/${sessionId}/apply`, { force }),
-
-  /** 撤回方案:草稿和归类结果一起丢 */
-  clearClassification: (id: number) =>
-    json<{ ok: true }>('DELETE', `/api/curator/sessions/${id}/classification`),
-
-  makeAudit: (sessionId: number) =>
-    json<{ id: number; report: AuditReport }>('POST', '/api/curator/audit/reorganize', { sessionId }),
-
-  listAudits: (kind?: string) =>
-    api<{ audits: AuditSummary[] }>(
-      `/api/curator/audit${kind ? `?kind=${kind}` : ''}`,
-    ).then((r) => r.audits),
-};
-
-/**
- * 发一条消息并接收流式回复。
- *
- * 用 fetch + ReadableStream 而不是 EventSource —— EventSource 只能 GET,
- * 而发消息必须带 body。
- *
- * `opts.signal` 传进去 = 用户点停止能真的断开(服务端据此中止生成,
- * 半截回复带 `(已中断)` 标注落库)。不传 = 老行为(不可中断)。
- */
-export async function streamMessage(
-  sessionId: number,
-  content: string,
-  onDelta: (delta: string) => void,
-  opts: { signal?: AbortSignal; onReasoning?: (delta: string) => void } = {},
-): Promise<string> {
-  const res = await fetch(`${API_BASE}/api/curator/sessions/${sessionId}/messages`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ content }),
-    ...(opts.signal ? { signal: opts.signal } : {}),
-  });
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { reason?: string };
-    throw new Error(body.reason ?? `请求失败 ${res.status}`);
-  }
-  if (!res.body) throw new Error('服务端没有返回流');
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let full = '';
-  let failure: string | null = null;
-
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    // SSE 以空行分隔事件;最后一段可能不完整,留在 buffer 里等下一个 chunk
-    const events = buffer.split('\n\n');
-    buffer = events.pop() ?? '';
-    for (const block of events) {
-      const event = /^event: (.+)$/m.exec(block)?.[1] ?? 'message';
-      const data = /^data: (.*)$/m.exec(block)?.[1];
-      if (!data) continue;
-      const payload = JSON.parse(data) as { delta?: string; content?: string; reason?: string };
-
-      if (event === 'error') failure = payload.reason ?? '模型调用失败';
-      else if (event === 'done') full = payload.content ?? full;
-      // 思考过程单独的帧(§9D.5)—— 不进正文,由调用方决定怎么展示
-      else if (event === 'reasoning') opts.onReasoning?.(payload.delta ?? '');
-      else if (payload.delta) {
-        full += payload.delta;
-        onDelta(payload.delta);
-      }
-    }
-  }
-
-  if (failure) throw new Error(failure);
-  return full;
-}
-
-/**
- * 归类的流式应答(§9D A1):progress 帧喂给 onProgress,done 帧的载荷原样返回。
- *
- * 中途中止(用户点停止)服务端回 `aborted` 帧 —— 这里抛 AbortError,
- * 和 fetch 自己中止是同一种形状,调用方一个 catch 就能两处都接住。
- */
-export async function classifyStream(
-  sessionId: number,
-  onProgress: (p: ProgressPayload) => void,
-  opts: { signal?: AbortSignal } = {},
-): Promise<Pass2Response> {
-  const res = await fetch(`${API_BASE}/api/curator/sessions/${sessionId}/run-pass-2`, {
-    method: 'POST',
-    ...(opts.signal ? { signal: opts.signal } : {}),
-  });
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { reason?: string };
-    throw new Error(body.reason ?? `请求失败 ${res.status}`);
-  }
-  if (!res.body) throw new Error('服务端没有返回流');
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let done: Pass2Response | null = null;
-  let failure: string | null = null;
-
-  for (;;) {
-    const { done: eof, value } = await reader.read();
-    if (eof) break;
-    buffer += decoder.decode(value, { stream: true });
-    // SSE 以空行分隔事件;最后一段可能不完整,留在 buffer 里等下一个 chunk
-    const events = buffer.split('\n\n');
-    buffer = events.pop() ?? '';
-    for (const block of events) {
-      const event = /^event: (.+)$/m.exec(block)?.[1] ?? 'message';
-      const data = /^data: (.*)$/m.exec(block)?.[1];
-      if (!data) continue;
-      if (event === 'progress') onProgress(JSON.parse(data) as ProgressPayload);
-      else if (event === 'done') done = JSON.parse(data) as Pass2Response;
-      else if (event === 'aborted') throw new DOMException('已中止', 'AbortError');
-      else if (event === 'error') failure = (JSON.parse(data) as { reason?: string }).reason ?? '归类失败';
-    }
-  }
-  if (failure) throw new Error(failure);
-  if (!done) throw new Error('服务端没有返回归类结果');
-  return done;
-}
 
 // ── 模型管理(spec §3)──────────────────────────────────
 
@@ -380,10 +208,6 @@ export const rulesApi = {
     json<{ ok: true }>('PUT', `/api/rules/${folderId}`, { conditions }),
 
   remove: (folderId: number) => json<{ ok: true }>('DELETE', `/api/rules/${folderId}`),
-
-  /** 采纳一条建议 = **追加**一个条件(origin 记 'ai'),不是覆盖 */
-  adopt: (folderId: number, s: Omit<RuleSuggestion, 'folderId'>) =>
-    json<{ ok: true }>('POST', `/api/rules/${folderId}/adopt`, s),
 };
 
 // ── 批次任务三件套设置 ──────────────────────────────────

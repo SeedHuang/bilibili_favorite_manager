@@ -7,7 +7,7 @@
  * 协议只用两种:DeepSeek 官方包,和 OpenAI 兼容(覆盖 Ollama / 方舟 / MiniMax / 自定义)。
  * 不写 per-provider 适配器(spec §3)。
  */
-import { generateText, streamText } from 'ai';
+import { generateText } from 'ai';
 import type { ModelMessage, SystemModelMessage } from 'ai';
 import { createDeepSeek } from '@ai-sdk/deepseek';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
@@ -114,7 +114,7 @@ function splitPrompt(messages: ChatMessage[]): {
 }
 
 /**
- * 一次性拿完整输出(分类批处理用)。
+ * 一次性拿完整输出。
  * system prompt 就走 messages 里的 role:'system' —— 只留一条通道,
  * 免得"有的在参数里、有的在数组里"两处都能出错。
  */
@@ -124,9 +124,9 @@ export async function complete(opts: {
   /** 调用方断开(用户点了停止)时中断生成 —— §9D B2。不传 = 不可中断(和旧行为一致) */
   abortSignal?: AbortSignal;
   /**
-   * 要不要走思考模式。**缺省 = 不传**,交给厂商默认(聊天要它,下面 §9D.5 的思考流靠它)。
+   * 要不要走思考模式。**缺省 = 不传**,交给厂商默认。
    *
-   * 批量调用必须传 `false`:标注/归类/质检要的是"照格式吐 JSON",不是"想清楚" ——
+   * 批量调用必须传 `false`:标注/质检要的是"照格式吐 JSON",不是"想清楚" ——
    * 每批吐一长串推理,输出 token 涨数倍、整体变慢(spec §3 末)。
    */
   thinking?: boolean;
@@ -134,8 +134,7 @@ export async function complete(opts: {
    * 单次模型调用的超时(ms)。**没有这个,本地 4b 挂起(OOM/卡死/网络黑洞)时
    * `generateText` 永不 resolve** —— 整轮标注卡死、`running` 永久 true、
    * 用户点停止 abort 不生效(用户报的正是这一串)。超时触发 = 抛错,调用方把
-   * 这批记失败继续,而不是卡死整轮。只给批量路径传,聊天不传(聊到一半被砍
-   * 是打断,不是超时)。
+   * 这批记失败继续,而不是卡死整轮。只给批量路径传。
    */
   timeoutMs?: number;
   /**
@@ -177,7 +176,7 @@ export async function complete(opts: {
       ...(opts.maxOutputTokens ? { maxOutputTokens: opts.maxOutputTokens } : {}),
       // `@ai-sdk/deepseek` 原生认这个键(3.0.44:`providerOptions.deepseek.thinking.type`,
       // 缺省 `enabled`)。**判 undefined,而不是给个默认值** —— 缺省的语义是
-      // "这个参数一个字都不出现",聊天那条路的请求因此和加开关之前逐字一致
+      // "这个参数一个字都不出现",请求形状和加开关之前逐字一致
       ...(opts.thinking === undefined
         ? {}
         : { providerOptions: { deepseek: { thinking: { type: opts.thinking ? 'enabled' : 'disabled' } } } }),
@@ -215,59 +214,4 @@ export async function complete(opts: {
     if (raceTimer) clearTimeout(raceTimer);
     if (onCallerAbort) opts.abortSignal?.removeEventListener('abort', onCallerAbort);
   }
-}
-
-/**
- * 流式产出(聊天窗用)。逐块回调,同时返回全文。
- * 调用方拿全文去落库 —— 流断了也不会存半条。
- */
-export async function stream(opts: {
-  config: ModelConfig;
-  messages: ChatMessage[];
-  onChunk: (delta: string) => void;
-  /** 思考流(推理型模型才有,§9D.5)。回调参数是本段 reasoning 的增量 */
-  onReasoning?: (delta: string) => void;
-  /** 同 complete:用户点停止时让 SDK 真的停下来,而不是我们这边不再读流 */
-  abortSignal?: AbortSignal;
-  /** 同 complete。**聊天不传** —— 要的正是思考流(§9D.5),关掉就没得看了 */
-  thinking?: boolean;
-}): Promise<string> {
-  let streamError: unknown;
-  const { instructions, rest } = splitPrompt(opts.messages);
-  const result = streamText({
-    model: languageModel(opts.config),
-    ...(instructions ? { instructions } : {}),
-    messages: rest,
-    // 同 complete:不传就是厂商默认,不塞空对象
-    ...(opts.thinking === undefined
-      ? {}
-      : { providerOptions: { deepseek: { thinking: { type: opts.thinking ? 'enabled' : 'disabled' } } } }),
-    // 不传 signal 的话,我们只是不再读流,上游还在为这条请求烧 token
-    ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
-    // streamText **不抛错** —— 参数校验失败、上游报错都只进 onError,
-    // 然后流"正常结束"。不接住的话,一次失败看起来就是"模型回了空话"
-    onError: ({ error }) => {
-      streamError = error;
-    },
-  });
-
-  let full = '';
-  // 用 fullStream 而不是 textStream:textStream 只有文本,**推理型模型的思考过程
-  // (reasoning-delta)在这里被丢掉** —— 用户看着几分钟空白,以为卡了(§9D.5 实测)。
-  // 没有思考的模型不吐这种 part,回调根本不会触发,零成本。
-  //
-  // **type 谓词收窄不了 reasoning-delta** —— SDK 的公共 fullStream 类型没收录它
-  // (运行时确实会发,真模型实测 82 字符),所以按 type 判别的分支里它是 never。
-  // 用 in 判据手动收窄,别用 as 硬翻;判据取运行时真实形状(探针验证过),不是类型名。
-  for await (const part of result.fullStream) {
-    if (part.type === 'text-delta') {
-      full += part.text;
-      opts.onChunk(part.text);
-    } else if ('text' in part && (part as { type?: string }).type === 'reasoning-delta') {
-      opts.onReasoning?.(part.text);
-    }
-  }
-
-  if (streamError) throw streamError;
-  return full;
 }

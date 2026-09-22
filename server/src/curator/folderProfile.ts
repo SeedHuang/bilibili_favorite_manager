@@ -64,16 +64,3 @@ export function buildFolderProfiles(db: Database.Database): FolderProfile[] {
     };
   });
 }
-
-/**
- * 渲染成给模型看的一段。**空画像不占行** —— 和 renderItem 的标签行同一个规矩。
- */
-export function renderProfiles(profiles: readonly FolderProfile[]): string {
-  return profiles
-    .filter((p) => p.topTags.length > 0)
-    .map((p) => {
-      const mix = p.topTags.map((t) => `${t.name} ${Math.round((t.count / Math.max(1, p.itemCount)) * 100)}%`).join('、');
-      return `- ${p.name}(${p.itemCount} 条)—— 实际构成:${mix}`;
-    })
-    .join('\n');
-}

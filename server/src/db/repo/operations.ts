@@ -6,7 +6,7 @@ import type Database from 'better-sqlite3';
  * 一次操作一行,哪怕它碰了 412 条视频。数据库级的行变更日志是 debug 用的,
  * 不该出现在界面上;用户要的"留痕"是我做了什么决定。
  *
- * **没有 `apply_ai` 这个 kind**:AI 应用产生的就是下面这些普通类型,
+ * **没有 `apply_ai` 这个 kind**:AI 产生的操作就是下面这些普通类型,
  * 只是 actor='ai'。这是"AI 的改动不是另一类东西"在结构上的落实 ——
  * 否则就会出现"手动改的能还原、AI 改的不能"。
  */
@@ -34,7 +34,6 @@ export interface OperationEntry {
   ts: number;
   kind: OpKind;
   actor: OpActor;
-  sessionId: number | null;
   summary: string;
   detail: unknown;
 }
@@ -44,7 +43,6 @@ export function logOperation(
   e: {
     kind: OpKind;
     actor: OpActor;
-    sessionId?: number | null;
     summary: string;
     detail?: unknown;
   },
@@ -59,14 +57,13 @@ export function logOperation(
 
   const r = db
     .prepare(
-      `INSERT INTO operation_log (ts, kind, actor, session_id, summary, detail_json)
-       VALUES (@ts, @kind, @actor, @sessionId, @summary, @detail)`,
+      `INSERT INTO operation_log (ts, kind, actor, summary, detail_json)
+       VALUES (@ts, @kind, @actor, @summary, @detail)`,
     )
     .run({
       ts,
       kind: e.kind,
       actor: e.actor,
-      sessionId: e.sessionId ?? null,
       summary: e.summary,
       detail: e.detail === undefined ? null : JSON.stringify(e.detail),
     });
@@ -86,7 +83,7 @@ export function listOperations(
     )
     .all(opts.sinceTs ?? 0, opts.limit ?? 200) as {
     id: number; ts: number; kind: string; actor: string;
-    session_id: number | null; summary: string; detail_json: string | null;
+    summary: string; detail_json: string | null;
   }[];
 
   return rows.map((r) => ({
@@ -94,7 +91,6 @@ export function listOperations(
     ts: r.ts,
     kind: r.kind as OpKind,
     actor: r.actor as OpActor,
-    sessionId: r.session_id,
     summary: r.summary,
     detail: r.detail_json ? (JSON.parse(r.detail_json) as unknown) : null,
   }));

@@ -29,9 +29,9 @@ describe('凭证层', () => {
     // 读取走三层(凭证→条目→分配),所以要有一条被用途引用的条目才读得到
     addEntry(db, { providerId: p.id, model: 'deepseek-flash' });
     saveProvider(db, { id: p.id, provider: 'deepseek', baseUrl: 'http://x/v1' });
-    expect(readLlmSettings(db, 'chat')!.config.apiKey).toBe('sk-keep-me-1234');
+    expect(readLlmSettings(db, 'rules')!.config.apiKey).toBe('sk-keep-me-1234');
     saveProvider(db, { id: p.id, provider: 'deepseek', apiKey: '' });
-    expect(readLlmSettings(db, 'chat')!.config.apiKey).toBe('');
+    expect(readLlmSettings(db, 'rules')!.config.apiKey).toBe('');
   });
 
   it('更新:baseUrl undefined = 保留已存;空串 = 清空(与 apiKey 同规矩)', () => {
@@ -63,7 +63,7 @@ describe('凭证层', () => {
 });
 
 describe('条目层', () => {
-  it('添加条目:五用途全空 → 自动全分配', () => {
+  it('添加条目:用途全空 → 自动全分配', () => {
     const db2 = fresh();
     const p = saveProvider(db2, { provider: 'ollama' });
     const e = addEntry(db2, { providerId: p.id, model: 'qwen2.5:14b' });
@@ -94,7 +94,7 @@ describe('条目层', () => {
 
   it('setAssignment 指向不存在的条目 → throw', () => {
     const db = fresh();
-    expect(() => setAssignment(db, 'chat', 'm_nope')).toThrow();
+    expect(() => setAssignment(db, 'rules', 'm_nope')).toThrow();
   });
 });
 
@@ -110,18 +110,18 @@ describe('readLlmSettings(三层查找)', () => {
   });
 
   it('用途没分配 → null;分配指向不存在的条目(脏数据)→ null', () => {
-    expect(readLlmSettings(fresh(), 'chat')).toBeNull();
+    expect(readLlmSettings(fresh(), 'rules')).toBeNull();
     const db2 = fresh();
     // setAssignment 自己会拦不存在的条目,脏数据只能绕过它直接落库
-    setRaw(db2, 'llm.purpose.chat', 'm_gone');
-    expect(readLlmSettings(db2, 'chat')).toBeNull();
+    setRaw(db2, 'llm.purpose.rules', 'm_gone');
+    expect(readLlmSettings(db2, 'rules')).toBeNull();
   });
 
   it('ollama 条目:llm.ollama.meta 有真实值 → 用它且 verified:true', () => {
     const db = fresh();
     seedLlm(db, { provider: 'ollama', model: 'qwen3-custom:latest' });
     setRaw(db, 'llm.ollama.meta', JSON.stringify({ 'qwen3-custom:latest': { contextWindow: 40_960, maxOutput: 8_192 } }));
-    const s = readLlmSettings(db, 'chat')!;
+    const s = readLlmSettings(db, 'rules')!;
     expect(s.ctx.contextWindow).toBe(40_960);
     expect(s.ctx.verified).toBe(true);
   });
@@ -129,12 +129,12 @@ describe('readLlmSettings(三层查找)', () => {
   it('ollama 条目:meta 没有 → 兜底 32K/4K + verified:false', () => {
     const db = fresh();
     seedLlm(db, { provider: 'ollama', model: 'never-seen:latest' });
-    const s = readLlmSettings(db, 'chat')!;
+    const s = readLlmSettings(db, 'rules')!;
     expect(s.ctx.contextWindow).toBe(32_768);
     expect(s.ctx.verified).toBe(false);
   });
 
-  it('seedLlm:铺好凭证+条目+五用途(测试基建自证)', () => {
+  it('seedLlm:铺好凭证+条目+用途分配(测试基建自证)', () => {
     const db = fresh();
     seedLlm(db);
     expect(listProviders(db)).toHaveLength(1);

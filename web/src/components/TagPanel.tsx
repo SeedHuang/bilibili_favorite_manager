@@ -56,7 +56,7 @@ export default function TagPanel() {
   const [tagStatus, setTagStatus] = useState<TagRunStatus | null>(null);
   /** 中断/完成的一句话 —— warn 色,不走顶上那个红条(§9D B4) */
   const [tagNote, setTagNote] = useState('');
-  /** 中断文案里要报"已标了多少" —— 轮询结束会清 state,所以单独留一份(照 ChatDrawer) */
+  /** 中断文案里要报"已标了多少" —— 轮询结束会清 state,所以单独留一份 */
   const lastTagProgress = useRef<TagProgressPayload | null>(null);
   /** 当前活动轮询的停止函数 —— runTag/质检/恢复三个入口共用,卸载时统一清理 */
   const stopPollingRef = useRef<(() => void) | null>(null);

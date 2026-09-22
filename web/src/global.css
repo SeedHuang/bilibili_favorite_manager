@@ -162,18 +162,10 @@
   min-width: 0;
 }
 
-/* ── M4:AI 助手 ─────────────────────────────────────── */
-
-/* 「工作中」的转动环。全局的 prefers-reduced-motion 规则会把动画压到 0.001ms,
-   这里不必再写一遍降级。 */
-@keyframes bfm-spin {
-  to { transform: rotate(360deg); }
-}
-
-/* 聊天抽屉:深底 + 青色描边 */
+/* 日志抽屉(TaskLogDrawer):深底 + 青色描边 */
 .bfm-drawer .ant-drawer-content {
   background: var(--bg);
-  /* 青色描边而不是中性发丝线 —— 抽屉是 AI 的地盘,和它的悬浮图标同色 */
+  /* 青色描边而不是中性发丝线 —— 抽屉与面板同色系描边 */
   border-left: 1px solid var(--accent);
   box-shadow: -8px 0 24px rgba(0, 0, 0, 0.45);
 }
@@ -184,34 +176,6 @@
 }
 .bfm-drawer .ant-drawer-body { padding: 0; }
 .bfm-drawer .ant-drawer-title { font-size: var(--fs-13); font-weight: 600; }
-
-/* 消息气泡:用户靠右、管家靠左。等宽字体只用在"标签"上,
-   正文用正文字体 —— 整段中文用等宽极其难读。 */
-.bfm-msg {
-  padding: 8px 11px;
-  font-size: var(--fs-13);
-  line-height: 1.7;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.bfm-msg--user {
-  background: var(--surface-3);
-  border-right: 2px solid var(--accent);
-}
-.bfm-msg--ai {
-  background: var(--surface);
-  border-left: 2px solid var(--ai);
-}
-/* 流式光标 */
-.bfm-caret {
-  display: inline-block;
-  width: 7px;
-  height: 1em;
-  vertical-align: text-bottom;
-  background: var(--accent);
-  animation: bfm-blink 1s steps(2, start) infinite;
-}
-@keyframes bfm-blink { to { visibility: hidden; } }
 
 /* 键盘可见焦点(spec §11.8 无障碍底线)。
    鼠标点击不该出焦点框 —— 用 :focus-visible 而不是 :focus。 */
@@ -229,7 +193,7 @@
   background: var(--surface);
   border: 1px solid var(--rule);
   box-shadow: var(--glow-accent);
-  /* 切角:CP2077 的招牌形状,和 hud-panel / 悬浮图标一致 */
+  /* 切角:CP2077 的招牌形状,和 hud-panel 一致 */
   clip-path: polygon(
     var(--chamfer) 0, 100% 0,
     100% calc(100% - var(--chamfer)), calc(100% - var(--chamfer)) 100%,
@@ -250,66 +214,6 @@
 }
 /* 遮罩压暗一点 —— 默认的 45% 压在已经很暗的 HUD 上,层次拉不开 */
 .ant-modal-mask { background: rgba(6, 6, 12, 0.72); }
-
-/* ── AI 气泡里的 markdown(spec §11.2:颜色是信息,不是装饰)────────────
-   映射原则:强调用字重和亮度(--text 比 --text-dim 亮),不占颜色;
-   链接用 --accent(可点的才是 accent);"这是 AI 说的"已经是气泡左边那条
-   --ai 边框,markdown 元素**不碰 --ai**,不然那个身份色就被稀释了。 */
-/* **white-space 要改回 normal**:外层 .bfm-msg 是 pre-wrap(渲染 markdown 之前靠它保换行),
-   而 markdown-it 的 HTML 输出在块元素之间本来就有真实的 
- —— pre-wrap 会把它们再渲染成
-   空行,每个段落都多出一截。进了渲染器,换行交给 markdown 管。 */
-.bfm-md { font-size: var(--fs-13); line-height: 1.7; white-space: normal; }
-.bfm-md > :first-child { margin-top: 0; }
-.bfm-md > :last-child { margin-bottom: 0; }
-.bfm-md p { margin: 0 0 .5em; }
-.bfm-md strong { color: var(--text); font-weight: 600; }
-.bfm-md em { color: var(--text); }
-.bfm-md code {
-  font-family: var(--font-mono);
-  font-size: var(--fs-12);
-  background: var(--surface-3);
-  padding: 1px 5px;
-}
-.bfm-md pre {
-  background: var(--surface-3);
-  border-left: 2px solid var(--rule);
-  padding: 8px 10px;
-  overflow-x: auto;
-  margin: 0 0 .5em;
-}
-.bfm-md pre code { background: none; padding: 0; }
-.bfm-md a { color: var(--accent); }
-.bfm-md blockquote {
-  border-left: 2px solid var(--rule);
-  color: var(--text-dim);
-  margin: 0 0 .5em;
-  padding-left: 10px;
-}
-.bfm-md h1, .bfm-md h2, .bfm-md h3, .bfm-md h4 {
-  font-size: var(--fs-15);
-  margin: .7em 0 .3em;
-  color: var(--text);
-}
-.bfm-md hr { border: 0; border-top: 1px solid var(--rule); margin: .7em 0; }
-.bfm-md ul, .bfm-md ol { margin: 0 0 .5em; padding-left: 1.4em; }
-.bfm-md table { border-collapse: collapse; margin: 0 0 .5em; }
-.bfm-md th, .bfm-md td { border: 1px solid var(--rule); padding: 2px 8px; }
-.bfm-md th { color: var(--text); }
-
-/* AI 管家的眨眼:每 4 秒一次快速压扁-张开(机器人的"我还在")。
-   只动眼睛的 scaleY,不碰 morph 层;prefers-reduced-motion 下停掉,眼睛常开。 */
-@keyframes bfm-blink {
-  0%, 92%, 100% { transform: scaleY(1); }
-  95% { transform: scaleY(0.08); }
-  97% { transform: scaleY(1); }
-}
-.bfm-blink {
-  animation: bfm-blink 4s ease-in-out infinite;
-}
-@media (prefers-reduced-motion: reduce) {
-  .bfm-blink { animation: none; }
-}
 
 /* 不定态进度条:单次 LLM 调用没有 done/total,编一个百分比是假的 ——
    一条来回扫的亮条只回答"还在动",不回答"到哪了"(spec §2 规则 1 的进度条,

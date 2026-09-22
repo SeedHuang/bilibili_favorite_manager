@@ -10,12 +10,11 @@ import type { ModelConfig } from './provider.js';
  * `InvalidPromptError: System messages are not allowed...`。
  * 现在 SDK 是真的,只有"模型"是假的,参数校验因此真的会跑。
  *
- * generateText/streamText 用 spy 包住**真实现**(不是替换),这样既能验参数
+ * generateText 用 spy 包住**真实现**(不是替换),这样既能验参数
  * 又保留校验。
  */
 const mocks = vi.hoisted(() => ({
   generateText: vi.fn(),
-  streamText: vi.fn(),
   createDeepSeek: vi.fn(),
   createOpenAICompatible: vi.fn(),
 }));
@@ -23,15 +22,14 @@ const mocks = vi.hoisted(() => ({
 vi.mock('ai', async (orig) => {
   const actual = await orig<typeof import('ai')>();
   mocks.generateText.mockImplementation(actual.generateText as never);
-  mocks.streamText.mockImplementation(actual.streamText as never);
-  return { ...actual, generateText: mocks.generateText, streamText: mocks.streamText };
+  return { ...actual, generateText: mocks.generateText };
 });
 vi.mock('@ai-sdk/deepseek', () => ({ createDeepSeek: mocks.createDeepSeek }));
 vi.mock('@ai-sdk/openai-compatible', () => ({
   createOpenAICompatible: mocks.createOpenAICompatible,
 }));
 
-const { complete, stream } = await import('./provider.js');
+const { complete } = await import('./provider.js');
 
 /** v7 的 finishReason / usage 是结构化对象,不是裸字符串(运行时宽松,类型不宽松) */
 const USAGE = {
@@ -50,19 +48,6 @@ function fakeModel() {
       finishReason: STOP,
       usage: USAGE,
       warnings: [],
-    }),
-    doStream: async () => ({
-      stream: new ReadableStream({
-        start(c) {
-          c.enqueue({ type: 'stream-start', warnings: [] });
-          c.enqueue({ type: 'text-start', id: 't1' });
-          c.enqueue({ type: 'text-delta', id: 't1', delta: '整理' });
-          c.enqueue({ type: 'text-delta', id: 't1', delta: '完成' });
-          c.enqueue({ type: 'text-end', id: 't1' });
-          c.enqueue({ type: 'finish', finishReason: STOP, usage: USAGE });
-          c.close();
-        },
-      }),
     }),
   });
 }
@@ -197,7 +182,7 @@ describe('complete', () => {
     expect(JSON.stringify(arg.providerOptions)).toContain('disabled');
   });
 
-  it('不传 thinking → providerOptions 里没有这个字段(聊天那条路一行不变)', async () => {
+  it('不传 thinking → providerOptions 里没有这个字段(请求形状不变)', async () => {
     mocks.createDeepSeek.mockReturnValue(() => fakeModel());
     await complete({ config: deepseekCfg, messages: [{ role: 'user', content: '嗨' }] });
     const arg = mocks.generateText.mock.calls.at(-1)![0] as { providerOptions?: unknown };
@@ -233,7 +218,7 @@ describe('complete', () => {
     ).resolves.toBe('结果');
   });
 
-  it('不传 timeoutMs 就没有超时(聊天那条路一行不变)', async () => {
+  it('不传 timeoutMs 就没有超时(请求形状不变)', async () => {
     await complete({ config: deepseekCfg, messages: [{ role: 'user', content: '嗨' }] });
     const arg = mocks.generateText.mock.calls[0]![0] as { abortSignal?: unknown };
     // 没有超时 controller 注入的 abortSignal —— 只有用户传来的才算数
@@ -293,72 +278,5 @@ describe('provider 选择', () => {
     await expect(
       complete({ config: { ...ollamaCfg, baseUrl: 'huangchunhua' }, messages: [{ role: 'user', content: 'x' }] }),
     ).rejects.toThrow(/接口地址看起来不对/);
-  });
-});
-
-describe('stream', () => {
-  it('逐块回调,并返回全文', async () => {
-    const chunks: string[] = [];
-    const full = await stream({
-      config: ollamaCfg,
-      messages: [{ role: 'user', content: 'x' }],
-      onChunk: (d) => chunks.push(d),
-    });
-    expect(chunks).toEqual(['整理', '完成']);
-    expect(full).toBe('整理完成');
-  });
-
-  it('带 system 消息也不抛错(stream 走的是同一套校验)', async () => {
-    await expect(
-      stream({
-        config: ollamaCfg,
-        messages: [
-          { role: 'system', content: '你是整理管家' },
-          { role: 'user', content: 'x' },
-        ],
-        onChunk: () => {},
-      }),
-    ).resolves.toBe('整理完成');
-
-    const opts = mocks.streamText.mock.calls[0]![0] as {
-      instructions?: unknown;
-      messages: { role: string }[];
-    };
-    expect(JSON.stringify(opts.instructions)).toContain('你是整理管家');
-    expect(opts.messages.every((m) => m.role !== 'system')).toBe(true);
-  });
-
-  // 真机踩的坑:streamText **不抛错** —— 参数校验失败只进 onError 然后流正常结束。
-  // 结果是一次失败看起来像"模型回了空话",界面上什么都不报。
-  it('SDK 把错误吞进 onError 时,我们要抛出来 —— 别让失败伪装成空回复', async () => {
-    const broken = new MockLanguageModelV3({
-      doStream: async () => {
-        throw new Error('上游 500');
-      },
-    });
-    mocks.createOpenAICompatible.mockReturnValue(() => broken);
-
-    await expect(
-      stream({ config: ollamaCfg, messages: [{ role: 'user', content: 'x' }], onChunk: () => {} }),
-    ).rejects.toThrow();
-  });
-
-  it('流是空的也不炸 —— 返回空串而不是 undefined', async () => {
-    const empty = new MockLanguageModelV3({
-      doStream: async () => ({
-        stream: new ReadableStream({
-          start(c) {
-            c.enqueue({ type: 'stream-start', warnings: [] });
-            c.enqueue({ type: 'finish', finishReason: STOP, usage: USAGE });
-            c.close();
-          },
-        }),
-      }),
-    });
-    mocks.createOpenAICompatible.mockReturnValue(() => empty);
-
-    await expect(
-      stream({ config: ollamaCfg, messages: [{ role: 'user', content: 'x' }], onChunk: () => {} }),
-    ).resolves.toBe('');
   });
 });

@@ -18,7 +18,6 @@ import { logOperation, type OpActor } from '../db/repo/operations.js';
  */
 export interface Actor {
   actor: OpActor;
-  sessionId?: number;
 }
 
 const USER: Actor = { actor: 'user' };
@@ -61,7 +60,6 @@ export function renameFolder(
   logOperation(db, {
     kind: 'rename_folder',
     actor: who.actor,
-    sessionId: who.sessionId,
     summary: originName
       ? `把「${originName}」改名为「${trimmed}」`
       : `把「${before.name}」改名为「${trimmed}」`,
@@ -84,7 +82,6 @@ export function createFolder(db: Database.Database, name: string, who: Actor = U
   logOperation(db, {
     kind: 'create_folder',
     actor: who.actor,
-    sessionId: who.sessionId,
     summary: `新建夹子「${trimmed}」`,
     detail: { folderId: Number(r.lastInsertRowid) },
   });
@@ -109,7 +106,6 @@ export function deleteFolder(db: Database.Database, folderId: number, who: Actor
   logOperation(db, {
     kind: 'delete_folder',
     actor: who.actor,
-    sessionId: who.sessionId,
     summary:
       members.length > 0
         ? `删除夹子「${f.name}」(${backedUp}/${members.length} 条已兜底进默认收藏夹)`
@@ -198,7 +194,6 @@ export function mergeFolders(
   logOperation(db, {
     kind: 'merge_folders',
     actor: who.actor,
-    sessionId: who.sessionId,
     summary:
       froms.length === 1
         ? `把「${froms[0]!.name}」(${moved.size} 条)并入并删除,进了「${into.name}」`
@@ -246,7 +241,6 @@ export function moveItems(
   logOperation(db, {
     kind: 'move_items',
     actor: who.actor,
-    sessionId: who.sessionId,
     summary: `移动 ${itemIds.length} 条到「${to.name}」`,
     detail: { toFolderId, itemIds: [...itemIds] },
   });
@@ -291,7 +285,6 @@ export function assignItems(
   logOperation(db, {
     kind: 'move_items',
     actor: who.actor,
-    sessionId: who.sessionId,
     summary: targets.length
       ? `把 ${ids.length} 条归进「${names.join('」「')}」`
       : `把 ${ids.length} 条移出所有夹子(变成未归类)`,
@@ -327,7 +320,6 @@ export function addItems(
   logOperation(db, {
     kind: 'add_items',
     actor: who.actor,
-    sessionId: who.sessionId,
     summary: `把 ${itemIds.length} 条也放进「${to.name}」`,
     detail: { toFolderId, itemIds: [...itemIds] },
   });
@@ -356,7 +348,6 @@ export function removeItems(
   logOperation(db, {
     kind: 'remove_items',
     actor: who.actor,
-    sessionId: who.sessionId,
     summary: `从「${from.name}」移出 ${itemIds.length} 条`,
     detail: { fromFolderId, itemIds: [...itemIds] },
   });
@@ -370,7 +361,6 @@ export function resetWorkbench(db: Database.Database, who: Actor = USER): void {
   logOperation(db, {
     kind: 'reset',
     actor: who.actor,
-    sessionId: who.sessionId,
     summary: existed ? '一键还原:丢掉了全部改动' : '一键还原(本来就没有改动)',
     detail: null,
   });
@@ -476,7 +466,6 @@ export function writeMembership(
   logOperation(db, {
     kind: 'move_items',
     actor: who.actor,
-    sessionId: who.sessionId,
     summary: `归置 ${ids.length} 条到 ${targets.length} 个夹子(补进 ${added} 份归属;人类夹子只加不清)`,
     detail: { itemIds: ids, toFolderIds: targets, added },
   });
@@ -538,7 +527,6 @@ export function reconcileAiFolder(
     logOperation(db, {
       kind: 'move_items',
       actor: who.actor,
-      sessionId: who.sessionId,
       summary:
         toRemove.length > 0
           ? `对账「${f.name}」:补进 ${toAdd.length} 条,清出 ${toRemove.length} 条(已兜底默认收藏夹 ${backedUp}/${toRemove.length} 条)`
@@ -595,7 +583,6 @@ export function applyRuleHitsToFolder(
   logOperation(db, {
     kind: 'add_items',
     actor: who.actor,
-    sessionId: who.sessionId,
     summary: `整理「${f.name}」:按规则补进 ${added} 条(只加不清)`,
     detail: { folderId, added: toAdd },
   });

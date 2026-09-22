@@ -3,7 +3,7 @@
  *
  * 为什么不入表:用户装了什么模型、量化到多少、`context_length` 被改成多少,
  * 只有 Ollama 自己知道。手填这些数很容易填错 —— 而填错就意味着
- * batchSize 算错,要么批次过大批到超上下文,要么批次过小跑一整天。
+ * token 上限算错,要么批次过大批到超上下文,要么批次过小跑一整天。
  */
 import { assertUsableBaseUrl, DEFAULT_BASE_URLS } from './provider.js';
 
@@ -28,13 +28,11 @@ const OUTPUT_SHARE = 0.25;
  * **不能等于 contextWindow** —— 输入和输出是**共享**同一个窗口的,
  * 把 maxOutput 设成整个窗口会让输入预算变成 0:
  *   budget = contextWindow - maxOutput - 1500 = -1500
- * 后果不是"报错"而是两个静默退化:
- *   - trimToContext 只剩最后一条消息 → **聊天彻底没有上下文**
- *   - compact 每轮都以为超预算 → 每轮白烧一次摘要调用
+ * 后果不是"报错"而是静默退化 —— 输出上限与输入共享同一个窗口,
+ * maxOutput 顶满窗口会把输入可用余量压到 0(maxOutput < contextWindow 是硬约束)。
  * (这是我第一版写错的地方,真机上才暴露。)
  *
- * 取窗口的 1/4 并封顶 8192:对 32K 的 14b 正好留 8192,配 60 token/条的输出估算
- * 得到 136 条/批的上限,与输入侧的 125 取小 → 125,对得上 spec §3 的"≈120 条/批"。
+ * 取窗口的 1/4 并封顶 8192:对 32K 的 14b 正好留 8192 给输出。
  */
 function outputBudget(contextWindow: number): number {
   return Math.max(1, Math.min(Math.floor(contextWindow * OUTPUT_SHARE), OUTPUT_CEILING));

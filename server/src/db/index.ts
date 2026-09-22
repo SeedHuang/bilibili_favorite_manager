@@ -28,6 +28,30 @@ function ensureColumn(db: Database.Database, table: string, column: string, ddl:
   return fresh;
 }
 
+/**
+ * 删掉聊天/归类时代遗留的表,幂等。
+ *
+ * 这 5 张表(Chat 子系统)已整体移除;新库的 SCHEMA_SQL 里根本没有它们,
+ * 老库里的则一并 DROP,不留孤儿。
+ * **顺序:子表在前,父表在后** —— 老库可能带着数据(FK 开启时先 DROP 父表
+ * `sessions` 会因 `session_messages`/`taxonomy_draft`/`classifications`
+ * REFERENCES 它而抛 `FOREIGN KEY constraint failed`,直接崩掉整个 applySchema)。
+ * `DROP TABLE IF EXISTS` 保证幂等(新库根本没这些表,老库一次删净)。
+ */
+const LEGACY_CHAT_TABLES = ['session_messages', 'taxonomy_draft', 'classifications', 'audit_logs', 'sessions'] as const;
+
+function applyLegacyDrops(db: Database.Database): void {
+  for (const t of LEGACY_CHAT_TABLES) {
+    db.exec(`DROP TABLE IF EXISTS "${t}"`);
+  }
+  // operation_log.session_id 只被已删的 apply 端点写过,删后恒 null → 也清掉。
+  // 新库的 DDL 已不含该列;老库的旧列在这里补删。
+  const cols = db.prepare(`PRAGMA table_info(operation_log)`).all() as { name: string }[];
+  if (cols.some((c) => c.name === 'session_id')) {
+    db.exec(`ALTER TABLE operation_log DROP COLUMN session_id`);
+  }
+}
+
 /** 幂等应用 DDL */
 export function applySchema(db: Database.Database): void {
   db.exec(SCHEMA_SQL);
@@ -40,4 +64,5 @@ export function applySchema(db: Database.Database): void {
     // (几十批调用 + 不可逆 drop)。旧机制没记录谁被漏检,真有欠账用「全部审查」补。
     db.prepare(`UPDATE tags SET checked_at = ? WHERE checked_at IS NULL`).run(Date.now());
   }
+  applyLegacyDrops(db);
 }

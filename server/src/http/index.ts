@@ -36,7 +36,7 @@ export function createServer(deps: HttpDeps): FastifyInstance {
    * Fastify 默认会抛 `FST_ERR_CTP_EMPTY_JSON_BODY` → 400,而且**在进 handler 之前**,
    * 所以业务代码没机会记日志、响应里也没有 `reason`,前端只能显示一句
    * "请求失败 400"。而"无 body 的 DELETE / POST"是完全正常的用法
-   * (删夹子、一键还原、归档会话、撤回方案四个都是)。
+   * (删夹子、一键还原这类都是)。
    *
    * 前端 `json()` 那头也已经改成"没 body 就不设 content-type" —— 两边都堵,
    * 因为这属于"客户端多发一个头"就会踩的坑,不该只靠一边自觉。

@@ -134,7 +134,7 @@ describe('编辑动作', () => {
    * 锁定的夹子**三个动作都不能碰**:改名、删除、移动并删除。
    *
    * 曾经这里是"条目照搬走、夹子留下并如实报告",理由是"默认收藏夹有 88% 的
-   * 条目,得能批量清空" —— 理由站不住:那 88% 要的是**分类**(Pass 2 / 手挑),
+   * 条目,得能批量清空" —— 理由站不住:那 88% 要的是**分类**(规则 / 手挑),
    * 不是整体倒进另一个夹子。规则收成一条,界面上的 checkbox 也直接禁用。
    */
   it('锁定的源夹子 → 直接拒,和改名/删除同一条规则', () => {
@@ -275,14 +275,12 @@ describe('编辑动作', () => {
   it('AI 做的动作 actor=ai,其余 user —— 除此之外没有区别', () => {
     const db = seeded();
     const b = originIdOf(db, 8);
-    moveItems(db, ['BV1'], b, { actor: 'ai', sessionId: 5 });
+    moveItems(db, ['BV1'], b, { actor: 'ai' });
     renameFolder(db, originIdOf(db, 7), 'x');
 
     const [recent, older] = listOperations(db);
     expect(older!.actor).toBe('ai');
-    expect(older!.sessionId).toBe(5);
     expect(recent!.actor).toBe('user');
-    expect(recent!.sessionId).toBeNull();
   });
 });
 

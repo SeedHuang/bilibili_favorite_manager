@@ -46,7 +46,7 @@ describe('listRemoteModels', () => {
     });
 
     expect(got[0]!.model).toBe('deepseek-v9-experimental');
-    // 兜底值,而且 verified:false → 界面会标 ⚠️ 让用户核对(填错 = batchSize 算错)
+    // 兜底值,而且 verified:false → 界面会标 ⚠️ 让用户核对(填错 = token 上限算错)
     expect(got[0]!.verified).toBe(false);
     expect(got[0]!.contextWindow).toBe(32_768);
   });
