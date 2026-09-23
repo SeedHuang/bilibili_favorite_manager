@@ -3,27 +3,24 @@ import { openDb } from '../db/index.js';
 import { Logger } from '../logger/index.js';
 import { createServer } from '../http/index.js';
 import { upsertItem } from '../db/repo/items.js';
-import { seedLlm, setAssignment } from '../llm/config.js';
+import { makeAi, seedAi } from '../ai.js';
 import { itemTagIds, ensureTag, linkItemTag, listTagTree } from '../db/repo/tags.js';
 import { markItemTagged } from '../db/repo/tagging.js';
 import type { BiliClient } from '../bilibili/client.js';
 
-// LLM 全 mock —— 路由测试绝不打真实 API(和 routes.test.ts 同一套:importOriginal
-// 铺开真模块再覆盖,provider.ts 新增导出时不会静默失效)
+// 模型出口全走 mock 的 complete —— 路由测试绝不打真实 API。
+// 出口从包内 provider 换成 ai 实例方法后,靠 HttpDeps.ai 注入(见 makeApp)。
 const mocks = vi.hoisted(() => ({ complete: vi.fn() }));
-vi.mock('../llm/provider.js', async (orig) => ({
-  ...(await orig<typeof import('../llm/provider.js')>()),
-  complete: mocks.complete,
-}));
 
 const stubClient = { withCredentials: () => ({ get: async () => null }) } as unknown as BiliClient;
 
 function makeApp() {
   const db = openDb(':memory:');
   const log = new Logger(db, { silent: true });
-  seedLlm(db, { model: 'qwen3-4b' });
-  const app = createServer({ db, log, client: stubClient });
-  return { app, db };
+  seedAi(db, { model: 'qwen3-4b' });
+  const ai = { ...makeAi(db), complete: mocks.complete };
+  const app = createServer({ db, log, client: stubClient, ai });
+  return { app, db, ai };
 }
 
 /**
@@ -76,10 +73,10 @@ async function checkAndSettle(app: Awaited<ReturnType<typeof makeApp>>['app']) {
 
 describe('标注路由', () => {
   it('status:报已标/总数;打标用途没配 → model 为 null(不再回落主模型)', async () => {
-    const { app, db } = makeApp();
+    const { app, db, ai } = makeApp();
     upsertItem(db, { id: 'BV1', type: 2, title: 'a' });
     // 用途平级后没有"回落主模型"了:tag 没配就是没配,界面照实说
-    setAssignment(db, 'tag', null);
+    ai.setAssignment('tag', null);
 
     const res = await app.inject({ url: '/api/tags/status' });
     const body = res.json();

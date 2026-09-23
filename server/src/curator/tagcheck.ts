@@ -17,11 +17,9 @@
  * 而这道闸就在这儿。
  */
 import type Database from 'better-sqlite3';
-import type { ModelConfig } from '../llm/provider.js';
-import { complete } from '../llm/provider.js';
+import type { AiCore, ChatMessage, ModelConfig } from '@SeedHuang/ai/core';
 import type { Logger } from '../logger/index.js';
 import { parseJsonArray } from './parse.js';
-import type { ChatMessage } from '../llm/context.js';
 import {
   findTag, listTagsWithParent, listUncheckedTags, markTagChecked, mergeTags, normalizeTagName,
   setTagParent, deleteTag, type TagNode,
@@ -95,6 +93,8 @@ function renderTree(nodes: readonly TagNode[], depth = 0): string {
 }
 
 export async function runTagCheck(opts: {
+  /** AI 套件实例 —— 对模型的唯一出口 */
+  ai: AiCore;
   config: ModelConfig;
   tree: readonly TagNode[];
   db: Database.Database;
@@ -245,7 +245,7 @@ export async function runTagCheck(opts: {
       },
     ];
     const batchVerdicts = coerceVerdicts(
-      await complete({
+      await opts.ai.complete({
         config: opts.config,
         messages,
         thinking: false,

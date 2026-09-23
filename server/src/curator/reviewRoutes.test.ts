@@ -6,24 +6,21 @@ import { createServer } from '../http/index.js';
 import { saveRule, getRule } from '../db/repo/rules.js';
 import { saveReviewDrafts, listReviewDrafts } from '../db/repo/reviews.js';
 import { listWorkFolders } from '../db/repo/workbench.js';
-import { seedLlm } from '../llm/config.js';
+import { makeAi, seedAi } from '../ai.js';
 import { reviewRun } from './reviewRoutes.js';
 import type { BiliClient } from '../bilibili/client.js';
 
 const mocks = vi.hoisted(() => ({ complete: vi.fn() }));
-vi.mock('../llm/provider.js', async (orig) => ({
-  ...(await orig<typeof import('../llm/provider.js')>()),
-  complete: mocks.complete,
-}));
 
 const stubClient = { withCredentials: () => ({ get: async () => null }) } as unknown as BiliClient;
 
 function makeApp() {
   const db = openDb(':memory:');
   const log = new Logger(db, { silent: true });
-  seedLlm(db);
+  seedAi(db);
   db.prepare(`INSERT INTO items (id,type,title) VALUES ('BV1',2,'NBA 教程'),('BV2',2,'健身日记')`).run();
-  return { app: createServer({ db, log, client: stubClient }), db };
+  const ai = { ...makeAi(db), complete: mocks.complete };
+  return { app: createServer({ db, log, client: stubClient, ai }), db };
 }
 
 type AppCtx = { app: ReturnType<typeof createServer>; db: ReturnType<typeof openDb> };

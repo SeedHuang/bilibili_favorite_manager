@@ -216,7 +216,7 @@ export function moveItems(
   if (itemIds.length === 0) return;
   ensureWorkcopy(db);
   const to = workFolderOrThrow(db, toFolderId);
-  // AI 夹子不是落点(洞 4):成员=规则命中集,直接移入下次对账必被清出 —— 和 writeMembership 同一道闸
+  // AI 夹子不是落点(洞 4):成员=规则命中集,直接移入下次对账必被清出 —— AI 夹的成员只能由规则决定
   if (isAiFolder(db, toFolderId)) {
     throw new Error(`「${to.name}」是 AI 建的夹子,成员由它的规则决定 —— 请采纳规则建议,不要直接移入`);
   }
@@ -246,54 +246,6 @@ export function moveItems(
   });
 }
 
-/**
- * 把这批条目从**所有**当前夹子里拿走一次,然后加进 `toFolderIds` 里的每一个。
- *
- * 为什么不复用 `moveItems` 循环:**`moveItems` 会先删光这个条目的所有归属再插入**,
- * 所以对同一条条目调两次(归进 A、再归进 B)会**把 A 那次删掉** ——
- * "一条条目同时在多个夹子里"(R4)会在最后一公里静默失效。
- *
- * `toFolderIds` 传空数组 = 把这批条目从所有夹子里拿走(等于移出,落「未归类」)。
- */
-export function assignItems(
-  db: Database.Database,
-  itemIds: readonly string[],
-  toFolderIds: readonly number[],
-  who: Actor = USER,
-): { moved: number } {
-  // 空数组必须在 ensureWorkcopy **之前**早返回:否则"归 0 条"会把工作副本克隆出来
-  // —— 那是一次真实的状态变更 —— 却不记任何日志(和 moveItems 同一条契约)
-  if (itemIds.length === 0) return { moved: 0 };
-  ensureWorkcopy(db);
-
-  const targets = [...new Set(toFolderIds)];
-  // 目标先全部校验再动数据 —— 有一个不存在就整个不执行,不留半个改动的副本
-  const names = targets.map((id) => workFolderOrThrow(db, id).name);
-
-  const ids = [...new Set(itemIds)];
-  db.transaction(() => {
-    const clear = db.prepare(`DELETE FROM work_folder_items WHERE item_id = ?`);
-    const add = db.prepare(
-      `INSERT OR IGNORE INTO work_folder_items (folder_id, item_id) VALUES (?, ?)`,
-    );
-    for (const itemId of ids) {
-      clear.run(itemId);
-      for (const folderId of targets) add.run(folderId, itemId);
-    }
-  })();
-
-  logOperation(db, {
-    kind: 'move_items',
-    actor: who.actor,
-    summary: targets.length
-      ? `把 ${ids.length} 条归进「${names.join('」「')}」`
-      : `把 ${ids.length} 条移出所有夹子(变成未归类)`,
-    detail: { itemIds: ids, toFolderIds: targets },
-  });
-
-  return { moved: ids.length };
-}
-
 /** 也放进:**保留原处**,同时加进目标(B站 允许一个视频属于多个夹子) */
 export function addItems(
   db: Database.Database,
@@ -305,7 +257,7 @@ export function addItems(
   if (itemIds.length === 0) return;
   ensureWorkcopy(db);
   const to = workFolderOrThrow(db, toFolderId);
-  // AI 夹子不是落点(洞 4)—— 和 moveItems / writeMembership 同一道闸
+  // AI 夹子不是落点(洞 4)—— 和 moveItems 同一道闸
   if (isAiFolder(db, toFolderId)) {
     throw new Error(`「${to.name}」是 AI 建的夹子,成员由它的规则决定 —— 请采纳规则建议,不要直接移入`);
   }
@@ -402,79 +354,9 @@ export function ensureDefaultMembership(db: Database.Database, itemIds: readonly
 }
 
 /**
- * 成员资格写入器 —— 所有程序化成员变更的唯一入口(spec §3)。
- *
- * 三条纪律编码在一处,整理对账、AI 归类应用、采纳填充全走这里:
- * - AI 夹子不是写入目标(它的成员只能由 reconcile 写)—— 直接拒;
- * - 人类夹子只加不清 —— 红线的落点就是一个 continue;
- * - 默认夹在条目落进**主题**夹子时移出(现状语义);只在默认夹之间倒手时留着。
- */
-export function writeMembership(
-  db: Database.Database,
-  itemIds: readonly string[],
-  targetFolderIds: readonly number[],
-  who: Actor = USER,
-): { added: number } {
-  if (itemIds.length === 0 || targetFolderIds.length === 0) return { added: 0 };
-  ensureWorkcopy(db);
-
-  const targets = [...new Set(targetFolderIds)];
-  const byId = new Map(listWorkFolders(db).map((f) => [f.id, f]));
-  const folderInfos = targets.map((id) => {
-    const f = byId.get(id);
-    if (!f) throw new Error(`工作副本里没有夹子 ${id}`);
-    return f;
-  });
-
-  const aiIds = listAiFolderIds(db);
-  const aiTarget = folderInfos.find((f) => aiIds.has(f.id));
-  if (aiTarget) {
-    throw new Error(
-      `「${aiTarget.name}」是 AI 建的夹子,成员由它的规则决定 —— 请采纳规则建议,不要直接移入`,
-    );
-  }
-
-  const defaultId = defaultWorkFolderId(db);
-  const ids = [...new Set(itemIds)];
-  let added = 0;
-
-  db.transaction(() => {
-    const insert = db.prepare(
-      `INSERT OR IGNORE INTO work_folder_items (folder_id, item_id) VALUES (?, ?)`,
-    );
-    const del = db.prepare(`DELETE FROM work_folder_items WHERE item_id = ? AND folder_id = ?`);
-    const memberOf = db.prepare(`SELECT folder_id FROM work_folder_items WHERE item_id = ?`);
-
-    for (const itemId of ids) {
-      const targetSet = new Set(targets);
-      const current = (memberOf.all(itemId) as { folder_id: number }[]).map((r) => r.folder_id);
-      for (const folderId of current) {
-        if (targetSet.has(folderId)) continue;
-        if (aiIds.has(folderId)) continue; // AI 夹子的归属只能由 reconcile 拿走
-        if (folderId === defaultId) {
-          // 默认夹:有主题落点 → 移出;只在默认夹之间倒手 → 留着
-          if (targets.some((t) => t !== defaultId)) del.run(itemId, folderId);
-          continue;
-        }
-        // 人类夹子:只加不清 —— 红线落点,跳过即可
-        continue;
-      }
-      for (const folderId of targets) added += insert.run(folderId, itemId).changes;
-    }
-  })();
-
-  logOperation(db, {
-    kind: 'move_items',
-    actor: who.actor,
-    summary: `归置 ${ids.length} 条到 ${targets.length} 个夹子(补进 ${added} 份归属;人类夹子只加不清)`,
-    detail: { itemIds: ids, toFolderIds: targets, added },
-  });
-  return { added };
-}
-
-/**
  * AI 夹子对账:成员 = 规则命中集。缺的补进;多的走安全网后清出。
- * 这是 AI 夹子成员的**唯一**写手 —— writeMembership 拒绝 AI 夹子,两边合起来
+ * 这是 AI 夹子成员的**唯一**写手 —— 其余成员变更入口(moveItems / addItems /
+ * removeItems)一律拒绝 AI 夹子,两边合起来
  * 才把"成员恒等于命中集"钉死。
  */
 export function reconcileAiFolder(

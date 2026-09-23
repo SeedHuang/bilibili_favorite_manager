@@ -14,6 +14,8 @@ import { registerTagRoutes } from '../curator/tagRoutes.js';
 import { registerProposalRoutes } from '../curator/proposalRoutes.js';
 import { registerReviewRoutes } from '../curator/reviewRoutes.js';
 import { registerPollsRoutes } from '../curator/settingsPolls.js';
+import { registerAiSettings } from '@SeedHuang/ai/fastify';
+import { makeAi, aiLoggerOf, type AiCore } from '../ai.js';
 
 export interface HttpDeps {
   db: Database.Database;
@@ -24,10 +26,13 @@ export interface HttpDeps {
   coverFetchImpl?: typeof fetch;
   /** 注入点:Ollama 模型发现的 fetch(测试用假的,别真去连本机 Ollama) */
   ollamaFetchImpl?: typeof fetch;
+  /** 注入点:AI 套件实例(测试注入假的 complete);缺省由 makeAi(db) 造 */
+  ai?: AiCore;
 }
 
 export function createServer(deps: HttpDeps): FastifyInstance {
   const { db, log } = deps;
+  const ai = deps.ai ?? makeAi(db);
   const app = Fastify({ logger: false }); // 用我们自己的 Logger,不叠 pino
 
   /**
@@ -91,15 +96,20 @@ export function createServer(deps: HttpDeps): FastifyInstance {
   registerItemRoutes(app, deps);
   registerSseRoutes(app, deps);
   registerCoverRoutes(app, { db, log, fetchImpl: deps.coverFetchImpl });
-  registerCuratorRoutes(app, {
-    db,
-    log,
-    ...(deps.ollamaFetchImpl ? { ollamaFetchImpl: deps.ollamaFetchImpl } : {}),
+  // 模型管理(/api/settings/*)—— 由套件挂,它自带整套契约路由。
+  // 只转 `app` 参数:包的 d.ts 引的是它自己那份 fastify(5.12.5),与 server 这份
+  // (5.12.4)不是同一个 FastifyInstance 类型;运行时传的就是同一个 app。
+  // opts 不转,继续被真实签名校验。
+  registerAiSettings(app as unknown as Parameters<typeof registerAiSettings>[0], {
+    ai,
+    logger: aiLoggerOf(log),
+    ...(deps.ollamaFetchImpl ? { fetchImpl: deps.ollamaFetchImpl } : {}),
   });
+  registerCuratorRoutes(app, { db, log });
   registerRuleRoutes(app, { db, log });
-  registerTagRoutes(app, { db, log });
-  registerProposalRoutes(app, { db, log });
-  registerReviewRoutes(app, { db, log });
+  registerTagRoutes(app, { db, log, ai });
+  registerProposalRoutes(app, { db, log, ai });
+  registerReviewRoutes(app, { db, log, ai });
   registerPollsRoutes(app, { db });
 
   return app;

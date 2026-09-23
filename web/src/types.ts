@@ -16,43 +16,6 @@ export interface Item {
   pubtime: number | null; favTime: number | null; upperName: string | null; invalid: number;
 }
 
-export interface ModelMeta {
-  provider: string;
-  model: string;
-  contextWindow: number;
-  maxOutput: number;
-  /** false = 估算值,UI 标 ⚠️ 待确认 */
-  verified: boolean;
-  note?: string;
-}
-
-export interface ProviderView {
-  id: string;
-  provider: string;
-  baseUrl: string;
-  /** 后端**只**回这个,永远不回传 apiKey 本身 */
-  hasApiKey: boolean;
-}
-
-export interface EntryView {
-  id: string;
-  providerId: string;
-  provider: string;
-  model: string;
-  /** 服务端查注册表/ollama meta 拼好的数字 —— 前端不存不算 */
-  contextWindow: number;
-  maxOutput: number;
-  verified: boolean;
-  note?: string;
-}
-
-// proposals 已进 purpose 联合(设置页方案生成行要模型下拉;server 侧 Plan C 才认)
-export type LlmPurpose = 'rules' | 'tag' | 'tagcheck' | 'proposals';
-
-export interface AssignmentsView {
-  assignments: Record<LlmPurpose, string | null>;
-}
-
 // ── M4b:整理工作台 ──────────────────────────────────────
 
 export type ChangeMark = 'unchanged' | 'renamed' | 'created' | 'merged' | 'removed';

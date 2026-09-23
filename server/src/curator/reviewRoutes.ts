@@ -2,8 +2,7 @@
 import type { FastifyInstance } from 'fastify';
 import type Database from 'better-sqlite3';
 import type { Logger } from '../logger/index.js';
-import { complete } from '../llm/provider.js';
-import { readLlmSettings } from '../llm/config.js';
+import type { AiCore } from '../ai.js';
 import { parseLooseJson } from './parse.js';
 import { buildReviewPrompt, validateReviewDrafts, type ReviewCtx } from './review.js';
 import { buildFolderProfiles } from './folderProfile.js';
@@ -32,6 +31,7 @@ const pushLog = (level: 'info' | 'warn' | 'error', text: string) => {
  * 审查没有"方案头"表,运行态全在 reviewRun 内存里(abort 端点只查 running)。
  */
 async function runReview(
+  ai: AiCore,
   db: Database.Database,
   log: Logger,
   folderIds: number[],
@@ -43,7 +43,7 @@ async function runReview(
   pushLog('info', `开始审查 ${folderIds.length} 个夹子`);
   console.log(`[reviews] run 开始 夹子=${folderIds.length}`);
   try {
-    const llm = readLlmSettings(db, 'proposals');
+    const llm = ai.readLlmSettings('proposals');
     if (!llm) { // 路由已拦,这里兜底(异步路径里没人接 400)
       log.event({ level: 'error', category: 'llm', code: 'REVIEW_NO_LLM', message: '审查时模型配置消失' });
       pushLog('error', '审查时模型配置消失');
@@ -52,7 +52,7 @@ async function runReview(
     }
     const profiles = buildFolderProfiles(db).filter((p) => folderIds.includes(p.folderId));
     const prompt = buildReviewPrompt({ profiles, aiIds: listAiFolderIds(db) });
-    const raw = await complete({
+    const raw = await ai.complete({
       config: llm.config,
       messages: [
         { role: 'system', content: prompt.system },
@@ -117,8 +117,11 @@ async function runReview(
   }
 }
 
-export function registerReviewRoutes(app: FastifyInstance, deps: { db: Database.Database; log: Logger }): void {
-  const { db, log } = deps;
+export function registerReviewRoutes(
+  app: FastifyInstance,
+  deps: { db: Database.Database; log: Logger; ai: AiCore },
+): void {
+  const { db, log, ai } = deps;
 
   app.post('/api/reviews/generate', async (req, reply) => {
     const body = (req.body ?? {}) as { folderIds?: unknown };
@@ -132,7 +135,7 @@ export function registerReviewRoutes(app: FastifyInstance, deps: { db: Database.
     ) {
       return reply.code(400).send({ ok: false, reason: 'folderIds 必须是非空数字数组,且都在工作副本里' });
     }
-    if (!readLlmSettings(db, 'proposals')) {
+    if (!ai.readLlmSettings('proposals')) {
       return reply.code(400).send({ ok: false, reason: '还没配模型 —— 先去「授权」页的模型管理里选一个' });
     }
     if (reviewRun.running) {
@@ -142,7 +145,7 @@ export function registerReviewRoutes(app: FastifyInstance, deps: { db: Database.
     clearPendingReviewDrafts(db, folderIds as number[]);
     const controller = new AbortController();
     currentController = controller;
-    void runReview(db, log, folderIds as number[], { signal: controller.signal });
+    void runReview(ai, db, log, folderIds as number[], { signal: controller.signal });
     return reply.code(202).send({ ok: true });
   });
 

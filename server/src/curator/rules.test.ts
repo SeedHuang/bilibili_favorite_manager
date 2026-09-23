@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { matchItem, matchAll, renderConditions, type RuleItem } from './rules.js';
+import { matchItem, matchAll, type RuleItem } from './rules.js';
 import type { FolderRule } from '../db/repo/rules.js';
 
 const item = (p: Partial<RuleItem>): RuleItem => ({
@@ -142,49 +142,3 @@ describe('matchAll', () => {
   });
 });
 
-describe('renderConditions', () => {
-  // 这几条全是文本条件,压根不查名字表 —— 给个空的就行(tag 那条自己在下面建)
-  const noTags = new Map<number, string>();
-
-  // 渲染成一句给模型看的话(规则条件的一句话描述)
-  it('渲染成一句给模型看的话', () => {
-    expect(
-      renderConditions([
-        { field: 'title', any: ['Python', 'JS'] },
-        { field: 'intro', any: ['算法'] },
-      ], noTags),
-    ).toBe('标题含 Python/JS;或 简介含 算法');
-  });
-
-  it('空条件渲染成空串(调用方据此不写那一行)', () => {
-    expect(renderConditions([], noTags)).toBe('');
-  });
-
-  // 界面上「新增规则」建出来的就是这个形状 —— 半写的规则必须渲染成"没有",不是半句话
-  it('关键词还是空的条件不渲染', () => {
-    expect(renderConditions([{ field: 'title', any: [] }], noTags)).toBe('');
-  });
-
-  it('混着写全的和没写完的 → 只渲染写全的那条', () => {
-    expect(
-      renderConditions([
-        { field: 'title', any: ['Python'] },
-        { field: 'intro', any: [] },
-      ], noTags),
-    ).toBe('标题含 Python');
-  });
-
-  it('词表里的空串不算写了', () => {
-    expect(renderConditions([{ field: 'title', any: ['', 'Python'] }], noTags)).toBe('标题含 Python');
-  });
-
-  // §9F C11:tag 条件里存的是 **id** —— 原样印出去,模型读到的是「标签含 42、57」,
-  // 而 C15 说的"依据就是标签和规则"里的那一半就全废了
-  it('tag 条件渲染成**词名**,不是 id', () => {
-    const names = new Map([[1, '体育'], [2, 'NBA']]);
-    expect(renderConditions([{ field: 'tag', any: ['1', '2'] }], names)).toContain('体育');
-    expect(renderConditions([{ field: 'tag', any: ['1', '2'] }], names)).toContain('NBA');
-    // 翻不到名字的 id 不该原样印成数字
-    expect(renderConditions([{ field: 'tag', any: ['999'] }], names)).toBe('');
-  });
-});

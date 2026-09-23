@@ -1,42 +1,27 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { openDb } from '../db/index.js';
 import { Logger } from '../logger/index.js';
 import { createServer } from '../http/index.js';
 import { upsertFolder } from '../db/repo/folders.js';
 import { upsertItem, linkFolderItem } from '../db/repo/items.js';
-import { seedLlm, saveProvider, listProviders, listEntries, addEntry, setAssignment, readLlmSettings } from '../llm/config.js';
 import { saveRule } from '../db/repo/rules.js';
 import { setState, stateKey } from '../db/repo/state.js';
 import type { BiliClient } from '../bilibili/client.js';
-
-// LLM 全 mock —— 路由测试绝不打真实 API。
-// 用 importOriginal 铺开真模块再覆盖,而不是只手写几个导出:后者会在
-// provider.ts 新增导出时静默失效(踩过一次 —— 多出一堆看不懂的 "No export" 报错)
-const mocks = vi.hoisted(() => ({ complete: vi.fn() }));
-vi.mock('../llm/provider.js', async (orig) => ({
-  ...(await orig<typeof import('../llm/provider.js')>()),
-  complete: mocks.complete,
-}));
 
 const stubClient = {
   withCredentials: () => ({ get: async () => null }),
 } as unknown as BiliClient;
 
-const PROPOSAL = '{"folders":[{"tempId":"f1","name":"AI/编程","rule":"含 Python","reuseFolderId":7}],"notes":"n"}';
-
-function makeApp(opts: { llm?: boolean; seed?: boolean; ollamaFetchImpl?: typeof fetch } = {}) {
+function makeApp(opts: { seed?: boolean } = {}) {
   const db = openDb(':memory:');
   const log = new Logger(db, { silent: true });
-  if (opts.llm !== false) {
-    seedLlm(db); // 1 凭证 + 1 条目(ollama/qwen2.5:14b)+ 用途全指它
-  }
   if (opts.seed !== false) {
     upsertFolder(db, { id: 7, title: '深度学习', mediaCount: 1 });
     upsertItem(db, { id: 'BV1', type: 2, title: 'Python 教程' });
     linkFolderItem(db, 7, 'BV1', 1);
   }
-  const app = createServer({ db, log, client: stubClient, ...(opts.ollamaFetchImpl ? { ollamaFetchImpl: opts.ollamaFetchImpl } : {}) });
+  const app = createServer({ db, log, client: stubClient });
   return { app, db };
 }
 
@@ -47,230 +32,6 @@ const seed = (db: ReturnType<typeof openDb>) => {
   linkFolderItem(db, 7, 'BV1', 1);
   linkFolderItem(db, 7, 'BV2', 1);
 };
-
-beforeEach(() => {
-  vi.clearAllMocks();
-  mocks.complete.mockResolvedValue(PROPOSAL);
-});
-
-describe('模型管理', () => {
-  // 名字实时从厂商拉,数字仍查注册表 —— 那个接口只回 id/object/owned_by,没有 token 上限
-  it('remote-models:拉厂商的真实名字,数字查注册表', async () => {
-    const { app } = makeApp();
-    vi.stubGlobal(
-      'fetch',
-      async () =>
-        new Response(
-          JSON.stringify({ data: [{ id: 'deepseek-flash' }, { id: 'deepseek-v9-experimental' }] }),
-          { status: 200 },
-        ),
-    );
-    try {
-      const res = await app.inject({
-        method: 'POST',
-        url: '/api/settings/remote-models',
-        payload: { provider: 'deepseek', apiKey: 'k' },
-      });
-      expect(res.statusCode).toBe(200);
-
-      const models = res.json().models as { model: string; verified: boolean }[];
-      expect(models.map((m) => m.model)).toEqual(['deepseek-flash', 'deepseek-v9-experimental']);
-      // 表里有真值 → 已确认(flash 2026-09-16 从官方价格页补进来的)
-      expect(models.find((m) => m.model === 'deepseek-flash')!.verified).toBe(true);
-      // 表里没有(厂商新出的)→ 兜底 + 未确认,界面会标 ⚠️
-      expect(models.find((m) => m.model === 'deepseek-v9-experimental')!.verified).toBe(false);
-    } finally {
-      vi.unstubAllGlobals();
-    }
-    await app.close();
-  });
-
-  it('remote-models:没选服务商 400;拉不到 502 且是人话', async () => {
-    const { app } = makeApp();
-    expect(
-      (await app.inject({ method: 'POST', url: '/api/settings/remote-models', payload: {} })).statusCode,
-    ).toBe(400);
-
-    vi.stubGlobal('fetch', async () => new Response('{}', { status: 401 }));
-    try {
-      const res = await app.inject({
-        method: 'POST',
-        url: '/api/settings/remote-models',
-        payload: { provider: 'deepseek', apiKey: 'bad' },
-      });
-      expect(res.statusCode).toBe(502);
-      // 用户照着能改的是"key 填错了",不是 "HTTP 401"
-      expect(res.json().reason).toContain('API Key');
-    } finally {
-      vi.unstubAllGlobals();
-    }
-    await app.close();
-  });
-
-  it('列出模型(可按 provider 过滤)', async () => {
-    const { app } = makeApp();
-    const all = await app.inject({ method: 'GET', url: '/api/settings/models' });
-    expect(all.json().models.length).toBeGreaterThan(10);
-
-    const ds = await app.inject({ method: 'GET', url: '/api/settings/models?provider=deepseek' });
-    expect(ds.json().models.every((m: { provider: string }) => m.provider === 'deepseek')).toBe(true);
-    await app.close();
-  });
-
-  describe('模型配置(三层)', () => {
-    it('providers 列表不回传明文 key', async () => {
-      const { app, db } = makeApp();
-      saveProvider(db, { provider: 'deepseek', apiKey: 'sk-secret-xyz' });
-      const body = (await app.inject({ method: 'GET', url: '/api/settings/providers' })).json();
-      expect(body.providers).toHaveLength(2); // seedLlm 的 + 这个
-      expect(JSON.stringify(body)).not.toContain('sk-secret-xyz');
-      const ds = body.providers.find((p: { provider: string }) => p.provider === 'deepseek');
-      expect(ds.hasApiKey).toBe(true);
-      await app.close();
-    });
-
-    it('PUT providers 更新时 apiKey 不带 = 保留已存', async () => {
-      const { app, db } = makeApp();
-      const p = listProviders(db)[0]!;
-      saveProvider(db, { id: p.id, provider: 'ollama', apiKey: 'sk-keep-123456' });
-      const res = await app.inject({
-        method: 'PUT', url: '/api/settings/providers',
-        payload: { id: p.id, provider: 'ollama', baseUrl: 'http://x/v1' }, // 无 apiKey
-      });
-      expect(res.statusCode).toBe(200);
-      const body = (await app.inject({ method: 'GET', url: '/api/settings/providers' })).json();
-      expect(body.providers[0]!.hasApiKey).toBe(true);
-      await app.close();
-    });
-
-    it('DELETE 被条目引用的凭证 → 400', async () => {
-      const { app, db } = makeApp();
-      const p = listProviders(db)[0]!;
-      const res = await app.inject({ method: 'DELETE', url: `/api/settings/providers/${p.id}` });
-      expect(res.statusCode).toBe(400);
-      await app.close();
-    });
-
-    it('entries 带注册表解析的数字;新增自动全分配', async () => {
-      const { app, db } = makeApp({ llm: false });
-      const p = await app.inject({ method: 'PUT', url: '/api/settings/providers', payload: { provider: 'deepseek' } });
-      const pid = p.json().id;
-      const e = await app.inject({ method: 'POST', url: '/api/settings/entries', payload: { providerId: pid, model: 'deepseek-flash' } });
-      expect(e.statusCode).toBe(200);
-      const list = (await app.inject({ method: 'GET', url: '/api/settings/entries' })).json();
-      expect(list.entries[0]).toMatchObject({ model: 'deepseek-flash', contextWindow: 1_024_000, maxOutput: 384_000, verified: true });
-      const a = (await app.inject({ method: 'GET', url: '/api/settings/assignments' })).json();
-      expect(a.assignments).toEqual({
-        proposals: list.entries[0].id,
-        rules: list.entries[0].id, tag: list.entries[0].id, tagcheck: list.entries[0].id,
-      });
-      await app.close();
-    });
-
-    it('DELETE 被用途引用的条目 → 400', async () => {
-      const { app, db } = makeApp();
-      const e = listEntries(db)[0]!;
-      const res = await app.inject({ method: 'DELETE', url: `/api/settings/entries/${e.id}` });
-      expect(res.statusCode).toBe(400);
-      await app.close();
-    });
-
-    it('PUT assignments 改单个用途;指向不存在的条目 → 400', async () => {
-      const { app, db } = makeApp();
-      const e2 = await app.inject({
-        method: 'POST', url: '/api/settings/entries',
-        payload: { providerId: listProviders(db)[0]!.id, model: 'qwen2.5:14b' },
-      }); // 第二条不触发自动分配(用途已被 seed 占住)
-      const res = await app.inject({ method: 'PUT', url: '/api/settings/assignments', payload: { tag: e2.json().id } });
-      expect(res.statusCode).toBe(200);
-      const a = (await app.inject({ method: 'GET', url: '/api/settings/assignments' })).json();
-      expect(a.assignments.tag).toBe(e2.json().id);
-      const bad = await app.inject({ method: 'PUT', url: '/api/settings/assignments', payload: { proposals: 'm_nope' } });
-      expect(bad.statusCode).toBe(400);
-      await app.close();
-    });
-  });
-
-  it('测试连接成功', async () => {
-    const { app } = makeApp();
-    mocks.complete.mockResolvedValue('可以');
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/settings/test-llm',
-      payload: { provider: 'ollama', model: 'qwen2.5:14b' },
-    });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().reply).toBe('可以');
-    await app.close();
-  });
-
-  it('测试连接失败回 502 并带上原因', async () => {
-    const { app } = makeApp();
-    mocks.complete.mockRejectedValue(new Error('connect ECONNREFUSED 127.0.0.1:11434'));
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/settings/test-llm',
-      payload: { provider: 'ollama', model: 'qwen2.5:14b' },
-    });
-    expect(res.statusCode).toBe(502);
-    expect(res.json().reason).toContain('ECONNREFUSED');
-    await app.close();
-  });
-
-  /** §6 红队加固:测试连接的日志里绝不能出现明文 apiKey */
-  it('测试连接的日志不落明文 apiKey', async () => {
-    const { app, db } = makeApp();
-    mocks.complete.mockRejectedValue(new Error('401 Unauthorized: key sk-live-DEADBEEF 无效'));
-
-    await app.inject({
-      method: 'POST',
-      url: '/api/settings/test-llm',
-      payload: { provider: 'deepseek', model: 'deepseek-flash', apiKey: 'sk-live-DEADBEEF' },
-    });
-
-    const rows = db
-      .prepare(`SELECT message, detail FROM events`)
-      .all() as { message: string; detail: string | null }[];
-    expect(rows.length).toBeGreaterThan(0);
-    const dumped = JSON.stringify(rows);
-    expect(dumped).not.toContain('sk-live-DEADBEEF');
-    expect(dumped).toContain('***');
-    await app.close();
-  });
-
-  it('ollama-models 成功时把真实数字写进 llm.ollama.meta(条目不存数字,读取侧靠它)', async () => {
-    // 假 Ollama:/api/tags 回一个模型名,/api/show 回它的真实上下文长度
-    const fake = (async (url: string | URL) => {
-      const u = String(url);
-      if (u.endsWith('/api/tags')) {
-        return { ok: true, json: async () => ({ models: [{ name: 'qwen-fake:latest' }] }) };
-      }
-      return {
-        ok: true,
-        json: async () => ({ model_info: { 'qwen-fake.context_length': 40_960 } }),
-      };
-    }) as unknown as typeof fetch;
-    const { app, db } = makeApp({ ollamaFetchImpl: fake });
-    const res = await app.inject({ method: 'GET', url: '/api/settings/ollama-models' });
-    expect(res.statusCode).toBe(200);
-
-    // 数字落了库,且 readLlmSettings 读侧真的用它(verified:true,不再退 32K 兜底)
-    const raw = db
-      .prepare(`SELECT value FROM settings WHERE key = 'llm.ollama.meta'`)
-      .get() as { value: string } | undefined;
-    expect(JSON.parse(raw!.value)).toMatchObject({
-      'qwen-fake:latest': { contextWindow: 40_960 },
-    });
-
-    const [p] = listProviders(db);
-    const e = addEntry(db, { providerId: p!.id, model: 'qwen-fake:latest' });
-    setAssignment(db, 'proposals', e.id);
-    const s = readLlmSettings(db, 'proposals')!;
-    expect(s.ctx.contextWindow).toBe(40_960);
-    expect(s.ctx.verified).toBe(true);
-    await app.close();
-  });
-});
 
 describe('工作台路由', () => {
   it('GET 返回视图,没建副本时 exists=false', async () => {

@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { redact, redactDeep } from './redact.js';
+import { redact, redactDeep } from '@SeedHuang/ai/core';
 import type { RequestRecord } from '../bilibili/client.js';
 
 export interface LogEvent {

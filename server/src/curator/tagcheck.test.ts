@@ -5,10 +5,18 @@ import {
   addAlias, ensureTag, listTagTree, listUncheckedTags, markTagChecked, normalizeTagName, findTag,
 } from '../db/repo/tags.js';
 
-const mocks = vi.hoisted(() => ({ complete: vi.fn() }));
-vi.mock('../llm/provider.js', () => ({ complete: mocks.complete }));
+import type { AiCore } from '../ai.js';
 
-const { coerceVerdicts, runTagCheck } = await import('./tagcheck.js');
+const mocks = vi.hoisted(() => ({ complete: vi.fn() }));
+
+/** 对模型的唯一出口是 ai 实例方法 —— 测试用只带 complete 的桩顶上 */
+const ai = { complete: mocks.complete } as unknown as AiCore;
+
+const tagcheck = await import('./tagcheck.js');
+const { coerceVerdicts } = tagcheck;
+/** 调用点不必逐个补 ai:统一在这里注入 */
+const runTagCheck = (opts: Omit<Parameters<typeof tagcheck.runTagCheck>[0], 'ai'>) =>
+  tagcheck.runTagCheck({ ...opts, ai });
 const config = { id: 'flash', provider: 'deepseek', baseUrl: '', apiKey: 'k', model: 'deepseek-flash' };
 
 beforeEach(() => vi.clearAllMocks());
@@ -181,7 +189,7 @@ describe('runTagCheck', () => {
   it('一个词都没判回来 → 出声(不能长得像"什么都没变")', async () => {
     const db = openDb(':memory:');
     ensureTag(db, '露营', null);
-    // 被截断的数组 —— 真实成因是输出撞上服务商默认上限(`provider.ts` 没设 maxOutputTokens)
+    // 被截断的数组 —— 真实成因是输出撞上服务商默认上限(包内 provider 没设 maxOutputTokens)
     mocks.complete.mockResolvedValue('[{"name":"露营","action":"ke');
     const log = new Logger(db, { silent: true });
     await runTagCheck({ config, tree: listTagTree(db), db, log });

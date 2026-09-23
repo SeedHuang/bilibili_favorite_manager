@@ -3,8 +3,7 @@ import type Database from 'better-sqlite3';
 import type { Logger } from '../logger/index.js';
 import type { RuleCondition } from '../db/repo/rules.js';
 import type { ItemRow } from '../db/repo/items.js';
-import { complete } from '../llm/provider.js';
-import { readLlmSettings } from '../llm/config.js';
+import type { AiCore } from '../ai.js';
 import { parseLooseJson } from './parse.js';
 import {
   startProposal, saveDrafts, gatherInputs,
@@ -182,7 +181,7 @@ const pushLog = (level: 'info' | 'warn' | 'error', text: string) => {
  * 两者并行不替代:内存的会丢,落库的看不见进行中。
  */
 export async function runGeneration(
-  db: Database.Database, log: Logger, level: number,
+  ai: AiCore, db: Database.Database, log: Logger, level: number,
   opts: { signal?: AbortSignal } = {},
 ): Promise<void> {
   const t0 = Date.now();
@@ -193,7 +192,7 @@ export async function runGeneration(
   // try 从 readLlmSettings 就包住:running 置位后任何一步抛错都得走 finally 复位,
   // 不然卡"生成中"是死状态(下面 catch 的注释同因)
   try {
-    const llm = readLlmSettings(db, 'proposals');
+    const llm = ai.readLlmSettings('proposals');
     if (!llm) { // 路由已拦,这里兜底(异步路径里没人接 400)
       log.event({ level: 'error', category: 'llm', code: 'PROPOSAL_NO_LLM', message: '生成方案时模型配置消失' });
       pushLog('error', '生成方案时模型配置消失');
@@ -206,7 +205,7 @@ export async function runGeneration(
     console.log(`[proposals] 备料完成 词=${inputs.tagCount} 共现对=${inputs.pairCount}`
       + ` 未挂词=${inputs.uncoveredCount} —— 开始调模型(${llm.config.model})`);
     const prompt = buildPrompt({ ...inputs, level });
-    const raw = await complete({
+    const raw = await ai.complete({
       config: llm.config,
       messages: [
         { role: 'system', content: prompt.system },
@@ -217,7 +216,7 @@ export async function runGeneration(
       // 一次要吐整套方案(几十个夹子 × 每个一堆词名),不给上限就会被厂商默认的
       // 8192 截断成断尾 JSON —— 实测复现过(finish=length,16892 字符断在中间)
       maxOutputTokens: llm.ctx.maxOutput,
-      // 中止透传:provider 的 complete 已支持(tagRoutes 同款条件展开),
+      // 中止透传:ai.complete(包内 provider)已支持(tagRoutes 同款条件展开),
       // 没有信号时整个键不出现,请求形状与加开关前逐字一致
       ...(opts.signal ? { abortSignal: opts.signal } : {}),
     });

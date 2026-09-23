@@ -9,9 +9,9 @@ import { saveRule } from '../db/repo/rules.js';
 import { markFolderAsAi } from '../db/repo/aiFolders.js';
 import { createFolder } from './workbench.js';
 import { runGeneration, proposalRun } from './proposal.js';
-import { readLlmSettings } from '../llm/config.js';
+import type { AiCore } from '../ai.js';
 
-export interface ProposalDeps { db: Database.Database; log: Logger }
+export interface ProposalDeps { db: Database.Database; log: Logger; ai: AiCore }
 
 /** 中止控制器 —— abort 端点拿着它停正在跑的那轮。模块级,和 proposalRun 同一理由 */
 let currentController: AbortController | null = null;
@@ -20,7 +20,7 @@ let currentController: AbortController | null = null;
 let lastLoggedStatus: string | null = null;
 
 export function registerProposalRoutes(app: FastifyInstance, deps: ProposalDeps): void {
-  const { db, log } = deps;
+  const { db, log, ai } = deps;
 
   // **启动即复位僵尸态**:进程重启后内存里的 run 一定没了,此时库里任何
   // generating 都是上一进程留下的死状态 —— 不治的话页面一进来就把它当"正在跑",
@@ -37,7 +37,7 @@ export function registerProposalRoutes(app: FastifyInstance, deps: ProposalDeps)
       console.log(`[proposals/generate] 拒绝:档位非法 level=${level}`);
       return reply.code(400).send({ ok: false, reason: '档位必须是 1~10' });
     }
-    if (!readLlmSettings(db, 'proposals')) {
+    if (!ai.readLlmSettings('proposals')) {
       console.log('[proposals/generate] 拒绝:没配模型');
       return reply.code(400).send({ ok: false, reason: '还没配模型 —— 先去「授权」页的模型管理里选一个' });
     }
@@ -50,7 +50,7 @@ export function registerProposalRoutes(app: FastifyInstance, deps: ProposalDeps)
     const controller = new AbortController();
     currentController = controller;
     console.log(`[proposals/generate] 已受理 level=${level} —— 启动即返回(202),后台跑`);
-    void runGeneration(db, log, level, { signal: controller.signal });
+    void runGeneration(ai, db, log, level, { signal: controller.signal });
     return reply.code(202).send({ ok: true });
   });
 

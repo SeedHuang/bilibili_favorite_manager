@@ -1,9 +1,5 @@
 import type {
-  AssignmentsView,
-  EntryView,
   Item,
-  LlmPurpose,
-  ModelMeta,
   OperationEntry,
   ProposalDraftView,
   ProposalInfo,
@@ -11,7 +7,6 @@ import type {
   ReviewCurrent,
   PollConfig,
   PollsMap,
-  ProviderView,
   RuleCondition,
   RuleView,
   TagRunProgress,
@@ -81,52 +76,6 @@ export function json<T>(method: 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: strin
  */
 export const setFolderLock = (id: number, locked: boolean | null) =>
   json<{ ok: true; locked: boolean }>('PUT', `/api/folders/${id}/lock`, { locked });
-
-// ── 模型管理(spec §3)──────────────────────────────────
-
-export const llmApi = {
-  /** 内置注册表(厂商列表拉不到时的兜底,语义同旧) */
-  listModels: (provider?: string) =>
-    api<{ models: ModelMeta[] }>(
-      `/api/settings/models${provider ? `?provider=${provider}` : ''}`,
-    ).then((r) => r.models),
-
-  /**
-   * 从厂商的 `/models` 拉真实模型名。apiKey 留空 = 用已存的那个(凭证表单里
-   * 从来拿不到明文 key,首次配只能靠用户现填的这个)。
-   */
-  listRemoteModels: (input: { provider: string; baseUrl?: string; apiKey?: string }) =>
-    json<{ models: ModelMeta[] }>('POST', '/api/settings/remote-models', input).then(
-      (r) => r.models,
-    ),
-
-  providers: () =>
-    api<{ providers: ProviderView[] }>('/api/settings/providers').then((r) => r.providers),
-
-  saveProvider: (input: { id?: string; provider: string; baseUrl?: string; apiKey?: string }) =>
-    json<{ ok: true; id: string }>('PUT', '/api/settings/providers', input),
-
-  deleteProvider: (id: string) =>
-    json<{ ok: true }>('DELETE', `/api/settings/providers/${id}`),
-
-  entries: () =>
-    api<{ entries: EntryView[] }>('/api/settings/entries').then((r) => r.entries),
-
-  addEntry: (input: { providerId: string; model: string }) =>
-    json<{ ok: true; id: string }>('POST', '/api/settings/entries', input),
-
-  deleteEntry: (id: string) =>
-    json<{ ok: true }>('DELETE', `/api/settings/entries/${id}`),
-
-  assignments: () =>
-    api<AssignmentsView>('/api/settings/assignments').then((r) => r.assignments),
-
-  setAssignments: (input: Partial<Record<LlmPurpose, string | null>>) =>
-    json<{ ok: true }>('PUT', '/api/settings/assignments', input),
-
-  test: (input: { provider: string; model: string; baseUrl?: string; apiKey?: string }) =>
-    json<{ ok: true; reply: string }>('POST', '/api/settings/test-llm', input),
-};
 
 // ── M4b:整理工作台 ──────────────────────────────────────
 

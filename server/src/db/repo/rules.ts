@@ -88,7 +88,7 @@ export function deleteRule(db: Database.Database, folderId: number): void {
  *
  * 规则存的是 tag id(落地细节 3,理由正当:改名不该改语义),而词库每轮都在
  * 合并、偶尔删除 —— 那都是**删节点**。不重写的话:规则的 tag 条件永远匹配不上
- * (`subtreeSets` 里没有那个 id 了),而 `renderConditions` 也翻不到名字、渲染成空串。
+ * (`subtreeSets` 里没有那个 id 了),那条 tag 条件就成了永远匹配不到的死 id。
  * 用户看到的是"规则还在,就是不生效"。规则是这产品唯一比 B站 多的东西(§9C),
  * 这是整条链路上唯一会**静默吃掉它**的地方。
  *

@@ -6,12 +6,19 @@ import {
   ensureTag, itemTagIds, linkItemTag, listTagTree, normalizeTagName, findTag,
 } from '../db/repo/tags.js';
 import type { ItemRow } from '../db/repo/items.js';
-import type { ModelMeta } from '../llm/registry.js';
+import type { ModelMeta } from '@SeedHuang/ai/contract';
+import type { AiCore } from '../ai.js';
 
 const mocks = vi.hoisted(() => ({ complete: vi.fn() }));
-vi.mock('../llm/provider.js', () => ({ complete: mocks.complete }));
 
-const { runTagging, coerceTagOutput, applyTagOutput, TAG_KINDS } = await import('./tagger.js');
+/** 对模型的唯一出口是 ai 实例方法 —— 测试用只带 complete 的桩顶上 */
+const ai = { complete: mocks.complete } as unknown as AiCore;
+
+const tagger = await import('./tagger.js');
+const { coerceTagOutput, applyTagOutput, TAG_KINDS } = tagger;
+/** 调用点不必逐个补 ai:统一在这里注入 */
+const runTagging = (opts: Omit<Parameters<typeof tagger.runTagging>[0], 'ai'>) =>
+  tagger.runTagging({ ...opts, ai });
 
 const ctx: ModelMeta = { provider: 'ollama', model: 'qwen3-4b', contextWindow: 262_144, maxOutput: 8_192, verified: true };
 const config = { id: '本地', provider: 'ollama', baseUrl: '', apiKey: '', model: 'qwen3-4b' };
@@ -179,7 +186,7 @@ describe('runTagging', () => {
 
   // ★ 回归测试:用户报的「点停止停不了 / 日志不刷 / 前端不更新」一串症状,
   //   根因是模型调用挂起时 `complete` 永不 resolve、整轮卡死、`running` 永久 true。
-  //   现在 provider 层有 timeoutMs 兜底(挂起抛"超时"),这一条验证:一批超时
+  //   现在包内 provider 层有 timeoutMs 兜底(挂起抛"超时"),这一条验证:一批超时
   //   记 failedBatches,**后续批次照跑**,而不是卡死整轮。
   it('一批超时 → 记失败批次,后续批次继续(不卡死整轮)', async () => {
     const db = openDb(':memory:');

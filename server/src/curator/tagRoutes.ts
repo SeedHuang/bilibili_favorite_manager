@@ -14,7 +14,7 @@
 import type { FastifyInstance } from 'fastify';
 import type Database from 'better-sqlite3';
 import type { Logger } from '../logger/index.js';
-import { readLlmSettings } from '../llm/config.js';
+import type { AiCore } from '../ai.js';
 import { listUntaggedItemIds, tagStats } from '../db/repo/tagging.js';
 import { getItem, type ItemRow } from '../db/repo/items.js';
 import { listWorkFolders } from '../db/repo/workbench.js';
@@ -31,6 +31,8 @@ import { getSetting, setSetting, readPoll } from '../db/repo/state.js';
 export interface TagDeps {
   db: Database.Database;
   log: Logger;
+  /** AI 套件实例 —— 对模型的唯一出口 */
+  ai: AiCore;
 }
 
 /** 最近一轮「树的变化」清单存这个键 —— 刷新页面还在(§9F C10 要"看得见") */
@@ -84,7 +86,7 @@ const tagsExist = (db: Database.Database, ids: number[]): boolean => {
 };
 
 export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
-  const { db, log } = deps;
+  const { db, log, ai } = deps;
   const allItems = () => db.prepare(`SELECT * FROM items`).all() as ItemRow[];
 
   /**
@@ -120,7 +122,7 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
   };
 
   app.get('/api/tags/status', async () => {
-    const tag = readLlmSettings(db, 'tag');
+    const tag = ai.readLlmSettings('tag');
     // 用途平级后没有"回落"了:tag 没配就是没配,界面照实说
     return {
       ...tagStats(db),
@@ -194,7 +196,7 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
       console.log('[tags/check] 拒绝:scope 非法', String(scope));
       return reply.code(400).send({ ok: false, reason: 'scope 只能是 continue 或 all' });
     }
-    const checker = readLlmSettings(db, 'tagcheck');
+    const checker = ai.readLlmSettings('tagcheck');
     if (!checker) {
       console.log('[tags/check] 拒绝:没配质检模型');
       return reply.code(400).send({ ok: false, reason: '还没配「标签质检」模型 —— 先去「授权」页配一个' });
@@ -223,6 +225,7 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
     try {
       frame('phase', { phase: 'check', provider: checker.config.provider, model: checker.config.model });
       const r = await runTagCheck({
+        ai,
         config: checker.config,
         tree: listTagTree(db),
         scope,
@@ -289,7 +292,7 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
     }
 
     const scope = (req.query as { scope?: string }).scope === 'all' ? 'all' : 'missing';
-    const llm = readLlmSettings(db, 'tag');
+    const llm = ai.readLlmSettings('tag');
     if (!llm) {
       return reply.code(400).send({ ok: false, reason: '还没配模型 —— 先去「授权」页配一个' });
     }
@@ -352,6 +355,7 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
       const r = pool.length === 0
         ? { tagged: 0, failedBatches: [], newWords: [] }
         : await runTagging({
+            ai,
             config: llm.config,
             ctx: llm.ctx,
             items: pool,
@@ -403,7 +407,7 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
        * 所以第五个用途**必须真的被读到** —— 漏了这一行的话它在界面上是个
        * 配置了却永远不生效的下拉,而质检会跟着打标一起跑在本地 4b 上。
        */
-      const checker = readLlmSettings(db, 'tagcheck');
+      const checker = ai.readLlmSettings('tagcheck');
       // 批大小从设置读 —— 和手动质检同一个任务、同一份设置,不能两套口径
       const checkBatch = readPoll(db, 'tagcheck').batch;
       let check = { dropped: 0, merged: 0, moved: 0 };
@@ -419,6 +423,7 @@ export function registerTagRoutes(app: FastifyInstance, deps: TagDeps): void {
           console.log(`[tags/run] 打标完成,共 ${r.tagged} 条 —— 开始质检(${checker.config.model}),待检 ${countUncheckedTags(db)} 个词`);
           frame('phase', { phase: 'check', provider: checker.config.provider, model: checker.config.model });
           check = await runTagCheck({
+            ai,
             config: checker.config,
             tree: listTagTree(db),
             scope: 'continue',

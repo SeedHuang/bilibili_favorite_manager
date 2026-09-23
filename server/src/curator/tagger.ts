@@ -13,11 +13,9 @@ import type Database from 'better-sqlite3';
 import type { ItemRow } from '../db/repo/items.js';
 import { markItemTagged } from '../db/repo/tagging.js';
 import { ensureTag, linkItemTag, normalizeTagName, setTagParent } from '../db/repo/tags.js';
-import { complete } from '../llm/provider.js';
+import type { AiCore, ChatMessage, ModelConfig } from '@SeedHuang/ai/core';
+import type { ModelMeta } from '@SeedHuang/ai/contract';
 import { parseJsonArray } from './parse.js';
-import type { ModelConfig } from '../llm/provider.js';
-import { type ChatMessage } from '../llm/context.js';
-import type { ModelMeta } from '../llm/registry.js';
 
 /** kind 受控枚举(spec C3)—— 实测不受控会同义词泛滥("教程/教学/学习") */
 export const TAG_KINDS = ['教学', '娱乐', '评测', '资讯', '工具', '其它'] as const;
@@ -152,6 +150,8 @@ export interface TagBatchProgress {
 }
 
 export async function runTagging(opts: {
+  /** AI 套件实例 —— 对模型的唯一出口 */
+  ai: AiCore;
   config: ModelConfig;
   ctx: ModelMeta;
   items: readonly ItemRow[];
@@ -204,7 +204,7 @@ export async function runTagging(opts: {
           .join('\n'),
       },
     ];
-    const raw = await complete({
+    const raw = await opts.ai.complete({
       config: opts.config,
       messages,
       // 标注是批量:一整批的输入本就大,再开着思考模式就是每条都多吐一长串推理

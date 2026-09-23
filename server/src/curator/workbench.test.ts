@@ -7,7 +7,7 @@ import { ensureWorkcopy, listWorkFolders, workItemIds, hasWorkcopy } from '../db
 import { listOperations } from '../db/repo/operations.js';
 import {
   renameFolder, createFolder, deleteFolder, mergeFolders,
-  moveItems, addItems, removeItems, resetWorkbench, assignItems,
+  moveItems, addItems, removeItems, resetWorkbench,
 } from './workbench.js';
 
 function seeded() {
@@ -284,61 +284,7 @@ describe('编辑动作', () => {
   });
 });
 
-// ── 一条条目归进多个夹子(R4 的最后一公里)──────────────
-describe('assignItems', () => {
-  it('加进多个夹子 —— 全都在,一个不少', () => {
-    const db = seeded();
-    const a = originIdOf(db, 7);
-    const b = originIdOf(db, 8);
-
-    const r = assignItems(db, ['BV2'], [a, b]);
-
-    expect(r.moved).toBe(1);
-    expect(workItemIds(db, a)).toContain('BV2');
-    expect(workItemIds(db, b)).toContain('BV2');
-  });
-
-  it('先从原处拿走 —— 不是"再加一份"', () => {
-    const db = seeded();
-    const a = originIdOf(db, 7);
-    const b = originIdOf(db, 8);
-    // BV2 本来只在 7 里(seed 里 linkFolderItem(7,'BV2'))
-
-    assignItems(db, ['BV2'], [b]);
-
-    expect(workItemIds(db, a)).not.toContain('BV2'); // 从 7 拿走了
-    expect(workItemIds(db, b)).toContain('BV2');     // 进了 8
-  });
-
-  it('**一次操作一条日志**,不是每个夹子一条', () => {
-    const db = seeded();
-    assignItems(db, ['BV2'], [originIdOf(db, 7), originIdOf(db, 8)]);
-    expect(listOperations(db)).toHaveLength(1);
-  });
-
-  it('空目标 = 把这批条目从所有夹子里拿走(等于移出)', () => {
-    const db = seeded();
-    const a = originIdOf(db, 7);
-    assignItems(db, ['BV2'], []);
-    expect(workItemIds(db, a)).not.toContain('BV2');
-  });
-
-  it('空条目数组什么都不做(不克隆、不记日志)', () => {
-    const db = seeded();
-    assignItems(db, [], [originIdOf(db, 7)]);
-    expect(listOperations(db)).toHaveLength(0);
-  });
-
-  it('目标夹子不存在 → 抛错,且什么都不改', () => {
-    const db = seeded();
-    const a = originIdOf(db, 7);
-    expect(() => assignItems(db, ['BV2'], [a, 999])).toThrow(/没有夹子/);
-    expect(workItemIds(db, a)).toContain('BV2'); // 没动
-  });
-});
-
-// ── 成员资格写入器(spec 2026-09-21 §3)──────────────────
-import { writeMembership, reconcileAiFolder, applyRuleHitsToFolder } from './workbench.js';
+import { reconcileAiFolder, applyRuleHitsToFolder } from './workbench.js';
 import { listAiFolderIds, markFolderAsAi } from '../db/repo/aiFolders.js';
 import { saveRule } from '../db/repo/rules.js';
 
@@ -352,42 +298,6 @@ function makeAiFolder(db: ReturnType<typeof seeded>, name: string, keywords: str
   if (keywords.length) saveRule(db, id, [{ field: 'title', any: keywords }], 'ai');
   return id;
 }
-
-describe('writeMembership', () => {
-  it('人类夹子只加不清 —— 目标集不含它时存量原样保留', () => {
-    const db = seeded();
-    const human = originIdOf(db, 7); // BV1、BV2
-    writeMembership(db, ['BV3'], [originIdOf(db, 8)]); // 目标根本不是 7
-    expect(workItemIds(db, human).sort()).toEqual(['BV1', 'BV2']);
-    // BV2 不在目标集里 —— 也不许清
-    writeMembership(db, ['BV2'], [originIdOf(db, 8)]);
-    expect(workItemIds(db, human)).toContain('BV2');
-    expect(workItemIds(db, originIdOf(db, 8))).toContain('BV2');
-  });
-
-  it('AI 夹子不是写入目标 —— 直接拒(洞 4:AI 夹子唯一入口是规则)', () => {
-    const db = seeded();
-    const ai = makeAiFolder(db, 'AI 编程', ['BV1']);
-    expect(() => writeMembership(db, ['BV2'], [ai])).toThrow(/AI 建的夹子/);
-  });
-
-  it('默认夹:条目落进主题夹子时移出;只在默认夹之间倒手时留着', () => {
-    const db = seeded();
-    const def = originIdOf(db, 9);
-    const human = originIdOf(db, 7);
-    writeMembership(db, ['BV4'], [human]);
-    expect(workItemIds(db, def)).not.toContain('BV4');
-    writeMembership(db, ['BV4'], [def]);
-    expect(workItemIds(db, def)).toContain('BV4');
-  });
-
-  it('留痕:一次调用一条日志', () => {
-    const db = seeded();
-    writeMembership(db, ['BV1'], [originIdOf(db, 8)]);
-    expect(listOperations(db)).toHaveLength(1);
-    expect(listOperations(db)[0]!.kind).toBe('move_items');
-  });
-});
 
 describe('reconcileAiFolder', () => {
   it('多则清(走安全网)、缺则补 —— 成员恒等于规则命中集', () => {

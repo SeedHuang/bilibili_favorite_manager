@@ -1,4 +1,4 @@
-import type { FolderRule, RuleCondition, RuleField } from '../db/repo/rules.js';
+import type { FolderRule, RuleField } from '../db/repo/rules.js';
 import type { ItemRow } from '../db/repo/items.js';
 
 /**
@@ -38,10 +38,6 @@ export interface RuleHit {
   /** 命中的条件,可能多条(同一个夹子的多个条件都命中时) */
   tokens: RuleHitToken[];
 }
-
-const FIELD_LABEL: Record<RuleField, string> = {
-  title: '标题', intro: '简介', upper: 'UP 名', tag: '标签',
-};
 
 /**
  * 库里的条目 → 规则引擎看的那个投影。**只有这一处**。
@@ -124,35 +120,3 @@ export function matchAll(
   return out;
 }
 
-/**
- * 把一组条件渲染成给模型看的一句话(空条件 → 空串,调用方据此不写那一行)
- *
- * **关键词还是空的 = 这条条件还没写完** —— 界面上「新增规则」建出来的就是
- * `[{ field: 'title', any: [] }]` 这个形状,而用户打字的过程中也是它。半句话
- * (`标题含 `)喂给模型比不喂更糟:那正是 §9C.0 里"模型拿到残缺信息于是瞎猜"的老毛病。
- * 这里用的判空条件和 `matchItem` 里那句 `if (!kw) continue` **完全一致** ——
- * 两处对"半写的规则"必须给出同一个答案。
- *
- * **tag 条件里存的是 id,这里得翻成词名再印。** 印 id 的话模型读到的是
- * 「标签含 42、57」—— 而 C15 说的"依据就是标签和规则"里的那一半,变成一串
- * 数字就全废了。翻不到名字的 id 直接跳过:一个都翻不出来时这条渲染成空串,
- * 和"关键词还空着"同款(它本来也就匹配不到东西)。
- *
- * **`tagNameOf` 是必填的,不给默认值。** 给 `= new Map()` 的话,漏传的那个调用方
- * 不报错 —— 只是 tag 条件静默渲染成空串,模型看不到这一半依据,而没有任何测试
- * 会发现。这和 C6 里"闸放唯一收口、不放在各调用点"是同一条道理:
- * **默认值会把"漏了"变成"静默降级"**。
- */
-export function renderConditions(
-  conditions: readonly RuleCondition[],
-  tagNameOf: ReadonlyMap<number, string>,
-): string {
-  const written = (c: RuleCondition): string[] =>
-    c.field === 'tag'
-      ? c.any.map(Number).map((id) => tagNameOf.get(id)).filter((x): x is string => !!x)
-      : c.any.filter((k) => k);
-  return conditions
-    .filter((c) => written(c).length > 0)
-    .map((c) => `${FIELD_LABEL[c.field]}含 ${written(c).join('/')}`)
-    .join(';或 ');
-}

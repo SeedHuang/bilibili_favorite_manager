@@ -5,22 +5,24 @@ import { Logger } from '../logger/index.js';
 import { createServer } from '../http/index.js';
 import { upsertItem } from '../db/repo/items.js';
 import { ensureTag, linkItemTag } from '../db/repo/tags.js';
-import { seedLlm } from '../llm/config.js';
+import { makeAi, seedAi } from '../ai.js';
 import { proposalRun } from './proposal.js';
 import type { BiliClient } from '../bilibili/client.js';
 
 const mocks = vi.hoisted(() => ({ complete: vi.fn() }));
-vi.mock('../llm/provider.js', async (orig) => ({
-  ...(await orig<typeof import('../llm/provider.js')>()),
-  complete: mocks.complete,
-}));
 
 const stubClient = { withCredentials: () => ({ get: async () => null }) } as unknown as BiliClient;
+
+/** 路由测的是编排:模型出口换成 mock 的 complete(设置仍由 seedAi 铺) */
+const withMockComplete = (db: ReturnType<typeof openDb>) => ({
+  ...makeAi(db),
+  complete: mocks.complete,
+});
 
 function makeApp() {
   const db = openDb(':memory:');
   const log = new Logger(db, { silent: true });
-  seedLlm(db);
+  seedAi(db);
   db.prepare(`INSERT INTO items (id,type,title) VALUES ('BV1',2,'NBA 教程'),('BV2',2,'健身日记')`).run();
   ensureTag(db, 'NBA', null);
   ensureTag(db, '篮球', null);
@@ -28,7 +30,7 @@ function makeApp() {
   // (brief 硬编码 tagIds:[1] 依赖自增序;plan 已授权改查真实 id)
   const nbaId = (db.prepare(`SELECT id FROM tags WHERE norm='nba'`).get() as { id: number }).id;
   linkItemTag(db, 'BV1', nbaId, 'ai');
-  return { app: createServer({ db, log, client: stubClient }), db, nbaId };
+  return { app: createServer({ db, log, client: stubClient, ai: withMockComplete(db) }), db, nbaId };
 }
 
 // tagIds 用真实 id 而不是硬编码 1(见 makeApp 内注释)。
@@ -197,12 +199,12 @@ describe('方案路由', () => {
     // 点中止还会得到 409(真机上出现过)
     const db = openDb(':memory:');
     const log = new Logger(db, { silent: true });
-    seedLlm(db);
+    seedAi(db);
     db.prepare(
       `INSERT INTO folder_proposals (id, level, status, created_at) VALUES (1, 5, 'generating', ?)`,
     ).run(Date.now());
 
-    const app = createServer({ db, log, client: stubClient });
+    const app = createServer({ db, log, client: stubClient, ai: withMockComplete(db) });
     const cur = (await app.inject({ url: '/api/proposals/current' })).json();
     expect(cur.proposal.status).toBe('idle');
 
