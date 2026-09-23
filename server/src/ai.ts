@@ -1,10 +1,10 @@
 // server/src/ai.ts —— BFM 的 AI 套件实例
 //
 // 三层模型配置(凭证 / 条目 / 用途分配)与对模型的**唯一出口**都来自
-// `@SeedHuang/ai`;这里只做两件 BFM 特有的事:注入 BFM 的存储与 DPAPI,
+// `@seedhuang/ai_suit_tool`;这里只做两件 BFM 特有的事:注入 BFM 的存储与 DPAPI,
 // 声明本项目用的用途清单。日志不在这条路上 —— 它归 fastify 适配器的 logger
 // (见 http/index.ts 的 registerAiSettings)。
-import { createAiCore, type AiLogger } from '@SeedHuang/ai/core';
+import { createAiCore, type AiLogger } from '@seedhuang/ai_suit_tool/core';
 import type Database from 'better-sqlite3';
 import { getSetting, setSetting, deleteSetting } from './db/repo/state.js';
 import { encryptSecret, decryptSecret } from './security/dpapi.js';

@@ -13,9 +13,9 @@ BFM 中散落着 AI 相关能力：后端 `server/src/llm/` 已是一层相当�
 
 | 用法 | 消费方安装 | 做什么 |
 |---|---|---|
-| 前后端合起来 | `@SeedHuang/ai` | Fastify 插件挂 `/api/settings/*` 路由 + React 组件直接拼出完整设置页 |
-| 纯后端 | `@SeedHuang/ai/core` + `@SeedHuang/ai/fastify` | 只拿配置存储 + 模型请求能力，自带配置管理路由，无前端 |
-| 纯前端 | `@SeedHuang/ai/react` + `@SeedHuang/ai/contract` | 只拿设置 UI + API client，接入**任何实现了契约的后端**（跑契约测试自证合规） |
+| 前后端合起来 | `@seedhuang/ai_suit_tool` | Fastify 插件挂 `/api/settings/*` 路由 + React 组件直接拼出完整设置页 |
+| 纯后端 | `@seedhuang/ai_suit_tool/core` + `@seedhuang/ai_suit_tool/fastify` | 只拿配置存储 + 模型请求能力，自带配置管理路由，无前端 |
+| 纯前端 | `@seedhuang/ai_suit_tool/react` + `@seedhuang/ai_suit_tool/contract` | 只拿设置 UI + API client，接入**任何实现了契约的后端**（跑契约测试自证合规） |
 
 安全模型统一：**API Key 只存在于服务端**（可选加密存储），浏览器永不接触明文 key。前端包不提供"浏览器直连 AI 厂商"模式——真实厂商 CORS 放不下，且 key 暴露给浏览器是安全倒退。
 
@@ -24,9 +24,9 @@ BFM 中散落着 AI 相关能力：后端 `server/src/llm/` 已是一层相当�
 `ai_suit_tool` 是**一个**可发布 npm 包，用 exports 划分前后端与契约。**不是 monorepo**。
 
 ```jsonc
-// ai_suit_tool/package.json（结构示意，scope 已定：@SeedHuang）
+// ai_suit_tool/package.json（结构示意，scope 已定：@seedhuang）
 {
-  "name": "@SeedHuang/ai",
+  "name": "@seedhuang/ai_suit_tool",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -62,10 +62,10 @@ BFM 中散落着 AI 相关能力：后端 `server/src/llm/` 已是一层相当�
 
 ## 4. 公开接口
 
-### 4.1 `@SeedHuang/ai/core` — 框架无关后端核心
+### 4.1 `@seedhuang/ai_suit_tool/core` — 框架无关后端核心
 
 ```ts
-import { createAiCore } from '@SeedHuang/ai/core';
+import { createAiCore } from '@seedhuang/ai_suit_tool/core';
 
 const ai = createAiCore({
   purposes: [
@@ -83,10 +83,10 @@ const s = ai.readLlmSettings('rules');          // null = 该用途未配置
 await ai.complete({ config: s.config, messages, timeoutMs, abortSignal, thinking });
 ```
 
-### 4.2 `@SeedHuang/ai/fastify` — 后端适配器
+### 4.2 `@seedhuang/ai_suit_tool/fastify` — 后端适配器
 
 ```ts
-import { registerAiSettings } from '@SeedHuang/ai/fastify';
+import { registerAiSettings } from '@seedhuang/ai_suit_tool/fastify';
 await app.register(registerAiSettings, { ai });   // 挂载 /api/settings/* 全套路由
 ```
 
@@ -107,11 +107,11 @@ await app.register(registerAiSettings, { ai });   // 挂载 /api/settings/* 全�
 | PUT | `/api/settings/assignments` | 更新用途分配 |
 | POST | `/api/settings/test-llm` | 连接测试 |
 
-### 4.3 `@SeedHuang/ai/react` — 前端组件
+### 4.3 `@seedhuang/ai_suit_tool/react` — 前端组件
 
 ```tsx
-import { AiSettingsProvider, ProviderCard, EntryCard, PurposeCard } from '@SeedHuang/ai/react';
-import '@SeedHuang/ai/tokens.css';
+import { AiSettingsProvider, ProviderCard, EntryCard, PurposeCard } from '@seedhuang/ai_suit_tool/react';
+import '@seedhuang/ai_suit_tool/tokens.css';
 
 <AiSettingsProvider baseURL="http://127.0.0.1:3001">
   <ProviderCard />   {/* 凭证：key 只存服务端、永不回明文 */}
@@ -124,15 +124,15 @@ import '@SeedHuang/ai/tokens.css';
 - `PurposeCard` 只做模型分配——BFM 里 AssignCard 混着的轮询间隔/批次大小是**本项目业务**，不进包
 - 样式用默认 CSS 变量（迁自 tokens.css），可覆盖
 
-### 4.4 `@SeedHuang/ai/contract` — 契约层（零依赖）
+### 4.4 `@seedhuang/ai_suit_tool/contract` — 契约层（零依赖）
 
 - 类型：`ModelMeta` / `ProviderView` / `EntryView` / `PurposeDef` / `AssignmentsView`（迁自 web/src/types.ts）
 - 端点契约：路由表 + 请求/响应类型（迁自 llmApi + 服务端形状）
-- 契约测试 runner：`runContractTests({ baseUrl })` 产出标准 vitest 用例，入口是 `@SeedHuang/ai/contract-tests`（见下）
+- 契约测试 runner：`runContractTests({ baseUrl })` 产出标准 vitest 用例，入口是 `@seedhuang/ai_suit_tool/contract-tests`（见下）
 
 > 2026-09-23 实施后回填（本节原稿与此两处不符，以实现为准）：
 > - 类型 `LlmPurpose` 泛化成了 `PurposeDef`（即 `{ key, label }`）：用途是业务语义，由消费方在 `createAiCore({ purposes })` 里声明，包不内置固定联合类型。`runContractTests` 拿到的 assignments 键集合就是消费方声明的那组 purpose。
-> - runner 从 `./contract` 拆到 `@SeedHuang/ai/contract-tests`：生产入口 `./contract` 只有 types + endpoints（零运行时依赖，**不引 vitest**），`runContractTests` 是唯一 import vitest 的模块，所以单独一条子路径。消费方在自己的 vitest 文件顶层调 `runContractTests({ baseUrl })` 即注册全部契约用例。
+> - runner 从 `./contract` 拆到 `@seedhuang/ai_suit_tool/contract-tests`：生产入口 `./contract` 只有 types + endpoints（零运行时依赖，**不引 vitest**），`runContractTests` 是唯一 import vitest 的模块，所以单独一条子路径。消费方在自己的 vitest 文件顶层调 `runContractTests({ baseUrl })` 即注册全部契约用例。
 
 ## 5. 注入点（为什么这样切）
 
@@ -181,7 +181,7 @@ import '@SeedHuang/ai/tokens.css';
 
 > 硬约束：被迁移的代码从 BFM 删干净，死导出 / 死 import / 死样式 / 死依赖 / 死测试一个不留。迁移不是"复制过去"而是"搬走"——包里的每一行都必须在 BFM 里找到对应的删除。
 
-- `server/package.json` / `web/package.json` 加 `@SeedHuang/ai` 依赖（npm link）
+- `server/package.json` / `web/package.json` 加 `@seedhuang/ai_suit_tool` 依赖（npm link）
 - **BFM 删除清单**：
   - `server/src/llm/` 整目录删除（config / provider / registry / models / ollama / context / 全部 `*.test.ts`）
   - `server/src/curator/routes.ts` 中迁移走的 settings 路由段删除；`buildFolderProfiles` 若仅此处用则一并删（先查引用再删）
@@ -208,7 +208,7 @@ import '@SeedHuang/ai/tokens.css';
 
 ```jsonc
 // bilibili_favorite_manager/web/package.json 与 server/package.json
-"@SeedHuang/ai": "file:../../ai_suit_tool"
+"@seedhuang/ai_suit_tool": "file:../../ai_suit_tool"
 ```
 
 ```bash
@@ -227,7 +227,7 @@ install-links=true
 ```bash
 cd D:\Seed\ai_suit_tool && npm run build      # exports 指向 dist，必须先构建
 cd D:\Seed\bilibili_favorite_manager
-Remove-Item -Recurse -Force node_modules\@SeedHuang\ai
+Remove-Item -Recurse -Force node_modules\@seedhuang\ai_suit_tool
 npm install                                   # 成功判据：打印 "added 1 package"
 ```
 
@@ -237,7 +237,7 @@ npm install                                   # 成功判据：打印 "added 1 p
 
 ```bash
 npm publish   # 或私有 registry
-cd bilibili_favorite_manager && npm install @SeedHuang/ai@^1.0.0
+cd bilibili_favorite_manager && npm install @seedhuang/ai_suit_tool@^1.0.0
 ```
 
 发布后即可删除根 `.npmrc`（它是开发期桥接，只为 file: 依赖服务）。
@@ -252,6 +252,6 @@ cd bilibili_favorite_manager && npm install @SeedHuang/ai@^1.0.0
 
 ## 10. 待定项
 
-- ✅ 已定：npm 包 scope 名为 `@SeedHuang`（包名 `@SeedHuang/ai`）
+- ✅ 已定：npm 包 scope 名为 `@seedhuang`（包名 `@seedhuang/ai_suit_tool`）
 - 发布目标：公开 npm 还是私有 registry（GitHub Packages / 私有源）
 - 包版本起始号

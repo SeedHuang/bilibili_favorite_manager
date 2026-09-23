@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 把 BFM 的 AI 配置 + 请求能力（`server/src/llm/` + 前端三卡）抽成一个可发布 npm 包 `@SeedHuang/ai`，落在独立仓库 `D:\Seed\ai_suit_tool`，BFM 切到 npm link 消费，原代码彻底删除不留死代码。
+**Goal:** 把 BFM 的 AI 配置 + 请求能力（`server/src/llm/` + 前端三卡）抽成一个可发布 npm 包 `@seedhuang/ai_suit_tool`，落在独立仓库 `D:\Seed\ai_suit_tool`，BFM 切到 npm link 消费，原代码彻底删除不留死代码。
 
 **Architecture:** 单包 + exports 子路径（`.`, `./core`, `./fastify`, `./react`, `./contract`, `./tokens.css`）。核心 `createAiCore` 框架无关，storage/secrets/purposes/logger/fetch 全注入；Fastify 适配器挂 `/api/settings/*` 12 条路由；React 组件只做 AI 配置三卡（轮询/批次留 BFM）。迁移按"包侧建好 → BFM 切换 → 删除"三段推进，每段目录级 tsc 验证，不允许先拆坏再补。
 
@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **包名 `@SeedHuang/ai` 为占位**（spec §10 待定项）。若用户改 scope，全局替换字符串后执行，其余不动。
+- **包名 `@seedhuang/ai_suit_tool` 为占位**（spec §10 待定项）。若用户改 scope，全局替换字符串后执行，其余不动。
 - 新仓库 `D:\Seed\ai_suit_tool` 当前为空。包内文件全部新建；**BFM 侧改动遵循项目既有约定：不自动 `git add`/`git commit`**，验证靠 `tsc` + `vitest`。ai_suit_tool 自己的 git 提交照计划执行。
 - Node 22.12、TypeScript ^5.9.3、ESM（类型一律 `import type`）；`strict` + `noUncheckedIndexedAccess`。
 - 依赖方向（包内）：`contract ← core ← fastify / react`。`core` 不许 import `fastify`/`react`；`fastify`/`react` 只依赖 `core`/`contract` 的公开导出。
@@ -75,7 +75,7 @@ D:\Seed\ai_suit_tool\
 
 ```jsonc
 {
-  "name": "@SeedHuang/ai",
+  "name": "@seedhuang/ai_suit_tool",
   "version": "0.1.0",
   "type": "module",
   "description": "AI 配置与请求公共套件：三层模型配置 + 唯一请求出口 + 设置 UI，前后端可合可拆",
@@ -211,7 +211,7 @@ cd D:\Seed\ai_suit_tool
 npm link
 ```
 
-Expected: 输出 `up to date / linked @SeedHuang/ai`。
+Expected: 输出 `up to date / linked @seedhuang/ai_suit_tool`。
 
 - [ ] **Step 5: Commit**
 
@@ -1397,7 +1397,7 @@ git commit -m "feat(fastify): registerAiSettings 挂载 /api/settings/* 契约�
 - Create: `D:\Seed\ai_suit_tool\src\react\Card.tsx`、`Field.tsx`、`ModelPicker.tsx`、`ProviderCard.tsx`、`EntryCard.tsx`、`PurposeCard.tsx`
 - Create: `D:\Seed\ai_suit_tool\src\react\index.tsx`
 - Create: `D:\Seed\ai_suit_tool\src\react\tokens.css`
-- Modify: `D:\Seed\ai_suit_tool\src\index.ts`（补 react 导出说明——react 侧走 `@SeedHuang/ai/react` 子路径，聚合入口不含 react 组件避免纯后端拖 react 类型）
+- Modify: `D:\Seed\ai_suit_tool\src\index.ts`（补 react 导出说明——react 侧走 `@seedhuang/ai_suit_tool/react` 子路径，聚合入口不含 react 组件避免纯后端拖 react 类型）
 
 **Interfaces:**
 - Consumes: Task 2 契约类型、antd/react（peerDeps）
@@ -1576,11 +1576,11 @@ git commit -m "feat(react): AiSettingsProvider + 凭证/条目/用途三卡 + cl
 ### Task 7: BFM 后端切换（删 llm/ + 用包）
 
 **Files:**
-- Modify: `d:\Seed\bilibili_favorite_manager\server\package.json`（加 `@SeedHuang/ai`，删 `ai`/`@ai-sdk/deepseek`/`@ai-sdk/openai-compatible`/`@primno/dpapi`——先查引用）
+- Modify: `d:\Seed\bilibili_favorite_manager\server\package.json`（加 `@seedhuang/ai_suit_tool`，删 `ai`/`@ai-sdk/deepseek`/`@ai-sdk/openai-compatible`/`@primno/dpapi`——先查引用）
 - Modify: `d:\Seed\bilibili_favorite_manager\server\src\http\index.ts`（createAiCore 实例 + registerAiSettings + 传 ai 进 curator 相关 deps）
 - Modify: `d:\Seed\bilibili_favorite_manager\server\src\curator\routes.ts`（删 settings 路由段 + 相关 import）
 - Modify: `d:\Seed\bilibili_favorite_manager\server\src\curator\proposal.ts`、`proposalRoutes.ts`、`reviewRoutes.ts`、`tagRoutes.ts`、`tagger.ts`、`tagcheck.ts`（`readLlmSettings(db, p)` → `ai.readLlmSettings(p)`；`complete(...)` → `ai.complete(...)`）
-- Modify: `d:\Seed\bilibili_favorite_manager\server\src\logger\index.ts`（redact/redactDeep/registerSecret 改从 `@SeedHuang/ai/core` import）
+- Modify: `d:\Seed\bilibili_favorite_manager\server\src\logger\index.ts`（redact/redactDeep/registerSecret 改从 `@seedhuang/ai_suit_tool/core` import）
 - Delete: `d:\Seed\bilibili_favorite_manager\server\src\llm\`（整目录）
 - Modify: 6 个 `*.test.ts`（routes / ruleRoutes / tagger / tagRoutes / reviewRoutes / proposalRoutes / tagcheck）的 import 与调用
 - Delete: `d:\Seed\bilibili_favorite_manager\server\src\llm\*.test.ts`（随目录删）
@@ -1591,7 +1591,7 @@ git commit -m "feat(react): AiSettingsProvider + 凭证/条目/用途三卡 + cl
 
 ```ts
 // server/src/ai.ts —— BFM 的 AI 套件实例（单例）
-import { createAiCore } from '@SeedHuang/ai/core';
+import { createAiCore } from '@seedhuang/ai_suit_tool/core';
 import type Database from 'better-sqlite3';
 import { getSetting, setSetting, deleteSetting } from './db/repo/state.js';
 import { encryptSecret, decryptSecret } from './security/dpapi.js';
@@ -1628,12 +1628,12 @@ export type AiCore = ReturnType<typeof makeAi>;
 
 **HttpDeps 增加 `ai`**：`createServer(deps)` 里 `registerCuratorRoutes(app, { db, log, ai, ollamaFetchImpl })`；`registerAiSettings` 由 http/index.ts 直接注册（settings 路由不再属于 curator）。
 
-**curator 业务模块改造**：`proposal.ts` / `tagRoutes.ts` 等的 deps 加 `ai: AiCore`，调用 `readLlmSettings(db, 'proposals')` → `ai.readLlmSettings('proposals')`，`complete({...})` → `ai.complete({...})`，`getModelMeta(...)` → 从 `ai` 或 `@SeedHuang/ai/core` import。逐个文件在同一次 SearchReplace 里改 import + 调用。
+**curator 业务模块改造**：`proposal.ts` / `tagRoutes.ts` 等的 deps 加 `ai: AiCore`，调用 `readLlmSettings(db, 'proposals')` → `ai.readLlmSettings('proposals')`，`complete({...})` → `ai.complete({...})`，`getModelMeta(...)` → 从 `ai` 或 `@seedhuang/ai_suit_tool/core` import。逐个文件在同一次 SearchReplace 里改 import + 调用。
 
 - [ ] **Step 1: 建 ai.ts + 改 http/index.ts**
 
 新建 `server/src/ai.ts`（见上）。改 `server/src/http/index.ts`：
-- import 加 `import { makeAi } from '../ai.js';` 与 `import { registerAiSettings } from '@SeedHuang/ai/fastify';`
+- import 加 `import { makeAi } from '../ai.js';` 与 `import { registerAiSettings } from '@seedhuang/ai_suit_tool/fastify';`
 - `HttpDeps` 不需要改（ai 由 makeAi 从 db/log 构造，或加到 deps——选加到 deps 以便测试注入）。**二选一，执行时统一**：本计划选 `HttpDeps` 加 `ai?: AiCore`，`createServer` 内 `const ai = deps.ai ?? makeAi(db, log)`。
 - 注册：`registerAiSettings(app, { ai, logger: aiLogger, fetchImpl: deps.ollamaFetchImpl })`
 - `registerCuratorRoutes(app, { db, log, ai, ...(deps.ollamaFetchImpl ? { ollamaFetchImpl: deps.ollamaFetchImpl } : {}) })`
@@ -1648,11 +1648,11 @@ export type AiCore = ReturnType<typeof makeAi>;
 - import 行：`import { readLlmSettings } from '../llm/config.js'` → `import type { AiCore } from '../ai.js'`（或从现有 deps 类型引入）
 - 函数签名/解构 deps 加 `ai`
 - 调用 `readLlmSettings(db, 'rules')` → `ai.readLlmSettings('rules')`；`complete({...})` → `ai.complete({...})`
-- 若有 `getModelMeta` 直接调用 → 用 `ai` 或从 `@SeedHuang/ai/core` import
+- 若有 `getModelMeta` 直接调用 → 用 `ai` 或从 `@seedhuang/ai_suit_tool/core` import
 
 - [ ] **Step 4: logger 换 import**
 
-`server/src/logger/index.ts`：`import { redact, redactDeep, registerSecret } from './redact.js'` → `import { redact, redactDeep, registerSecret } from '@SeedHuang/ai/core'`。删除 `server/src/logger/redact.ts` 与 `redact.test.ts`（随 Task 8 前端一起确认无引用后删）。
+`server/src/logger/index.ts`：`import { redact, redactDeep, registerSecret } from './redact.js'` → `import { redact, redactDeep, registerSecret } from '@seedhuang/ai_suit_tool/core'`。删除 `server/src/logger/redact.ts` 与 `redact.test.ts`（随 Task 8 前端一起确认无引用后删）。
 
 > 先 grep `redact` 在 BFM 的引用：`logger/index.ts` 消费 redact/redactDeep；`provider.ts`（已迁）消费 registerSecret；`redact.test.ts` 自身。确认 bilibili client 或 security 是否也引用，若有则一并改。
 
@@ -1663,7 +1663,7 @@ cd d:\Seed\bilibili_favorite_manager
 Remove-Item -Recurse -Force server\src\llm
 ```
 
-`server/package.json`：加 `"@SeedHuang/ai": "file:../ai_suit_tool"` 到 dependencies；删 `ai` / `@ai-sdk/deepseek` / `@ai-sdk/openai-compatible` / `@primno/dpapi`（先 grep 确认 BFM 无引用：`@primno/dpapi` 只剩 `security/dpapi.ts` 用——**保留 dpapi.ts 但依赖进 ai.ts 的 secrets 适配**，所以 `@primno/dpapi` 仍留在 BFM 的 dependencies；`ai`/`@ai-sdk/*` 只被 llm/ 用，删）。
+`server/package.json`：加 `"@seedhuang/ai_suit_tool": "file:../ai_suit_tool"` 到 dependencies；删 `ai` / `@ai-sdk/deepseek` / `@ai-sdk/openai-compatible` / `@primno/dpapi`（先 grep 确认 BFM 无引用：`@primno/dpapi` 只剩 `security/dpapi.ts` 用——**保留 dpapi.ts 但依赖进 ai.ts 的 secrets 适配**，所以 `@primno/dpapi` 仍留在 BFM 的 dependencies；`ai`/`@ai-sdk/*` 只被 llm/ 用，删）。
 
 ```bash
 cd d:\Seed\bilibili_favorite_manager\server
@@ -1673,7 +1673,7 @@ npm install
 - [ ] **Step 6: 测试文件改造**
 
 `routes.test.ts` / `ruleRoutes.test.ts` / `tagger.test.ts` / `tagRoutes.test.ts` / `reviewRoutes.test.ts` / `proposalRoutes.test.ts` / `tagcheck.test.ts`：
-- `import { seedLlm, ... } from '../llm/config.js'` → 从 `../ai.js` 或 `@SeedHuang/ai/core`（测试内 `makeAi(db, log)` 或直接 `createAiCore` + memoryStorage）构造实例，传入 `registerXxxRoutes(app, { ..., ai })`
+- `import { seedLlm, ... } from '../llm/config.js'` → 从 `../ai.js` 或 `@seedhuang/ai_suit_tool/core`（测试内 `makeAi(db, log)` 或直接 `createAiCore` + memoryStorage）构造实例，传入 `registerXxxRoutes(app, { ..., ai })`
 - `readLlmSettings(db, 'x')` → `ai.readLlmSettings('x')`
 - 逐个文件修到该目录 tsc 绿 + 对应 vitest 绿
 
@@ -1694,8 +1694,8 @@ Expected: 目标目录零错误；vitest 全绿（settings 路由测试迁到包
 ### Task 8: BFM 前端切换
 
 **Files:**
-- Modify: `d:\Seed\bilibili_favorite_manager\web\package.json`（加 `@SeedHuang/ai` file: 依赖）
-- Modify: `d:\Seed\bilibili_favorite_manager\web\src\pages\index.tsx` 或承载 TaskSettings 的页面（把 AI 三卡换为 `@SeedHuang/ai/react` 组件，polls 部分保留自绘）
+- Modify: `d:\Seed\bilibili_favorite_manager\web\package.json`（加 `@seedhuang/ai_suit_tool` file: 依赖）
+- Modify: `d:\Seed\bilibili_favorite_manager\web\src\pages\index.tsx` 或承载 TaskSettings 的页面（把 AI 三卡换为 `@seedhuang/ai_suit_tool/react` 组件，polls 部分保留自绘）
 - Modify: `d:\Seed\bilibili_favorite_manager\web\src\api.ts`（删 `llmApi`）
 - Modify: `d:\Seed\bilibili_favorite_manager\web\src\types.ts`（删 AI 相关类型：ModelMeta / ProviderView / EntryView / LlmPurpose / AssignmentsView）
 - Modify: `d:\Seed\bilibili_favorite_manager\web\src\components\TaskSettings.tsx`（删迁移走的三卡，保留 poll 配置 UI；或整文件删除，poll UI 迁到消费处）
@@ -1704,13 +1704,13 @@ Expected: 目标目录零错误；vitest 全绿（settings 路由测试迁到包
 
 - [ ] **Step 1: web 依赖 + 消费组件**
 
-`web/package.json` dependencies 加 `"@SeedHuang/ai": "file:../ai_suit_tool"`，`npm install`。
+`web/package.json` dependencies 加 `"@seedhuang/ai_suit_tool": "file:../ai_suit_tool"`，`npm install`。
 
 `TaskSettings.tsx` 改为：AI 三卡由包组件承担，poll 部分（轮询/批次下拉）保留为 BFM 自己的卡片。若整卡结构复杂，方案：`TaskSettings` 渲染 `<AiSettingsProvider baseURL={API_BASE}><ProviderCard/><EntryCard/><PurposeCard/></AiSettingsProvider>` + 下方 BFM 自绘的"轮询/批次"卡（从原 AssignCard 的 poll 部分抽出）。轮询/批次卡需要的 `settingsApi.getPolls/setPoll` 保留在 BFM `api.ts`。
 
 - [ ] **Step 2: 删 web 侧死代码**
 
-`api.ts` 删 `llmApi` 整段（含其 import 的类型）。`types.ts` 删 `ModelMeta` / `ProviderView` / `EntryView` / `LlmPurpose` / `AssignmentsView`。若 `api.ts` 其他段引用这些类型，改从 `@SeedHuang/ai/contract` import 或用 `import type` 引用包的。
+`api.ts` 删 `llmApi` 整段（含其 import 的类型）。`types.ts` 删 `ModelMeta` / `ProviderView` / `EntryView` / `LlmPurpose` / `AssignmentsView`。若 `api.ts` 其他段引用这些类型，改从 `@seedhuang/ai_suit_tool/contract` import 或用 `import type` 引用包的。
 
 `TaskSettings.tsx` 删迁移走的三卡组件（ProviderCard/EntryCard/AssignCard/Card/Field/ModelPicker/ModelsNote/fetchModels/PROVIDERS）与其 import（antd 部分保留、lucide 部分按需）。
 
@@ -1736,7 +1736,7 @@ Expected: 目标目录零错误；vitest 全绿（settings 路由测试迁到包
 ```ts
 // .umirc.ts
 chainWebpack(config) {
-  // npm link 的 @SeedHuang/ai 指向 ../ai_suit_tool 的源码，umi 默认不走 src，
+  // npm link 的 @seedhuang/ai_suit_tool 指向 ../ai_suit_tool 的源码，umi 默认不走 src，
   // 需要让 webpack 编译它（或 alias 到 dist）
   config.module.rule('mjs-jsx').include?.add(path.resolve(__dirname, '..', 'ai_suit_tool', 'src'));
 },
@@ -1776,7 +1776,7 @@ Expected: 只允许出现已知错误清单（app.tsx / 404 / setup/theme.tsx，
 grep -rn "llm/\|llmApi\|readLlmSettings\|PURPOSES\|registerSecret\|listRemoteModels\|listOllamaModels\|getModelMeta\|firstSavedApiKey" --include="*.ts" --include="*.tsx" server/src web/src
 ```
 
-Expected: 零命中（`server/src/ai.ts` 里 `createAiCore` 的 import 除外，它 import 的是 `@SeedHuang/ai/core`）。
+Expected: 零命中（`server/src/ai.ts` 里 `createAiCore` 的 import 除外，它 import 的是 `@seedhuang/ai_suit_tool/core`）。
 
 - [ ] **Step 3: 死依赖 Grep**
 
@@ -1796,7 +1796,7 @@ cd d:\Seed\bilibili_favorite_manager\web && npm run dev      # 设置页
 手工验证：设置页三卡增删改查、测试连接、Ollama 模型发现、轮询/批次卡（含主题为 darkAlgorithm）；纯后端启动无 react 报错。
 
 > **2026-09-22 实施后修正**：本条原写「`npm link` 下改包代码 `build:watch` 即时生效」，已作废 —— 实际用 `file:../../ai_suit_tool` + 根 `.npmrc`(`install-links=true`) 的**复制**安装，改包后必须跑刷新配方（见 spec §8）：
-> `cd ai_suit_tool && npm run build` → `Remove-Item -Recurse -Force node_modules\@SeedHuang\ai` → `npm install`（判据：打印 `added 1 package`）。注意 `npm install` 单独跑**不会**刷新副本，且忘了会**零报错**地用旧 dist。
+> `cd ai_suit_tool && npm run build` → `Remove-Item -Recurse -Force node_modules\@seedhuang\ai_suit_tool` → `npm install`（判据：打印 `added 1 package`）。注意 `npm install` 单独跑**不会**刷新副本，且忘了会**零报错**地用旧 dist。
 
 - [ ] **Step 5: 收尾**
 

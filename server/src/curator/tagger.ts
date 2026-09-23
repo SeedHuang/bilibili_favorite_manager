@@ -13,8 +13,8 @@ import type Database from 'better-sqlite3';
 import type { ItemRow } from '../db/repo/items.js';
 import { markItemTagged } from '../db/repo/tagging.js';
 import { ensureTag, linkItemTag, normalizeTagName, setTagParent } from '../db/repo/tags.js';
-import type { AiCore, ChatMessage, ModelConfig } from '@SeedHuang/ai/core';
-import type { ModelMeta } from '@SeedHuang/ai/contract';
+import type { AiCore, ChatMessage, ModelConfig } from '@seedhuang/ai_suit_tool/core';
+import type { ModelMeta } from '@seedhuang/ai_suit_tool/contract';
 import { parseJsonArray } from './parse.js';
 
 /** kind 受控枚举(spec C3)—— 实测不受控会同义词泛滥("教程/教学/学习") */

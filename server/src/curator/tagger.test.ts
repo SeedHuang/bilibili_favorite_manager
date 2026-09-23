@@ -6,7 +6,7 @@ import {
   ensureTag, itemTagIds, linkItemTag, listTagTree, normalizeTagName, findTag,
 } from '../db/repo/tags.js';
 import type { ItemRow } from '../db/repo/items.js';
-import type { ModelMeta } from '@SeedHuang/ai/contract';
+import type { ModelMeta } from '@seedhuang/ai_suit_tool/contract';
 import type { AiCore } from '../ai.js';
 
 const mocks = vi.hoisted(() => ({ complete: vi.fn() }));

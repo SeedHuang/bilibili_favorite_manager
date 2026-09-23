@@ -14,7 +14,7 @@ import { registerTagRoutes } from '../curator/tagRoutes.js';
 import { registerProposalRoutes } from '../curator/proposalRoutes.js';
 import { registerReviewRoutes } from '../curator/reviewRoutes.js';
 import { registerPollsRoutes } from '../curator/settingsPolls.js';
-import { registerAiSettings } from '@SeedHuang/ai/fastify';
+import { registerAiSettings } from '@seedhuang/ai_suit_tool/fastify';
 import { makeAi, aiLoggerOf, type AiCore } from '../ai.js';
 
 export interface HttpDeps {

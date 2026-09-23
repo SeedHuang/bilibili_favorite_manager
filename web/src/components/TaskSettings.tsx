@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Alert, App as AntApp, Input, Select } from 'antd';
 import { SlidersHorizontal } from 'lucide-react';
-import { AiSettingsProvider, EntryCard, ProviderCard, PurposeCard } from '@SeedHuang/ai/react';
+import { AiSettingsProvider, EntryCard, ProviderCard, PurposeCard } from '@seedhuang/ai_suit_tool/react';
 import { API_BASE, settingsApi } from '../api';
 import type { PollsMap } from '../types';
 
@@ -9,7 +9,7 @@ import type { PollsMap } from '../types';
  * 任务设置:三层(服务商凭证 → 模型条目 → 任务行)。
  * 每个任务行 = AI 模型 + 轮询间隔 + 批次大小(模型只是三件套之一,spec 2026-09-20 §4.3)。
  *
- * 前两层 + 用途分配这一层由 `@SeedHuang/ai/react` 的三卡(`ProviderCard` /
+ * 前两层 + 用途分配这一层由 `@seedhuang/ai_suit_tool/react` 的三卡(`ProviderCard` /
  * `EntryCard` / `PurposeCard`)承担 —— 它们自带数据拉取,靠 `AiSettingsProvider`
  * 的 baseURL 直连后端(`API_BASE`,不走 umi 代理)。
  *

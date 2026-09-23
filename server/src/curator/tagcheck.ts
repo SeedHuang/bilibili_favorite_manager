@@ -17,7 +17,7 @@
  * 而这道闸就在这儿。
  */
 import type Database from 'better-sqlite3';
-import type { AiCore, ChatMessage, ModelConfig } from '@SeedHuang/ai/core';
+import type { AiCore, ChatMessage, ModelConfig } from '@seedhuang/ai_suit_tool/core';
 import type { Logger } from '../logger/index.js';
 import { parseJsonArray } from './parse.js';
 import {

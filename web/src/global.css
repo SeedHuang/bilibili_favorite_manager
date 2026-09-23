@@ -1,9 +1,9 @@
 /* Umi 自动把 src/global.css 注入入口(Umi 约定,无需手动 import)。
    设计令牌在 tokens.css,这里是被移植的设计语言的共用样式。 */
 @import './tokens.css';
-/* @SeedHuang/ai 的默认令牌 —— 必须在下面那份 :root 映射之前,
+/* @seedhuang/ai_suit_tool 的默认令牌 —— 必须在下面那份 :root 映射之前,
    否则套件的默认值会盖掉 BFM 主题(同为 :root,后者胜) */
-@import '@SeedHuang/ai/tokens.css';
+@import '@seedhuang/ai_suit_tool/tokens.css';
 
 /* —— 滚动条:细、暗、悬停才亮 —— */
 * {
@@ -244,7 +244,7 @@
   .bfm-indeterminate::after { animation: none; transform: translateX(0); width: 100%; opacity: 0.5; }
 }
 
-/* —— @SeedHuang/ai 的 --ai-* 映射到 BFM 主题(变量名均在 tokens.css 内真实存在)——
+/* —— @seedhuang/ai_suit_tool 的 --ai-* 映射到 BFM 主题(变量名均在 tokens.css 内真实存在)——
    放在最后:套件自带一份默认值,tokens.css 的 :root 需要盖过它,三卡才跟着 BFM 配色。 */
 :root {
   --ai-accent: var(--accent);

@@ -1,7 +1,7 @@
 /**
  * /api/curator/* 的路由(spec §9.0 流程)。
  *
- * 模型管理(/api/settings/*)已整体迁进 `@SeedHuang/ai` —— 由 http/index.ts 里
+ * 模型管理(/api/settings/*)已整体迁进 `@seedhuang/ai_suit_tool` —— 由 http/index.ts 里
  * 的 `registerAiSettings` 挂载,这里不再有那一段。
  *
  * 沿用 M3 的 registerXxxRoutes(app, deps) 模式:路由只做 HTTP 层,
