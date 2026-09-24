@@ -1,0 +1,26 @@
+# pnpm workspace 配置(npm workspaces → pnpm,2026-09-24 迁移)
+#
+# pnpm 11+ 起,.npmrc 只放 registry/auth;本文件的设置对 pnpm 生效。
+# 注意:pnpm 12 要求本文件的设置键用 camelCase(如 nodeLinker)。
+packages:
+  - server
+  - web
+
+# 严格布局(pnpm 默认):依赖放进 node_modules/.pnpm 虚拟存储,按依赖树软链。
+# 本地包 @seedhuang/ai_suit_tool 走 registry ^0.1.0,与迁移前一致。
+nodeLinker: isolated
+
+# 依赖构建脚本放行。pnpm 12 默认 strictDepBuilds=true,有被忽略的构建脚本会直接报
+# ERR_PNPM_IGNORED_BUILDS 中断安装,必须显式放行。
+allowBuilds:
+  better-sqlite3: true  # 原生模块(prebuild/编译)
+  '@primno/dpapi': true # 原生模块(server 依赖,node-gyp 编译)
+  esbuild: true         # postinstall 下载二进制
+  '@swc/core': true     # postinstall
+  core-js: true
+  core-js-pure: true
+  es5-ext: true
+
+# pnpm 12 默认 minimumReleaseAge=1440(解析的包需发布≥1天),会在慢网络上对每个包
+# 逐个请求校验(几百次 × 几十秒)。本仓库依赖已由 pnpm-lock.yaml 固定,关闭该检查。
+minimumReleaseAge: 0

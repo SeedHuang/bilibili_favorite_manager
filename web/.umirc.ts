@@ -11,7 +11,7 @@ export default defineConfig({
     { path: '/tag', component: 'tag' },
     { path: '/auth', component: 'auth' },
   ],
-  npmClient: 'npm',
+  npmClient: 'pnpm',
   /**
    * 打包器换成 utoopack(Rust,基于 Turbopack) —— 目标是解决 webpack dev 太慢。
    *

@@ -2,21 +2,17 @@
   "name": "bilibili-favorite-manager",
   "private": true,
   "version": "0.0.0",
-  "workspaces": [
-    "server",
-    "web"
-  ],
   "scripts": {
-    "dev": "concurrently -k -n server,web \"npm run dev:server\" \"npm run dev:web\"",
-    "dev:server": "npm run dev -w server",
-    "dev:web": "npm run dev -w web",
+    "dev": "concurrently -k -n server,web \"pnpm run dev:server\" \"pnpm run dev:web\"",
+    "dev:server": "pnpm --filter @bfm/server dev",
+    "dev:web": "pnpm --filter @bfm/web dev",
     "sync:local": "node scripts/sync-local-packages.mjs",
     "sync:local:check": "node scripts/sync-local-packages.mjs --check",
     "sync:local:check:strict": "node scripts/sync-local-packages.mjs --check --strict",
-    "test": "npm run test --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present",
-    "probe:live": "npm run probe:live -w server",
-    "probe:sync": "npm run probe:sync -w server"
+    "test": "pnpm -r run test",
+    "typecheck": "pnpm -r run typecheck",
+    "probe:live": "pnpm --filter @bfm/server probe:live",
+    "probe:sync": "pnpm --filter @bfm/server probe:sync"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"
