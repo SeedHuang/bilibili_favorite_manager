@@ -2,7 +2,10 @@
   "name": "bilibili-favorite-manager",
   "private": true,
   "version": "0.0.0",
-  "workspaces": ["server", "web"],
+  "workspaces": [
+    "server",
+    "web"
+  ],
   "scripts": {
     "dev": "concurrently -k -n server,web \"npm run dev:server\" \"npm run dev:web\"",
     "dev:server": "npm run dev -w server",
@@ -17,5 +20,8 @@
   },
   "devDependencies": {
     "concurrently": "^9.1.0"
+  },
+  "dependencies": {
+    "@seedhuang/ai_suit_tool": "^0.1.0"
   }
 }
