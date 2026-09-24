@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@seedhuang/ai_suit_tool':
-        specifier: ^0.1.0
-        version: 0.1.0(@ant-design/icons@5.6.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(antd@5.29.3(date-fns@2.30.0)(moment@2.31.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(zod@4.6.5)
+        specifier: ^0.1.2
+        version: 0.1.2(@ant-design/icons@5.6.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(antd@5.29.3(date-fns@2.30.0)(moment@2.31.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(zod@4.6.5)
     devDependencies:
       concurrently:
         specifier: ^9.1.0
@@ -22,8 +22,8 @@ importers:
         specifier: ^2.0.1
         version: 2.0.1
       '@seedhuang/ai_suit_tool':
-        specifier: ^0.1.0
-        version: 0.1.0(@ant-design/icons@5.6.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(antd@5.29.3(date-fns@2.30.0)(moment@2.31.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(zod@4.6.5)
+        specifier: ^0.1.2
+        version: 0.1.2(@ant-design/icons@5.6.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(antd@5.29.3(date-fns@2.30.0)(moment@2.31.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(zod@4.6.5)
       better-sqlite3:
         specifier: ^12.11.1
         version: 12.11.1
@@ -53,8 +53,8 @@ importers:
         specifier: ^5.6.1
         version: 5.6.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@seedhuang/ai_suit_tool':
-        specifier: ^0.1.0
-        version: 0.1.0(@ant-design/icons@5.6.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(antd@5.29.3(date-fns@2.30.0)(moment@2.31.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(zod@4.6.5)
+        specifier: ^0.1.2
+        version: 0.1.2(@ant-design/icons@5.6.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(antd@5.29.3(date-fns@2.30.0)(moment@2.31.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(zod@4.6.5)
       '@umijs/max':
         specifier: 4.7.17
         version: 4.7.17(@babel/core@7.29.7(supports-color@8.1.1))(@types/node@22.20.4)(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(debug@4.4.3(supports-color@8.1.1))(dva@2.5.0-beta.2(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(jiti@2.7.0)(lightningcss@1.32.0)(prettier@3.9.9)(rc-field-form@2.7.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(rollup@4.63.4)(sass@1.54.0)(styled-jsx@5.1.7(@babel/core@7.29.7(supports-color@8.1.1))(react@18.3.1))(supports-color@8.1.1)(tsx@4.23.15)(type-fest@0.20.2)(typescript@5.9.3)(webpack@5.111.1(clean-css@5.3.3)(csso@4.2.0)(esbuild@0.28.2)(html-minifier-terser@6.1.0)(lightningcss@1.32.0)(postcss@8.5.28)(svgo@2.8.4))
@@ -1406,8 +1406,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@seedhuang/ai_suit_tool@0.1.0':
-    resolution: {integrity: sha512-tswLT/JTiiEPQaRJBdi3+7R2qA3I45fR0Uv/iMyBXwPjnioKaeiW4s1DErF5U/Mpt4rQ/aZmSj0BV3cS1BsP0Q==}
+  '@seedhuang/ai_suit_tool@0.1.2':
+    resolution: {integrity: sha512-NtugQll4i4fR0UuBwR6szcY2p3+yAFFamPkSgb2MDQV9KfNKJjAIFGvpPkt7+Y+e39RRMPl6BkoLhAjrB+twRg==}
     peerDependencies:
       '@ant-design/icons': '>=5'
       antd: '>=5'
@@ -8509,7 +8509,7 @@ snapshots:
   '@rollup/rollup-win32-x64-msvc@4.63.4':
     optional: true
 
-  '@seedhuang/ai_suit_tool@0.1.0(@ant-design/icons@5.6.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(antd@5.29.3(date-fns@2.30.0)(moment@2.31.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(zod@4.6.5)':
+  '@seedhuang/ai_suit_tool@0.1.2(@ant-design/icons@5.6.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(antd@5.29.3(date-fns@2.30.0)(moment@2.31.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(zod@4.6.5)':
     dependencies:
       '@ai-sdk/deepseek': 3.0.51(zod@4.6.5)
       '@ai-sdk/openai-compatible': 3.0.54(zod@4.6.5)
@@ -8804,7 +8804,7 @@ snapshots:
       '@types/history': 4.7.11
       '@types/react': 18.3.31
       '@types/react-router': 5.1.20
-      redux: 3.7.2
+      redux: 4.2.1
 
   '@types/react-router@5.1.20':
     dependencies:
