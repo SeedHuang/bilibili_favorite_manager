@@ -19,7 +19,7 @@
     "vitest": "^3.2.7"
   },
   "dependencies": {
-    "@seedhuang/ai_suit_tool": "file:../../ai_suit_tool",
+    "@seedhuang/ai_suit_tool": "^0.1.0",
     "@primno/dpapi": "^2.0.1",
     "better-sqlite3": "^12.11.1",
     "fastify": "^5.12.4"

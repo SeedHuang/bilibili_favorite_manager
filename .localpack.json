@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "packages": {
+    "@seedhuang/ai_suit_tool": {
+      "dir": "../ai_suit_tool",
+      "remote": "^0.1.0",
+      "strategy": "file"
+    }
+  },
+  "dev": null
+}
