@@ -6,9 +6,6 @@
     "dev": "concurrently -k -n server,web \"pnpm run dev:server\" \"pnpm run dev:web\"",
     "dev:server": "pnpm --filter @bfm/server dev",
     "dev:web": "pnpm --filter @bfm/web dev",
-    "sync:local": "node scripts/sync-local-packages.mjs",
-    "sync:local:check": "node scripts/sync-local-packages.mjs --check",
-    "sync:local:check:strict": "node scripts/sync-local-packages.mjs --check --strict",
     "test": "pnpm -r run test",
     "typecheck": "pnpm -r run typecheck",
     "probe:live": "pnpm --filter @bfm/server probe:live",
@@ -16,8 +13,5 @@
   },
   "devDependencies": {
     "concurrently": "^9.1.0"
-  },
-  "dependencies": {
-    "@seedhuang/ai_suit_tool": "^0.1.2"
   }
 }
